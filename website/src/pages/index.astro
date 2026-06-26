@@ -1,0 +1,85 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '../layouts/BaseLayout.astro';
+
+const allTopics = await getCollection('topics');
+
+// Build section summary: deduplicate by section
+const sectionMap = new Map<string, { slug: string; title: string; order: number; count: number }>();
+for (const t of allTopics) {
+  const key = t.data.section;
+  if (!sectionMap.has(key)) {
+    sectionMap.set(key, { slug: key, title: t.data.sectionTitle, order: t.data.sectionOrder, count: 0 });
+  }
+  sectionMap.get(key)!.count++;
+}
+const sections = Array.from(sectionMap.values()).sort((a, b) => a.order - b.order);
+
+// Color groups (SDE-1 oriented → SDE-2 oriented)
+const cardColor = (order: number) => {
+  if (order <= 4)  return 'bg-blue-900/40 border-blue-700/50 hover:border-blue-500';
+  if (order <= 8)  return 'bg-violet-900/40 border-violet-700/50 hover:border-violet-500';
+  if (order <= 12) return 'bg-emerald-900/40 border-emerald-700/50 hover:border-emerald-500';
+  return             'bg-orange-900/40 border-orange-700/50 hover:border-orange-500';
+};
+
+const badgeColor = (order: number) => {
+  if (order <= 4)  return 'bg-blue-900 text-blue-300';
+  if (order <= 8)  return 'bg-violet-900 text-violet-300';
+  if (order <= 12) return 'bg-emerald-900 text-emerald-300';
+  return             'bg-orange-900 text-orange-300';
+};
+---
+
+<BaseLayout title="DevOpsIndex">
+  <div class="max-w-6xl mx-auto">
+    <!-- Hero -->
+    <div class="mb-8">
+      <h1 class="text-3xl font-bold text-slate-100 mb-2">DevOpsIndex</h1>
+      <p class="text-slate-400">
+        {allTopics.length} reference pages across {sections.length} sections — Kubernetes, Linux, Docker, AWS, GCP, CI/CD, SRE and more.
+      </p>
+    </div>
+
+    <!-- Search -->
+    <div class="mb-8">
+      <input
+        type="text"
+        id="section-search"
+        placeholder="Search sections..."
+        class="w-full max-w-md bg-slate-800 border border-slate-700 rounded-lg px-4 py-2 text-slate-200 placeholder-slate-500 focus:outline-none focus:border-blue-500"
+        oninput="filterSections(this.value)"
+      />
+    </div>
+
+    <!-- Section grid -->
+    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4" id="section-grid">
+      {sections.map(s => (
+        <a
+          href={`/topic/${s.slug}`}
+          class={`section-card block rounded-xl border p-4 transition-all duration-200 ${cardColor(s.order)}`}
+          data-title={s.title.toLowerCase()}
+        >
+          <div class="flex items-start justify-between gap-2">
+            <h2 class="font-semibold text-slate-100 text-sm">{s.title}</h2>
+            <span class={`shrink-0 text-xs px-2 py-0.5 rounded font-medium ${badgeColor(s.order)}`}>
+              #{s.order}
+            </span>
+          </div>
+          <p class="text-xs text-slate-500 mt-2">{s.count} page{s.count !== 1 ? 's' : ''}</p>
+        </a>
+      ))}
+    </div>
+  </div>
+
+  <script>
+    function filterSections(query: string) {
+      const q = query.toLowerCase().trim();
+      document.querySelectorAll<HTMLElement>('.section-card').forEach(card => {
+        const title = card.dataset.title || '';
+        card.style.display = !q || title.includes(q) ? '' : 'none';
+      });
+    }
+    (window as any).filterSections = filterSections;
+  </script>
+</BaseLayout>

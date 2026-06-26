@@ -1,0 +1,152 @@
+---
+import { getCollection } from 'astro:content';
+import '../styles/global.css';
+
+interface Props {
+  title: string;
+  description?: string;
+}
+
+const { title, description = 'DevOps reference — Kubernetes, Linux, Docker, AWS, GCP, CI/CD and more' } = Astro.props;
+
+const allTopics = await getCollection('topics');
+// Build sidebar: sections ordered 1-16, each with their pages
+const sectionMap = new Map<string, { sectionTitle: string; sectionOrder: number; pages: typeof allTopics }>();
+for (const t of allTopics) {
+  const key = t.data.section;
+  if (!sectionMap.has(key)) {
+    sectionMap.set(key, { sectionTitle: t.data.sectionTitle, sectionOrder: t.data.sectionOrder, pages: [] });
+  }
+  sectionMap.get(key)!.pages.push(t);
+}
+const sections = Array.from(sectionMap.values()).sort((a, b) => a.sectionOrder - b.sectionOrder);
+// Sort pages within each section by read order
+for (const s of sections) {
+  s.pages.sort((a, b) => a.data.pageOrder - b.data.pageOrder);
+}
+
+const currentPath = Astro.url.pathname;
+---
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content={description} />
+  <title>{title} | DevOpsIndex</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+</head>
+<body class="min-h-screen flex flex-col bg-slate-900 text-slate-200">
+  <header class="border-b border-slate-800 px-6 py-4 flex items-center gap-4">
+    <a href="/" class="text-xl font-bold text-blue-400 hover:text-blue-300">DevOpsIndex</a>
+    <span class="text-slate-500 text-sm hidden sm:block">Kubernetes · Linux · Docker · AWS · GCP · CI/CD</span>
+    <button id="mobile-menu-btn" class="ml-auto lg:hidden text-slate-400 hover:text-slate-200">
+      <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+      </svg>
+    </button>
+  </header>
+
+  <div class="flex flex-1 overflow-hidden">
+    <!-- Sidebar -->
+    <nav id="sidebar" class="hidden lg:flex flex-col w-64 border-r border-slate-800 overflow-y-auto py-4 shrink-0">
+      {sections.map(section => (
+        <details class="group" open={currentPath.startsWith(`/topic/${section.pages[0]?.data.section}`)}>
+          <summary class="flex items-center gap-2 px-4 py-1.5 text-xs font-semibold text-slate-500 uppercase tracking-wider cursor-pointer hover:text-slate-300 select-none list-none">
+            <span class="w-5 h-5 rounded bg-slate-800 text-slate-400 text-xs flex items-center justify-center shrink-0">{section.sectionOrder}</span>
+            <a href={`/topic/${section.pages[0]?.data.section}`} class="hover:text-blue-400" onclick="event.stopPropagation()">
+              {section.sectionTitle}
+            </a>
+          </summary>
+          {section.pages.filter(page => page.data.pageSlug !== page.data.section).map(page => {
+            const href = `/topic/${page.data.pageSlug}`;
+            const isActive = currentPath === href || currentPath === href + '/';
+            return (
+              <a
+                href={href}
+                class={`block pl-10 pr-4 py-1 text-sm hover:bg-slate-800 hover:text-blue-400 transition-colors ${isActive ? 'bg-slate-800 text-blue-400 border-l-2 border-blue-400' : 'text-slate-400'}`}
+              >
+                {page.data.title}
+              </a>
+            );
+          })}
+        </details>
+      ))}
+    </nav>
+
+    <!-- Main content -->
+    <main class="flex-1 overflow-y-auto p-6">
+      <slot />
+    </main>
+  </div>
+
+  <script>
+    // Mobile sidebar toggle
+    document.getElementById('mobile-menu-btn')?.addEventListener('click', () => {
+      const sidebar = document.getElementById('sidebar');
+      if (sidebar) {
+        sidebar.classList.toggle('hidden');
+        sidebar.classList.toggle('flex');
+        sidebar.classList.toggle('fixed');
+        sidebar.classList.toggle('inset-y-0');
+        sidebar.classList.toggle('left-0');
+        sidebar.classList.toggle('z-50');
+        sidebar.classList.toggle('bg-slate-900');
+        sidebar.classList.toggle('pt-16');
+      }
+    });
+
+    // Mermaid rendering
+    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+    mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
+
+    function renderMermaid() {
+      document.querySelectorAll('pre > code.language-mermaid').forEach((el, i) => {
+        const pre = el.parentElement;
+        if (!pre) return;
+        const src = el.textContent || '';
+        const div = document.createElement('div');
+        div.className = 'mermaid my-6';
+        div.id = `mermaid-${Date.now()}-${i}`;
+        div.textContent = src;
+        pre.replaceWith(div);
+      });
+      mermaid.run();
+    }
+
+    // Copy button injection
+    function addCopyButtons() {
+      document.querySelectorAll('pre').forEach(pre => {
+        const code = pre.querySelector('code');
+        if (!code) return;
+        const btn = document.createElement('button');
+        btn.className = 'copy-btn';
+        btn.textContent = 'Copy';
+        btn.addEventListener('click', () => {
+          navigator.clipboard.writeText(code.textContent || '').then(() => {
+            btn.textContent = 'Copied!';
+            btn.style.color = '#86efac';
+            setTimeout(() => {
+              btn.textContent = 'Copy';
+              btn.style.color = '';
+            }, 1500);
+          });
+        });
+        pre.appendChild(btn);
+      });
+    }
+
+    function init() {
+      renderMermaid();
+      addCopyButtons();
+    }
+
+    if (document.readyState === 'loading') {
+      document.addEventListener('DOMContentLoaded', init);
+    } else {
+      init();
+    }
+  </script>
+</body>
+</html>

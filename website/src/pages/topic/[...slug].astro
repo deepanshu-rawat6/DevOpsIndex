@@ -1,0 +1,82 @@
+---
+import { getCollection } from 'astro:content';
+import BaseLayout from '../../layouts/BaseLayout.astro';
+import fs from 'fs';
+import path from 'path';
+import { renderMd } from '../../lib/renderMd';
+
+export async function getStaticPaths() {
+  const allTopics = await getCollection('topics');
+  // Exclude single-segment slugs (e.g., "kubernetes") — handled by [section].astro
+  return allTopics
+    .filter(t => t.data.pageSlug.includes('/'))
+    .map(t => ({
+      params: { slug: t.data.pageSlug },
+      props: { topic: t.data },
+    }));
+}
+
+const { topic } = Astro.props;
+
+const mdPath = path.resolve('src/data/topics', topic.filePath);
+const mdRaw = fs.existsSync(mdPath) ? fs.readFileSync(mdPath, 'utf8') : '';
+
+// subpath = directory within section (e.g. "jenkins" for cicd/jenkins/README.md)
+const fileDir = path.dirname(topic.filePath).replace(/\\/g, '/');
+const subpath = fileDir.includes('/') ? fileDir.split('/').slice(1).join('/') : '';
+
+const html = await renderMd(mdRaw, topic.section, subpath);
+
+// Prev/next within same section
+const allTopics = await getCollection('topics');
+const sectionPages = allTopics
+  .filter(t => t.data.section === topic.section)
+  .sort((a, b) => a.data.pageOrder - b.data.pageOrder);
+
+const idx = sectionPages.findIndex(t => t.data.pageSlug === topic.pageSlug);
+const prev = idx > 0 ? sectionPages[idx - 1].data : null;
+const next = idx < sectionPages.length - 1 ? sectionPages[idx + 1].data : null;
+
+const pageHref = (t: { pageSlug: string; section: string }) =>
+  t.pageSlug === t.section ? `/topic/${t.section}` : `/topic/${t.pageSlug}`;
+---
+
+<BaseLayout title={topic.title}>
+  <div class="max-w-4xl mx-auto">
+    <!-- Breadcrumb -->
+    <nav class="text-sm text-slate-500 mb-6">
+      <a href="/" class="hover:text-blue-400">Home</a>
+      <span class="mx-2">›</span>
+      <a href={`/topic/${topic.section}`} class="hover:text-blue-400">{topic.sectionTitle}</a>
+      {topic.pageSlug !== topic.section && (
+        <>
+          <span class="mx-2">›</span>
+          <span class="text-slate-300">{topic.title}</span>
+        </>
+      )}
+    </nav>
+
+    <!-- Content -->
+    <div class="prose max-w-none">
+      <Fragment set:html={html} />
+    </div>
+
+    <!-- Prev / Next -->
+    {(prev || next) && (
+      <div class="flex justify-between mt-12 pt-6 border-t border-slate-800 gap-4">
+        {prev ? (
+          <a href={pageHref(prev)} class="flex-1 text-left px-4 py-3 rounded-lg border border-slate-800 hover:border-slate-600 hover:bg-slate-800 transition-colors">
+            <div class="text-xs text-slate-500 mb-1">← Previous</div>
+            <div class="text-sm text-slate-300">{prev.pageSlug === prev.section ? 'Overview' : prev.title}</div>
+          </a>
+        ) : <div class="flex-1" />}
+        {next && (
+          <a href={pageHref(next)} class="flex-1 text-right px-4 py-3 rounded-lg border border-slate-800 hover:border-slate-600 hover:bg-slate-800 transition-colors">
+            <div class="text-xs text-slate-500 mb-1">Next →</div>
+            <div class="text-sm text-slate-300">{next.pageSlug === next.section ? 'Overview' : next.title}</div>
+          </a>
+        )}
+      </div>
+    )}
+  </div>
+</BaseLayout>
