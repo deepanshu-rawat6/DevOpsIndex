@@ -12,6 +12,9 @@ Deep dives into each database: storage engine internals, WAL, replication, index
 | [redis-internals.md](./redis-internals.md) | Redis | Data structures internals, RDB/AOF persistence, eviction policies, Lua scripting, cluster |
 | [kafka-internals.md](./kafka-internals.md) | Apache Kafka | Log segments, offset management, consumer groups, exactly-once, compaction |
 | [clickhouse-internals.md](./clickhouse-internals.md) | ClickHouse | MergeTree family, columnar storage, compression, materialized views, query execution |
+| [elasticsearch-internals.md](./elasticsearch-internals.md) | Elasticsearch | Inverted index, segments, sharding, replication, mappings, Query DSL, aggregations, ILM, vector search, security |
+| [replication.md](./replication.md) | All DBs | Sync/async/semi-sync, WAL shipping, logical vs physical, per-DB deep dives, Raft/Paxos, cross-region, lag measurement |
+| [caching.md](./caching.md) | Redis / Memcached | Cache tiers, eviction policies, cache-aside/write-through/write-behind, stampede (XFetch), warming, invalidation |
 
 ## Common Concepts Across All Databases
 

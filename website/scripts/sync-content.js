@@ -14,7 +14,7 @@ const SECTIONS = [
   },
   {
     slug: 'networking', title: 'Networking', order: 2,
-    readOrder: ['README', 'osi-model', 'tcp-udp', 'tls-encryption', 'http-versions', 'linux-networking', 'grpc-graphql', 'nslookup-vs-curl'],
+    readOrder: ['README', 'osi-model', 'tcp-udp', 'tls-encryption', 'http-versions', 'linux-networking', 'grpc-graphql', 'load-balancers', 'cdn', 'nslookup-vs-curl'],
   },
   {
     slug: 'docker', title: 'Docker', order: 3,
@@ -30,7 +30,7 @@ const SECTIONS = [
   },
   {
     slug: 'iac', title: 'Infrastructure as Code', order: 6,
-    readOrder: ['README', 'terraform', 'cloudformation'],
+    readOrder: ['README', 'terraform', 'cloudformation', 'ansible', 'ansible/core-concepts', 'ansible/cloud-integration', 'ansible/advanced'],
   },
   {
     slug: 'aws', title: 'AWS', order: 7,
@@ -62,14 +62,18 @@ const SECTIONS = [
   },
   {
     slug: 'databases', title: 'Database Internals', order: 14,
-    readOrder: ['README', 'postgres-internals', 'mysql-internals', 'mongodb-internals', 'redis-internals', 'kafka-internals', 'clickhouse-internals'],
+    readOrder: ['README', 'postgres-internals', 'mysql-internals', 'mongodb-internals', 'redis-internals', 'kafka-internals', 'clickhouse-internals', 'elasticsearch-internals', 'replication', 'caching'],
   },
   {
     slug: 'on-prem-k8s', title: 'Databases on Kubernetes', order: 15,
     readOrder: ['README', 'postgres', 'mysql', 'mongodb', 'redis-cluster', 'kafka', 'clickhouse'],
   },
   {
-    slug: 'sre', title: 'SRE & Debugging', order: 16,
+    slug: 'system-design', title: 'System Design', order: 16,
+    readOrder: ['README', 'scaling', 'cap-pacelc', 'rate-limiting', 'async-patterns', 'api-design', 'distributed-transactions'],
+  },
+  {
+    slug: 'sre', title: 'SRE & Debugging', order: 17,
     readOrder: ['README', 'k8s-debugging', 'k8s-scenarios', 'linux-debugging', 'aws-scenarios', 'cicd-scenarios', 'iac-scenarios', 'sre-concepts', 'self-healing-aiops', 'db-monitoring'],
   },
 ];

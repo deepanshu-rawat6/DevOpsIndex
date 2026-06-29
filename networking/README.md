@@ -15,12 +15,14 @@ Core networking concepts for backend engineers and platform engineers — from p
 ## Read Order
 
 ```
-osi-model.md    → understand the full picture
-tcp-udp.md      → understand the transport layer (TCP state machine, TIME_WAIT)
-tls-encryption.md → understand TLS 1.2 vs 1.3, certificate validation
+osi-model.md      → understand the full picture
+tcp-udp.md        → transport layer (TCP state machine, TIME_WAIT)
+tls-encryption.md → TLS 1.2 vs 1.3, certificate validation
 http-versions.md  → HTTP/2 multiplexing, status codes, headers
 grpc-graphql.md   → modern API protocols built on top
 load-balancers.md → L4/L7, algorithms, AWS ALB/NLB, GCP, nginx, HAProxy
+cdn.md            → edge PoPs, caching, CloudFront/Cloudflare/GCP CDN
 ```
 | [linux-networking.md](./linux-networking.md) | Linux packet RX/TX path, netfilter hooks, conntrack, network namespaces, veth pairs, SO_REUSEPORT, debugging commands |
 | [load-balancers.md](./load-balancers.md) | L4 vs L7, algorithms, health checks, sticky sessions, TLS termination, AWS ALB/NLB, GCP GLB, nginx, HAProxy, common issues |
+| [cdn.md](./cdn.md) | CDN internals, edge PoPs, cache hierarchy, Cache-Control headers, CloudFront, Cloudflare, GCP CDN, WAF, debugging |
