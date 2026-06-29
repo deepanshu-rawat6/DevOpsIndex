@@ -14,7 +14,7 @@ const SECTIONS = [
   },
   {
     slug: 'networking', title: 'Networking', order: 2,
-    readOrder: ['README', 'osi-model', 'tcp-udp', 'tls-encryption', 'http-versions', 'linux-networking', 'grpc-graphql'],
+    readOrder: ['README', 'osi-model', 'tcp-udp', 'tls-encryption', 'http-versions', 'linux-networking', 'grpc-graphql', 'nslookup-vs-curl'],
   },
   {
     slug: 'docker', title: 'Docker', order: 3,
