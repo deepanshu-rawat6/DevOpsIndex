@@ -63,8 +63,10 @@ Kubernetes, Linux, Docker, AWS, GCP, CI/CD, IaC, Monitoring, Git, and SRE — or
 | [networking/http-versions.md](./networking/http-versions.md) | HTTP/1.1 vs HTTP/2 vs HTTP/3, HOL blocking, binary framing, status codes, methods, caching (ETag), CORS | SDE-1 |
 | [networking/linux-networking.md](./networking/linux-networking.md) | Linux packet RX/TX path, netfilter hooks, conntrack, network namespaces, veth pairs, SO_REUSEPORT | SDE-2 |
 | [networking/grpc-graphql.md](./networking/grpc-graphql.md) | gRPC on HTTP/2, Protobuf encoding, 4 streaming modes, connection flow; GraphQL SDL, N+1 problem, DataLoader | SDE-1/2 |
+| [networking/load-balancers.md](./networking/load-balancers.md) | L4 vs L7, algorithms, health checks, sticky sessions, connection draining, AWS ALB/NLB, GCP GLB, nginx, HAProxy | SDE-1/2 |
+| [networking/cdn.md](./networking/cdn.md) | CDN internals, edge PoPs, cache hierarchy, CloudFront vs Cloudflare vs GCP CDN, cache invalidation, TLS at edge | SDE-1/2 |
 
-**Read order:** osi-model → tcp-udp → tls-encryption → http-versions → grpc-graphql
+**Read order:** osi-model → tcp-udp → tls-encryption → http-versions → grpc-graphql → load-balancers → cdn
 
 ---
 
@@ -132,6 +134,10 @@ Kubernetes, Linux, Docker, AWS, GCP, CI/CD, IaC, Monitoring, Git, and SRE — or
 | [iac/README.md](./iac/README.md) | IaC overview, Terraform vs CloudFormation, state, drift | SDE-1 |
 | [iac/terraform/README.md](./iac/terraform/README.md) | HCL, state, modules, workspaces deep-dive, Terragrunt, remote backend (S3+DynamoDB), import, moved block, check block, terraform test framework | SDE-1/2 |
 | [iac/cloudformation/README.md](./iac/cloudformation/README.md) | Templates, stacks, change sets, nested stacks, StackSets, custom resources | SDE-1 |
+| [iac/ansible/README.md](./iac/ansible/README.md) | Architecture, how Ansible works, SSH internals, agentless push model, ansible.cfg | SDE-1 |
+| [iac/ansible/core-concepts.md](./iac/ansible/core-concepts.md) | Inventory, playbooks, modules, tasks, handlers, variables (precedence), facts, Jinja2 templates | SDE-1 |
+| [iac/ansible/cloud-integration.md](./iac/ansible/cloud-integration.md) | AWS SSM (no port 22), GCP OS Login + IAP tunnel, dynamic inventory, cloud modules | SDE-1/2 |
+| [iac/ansible/advanced.md](./iac/ansible/advanced.md) | Roles, collections, Ansible Vault, AWX/Tower, performance (forks/pipelining), Molecule testing | SDE-2 |
 
 ---
 
@@ -248,6 +254,9 @@ Storage engines, WAL, MVCC, replication internals, indexing, and query execution
 | [databases/redis-internals.md](./databases/redis-internals.md) | Data structure encodings, RDB vs AOF, eviction policies, replication, cluster hash slots | SDE-1/2 |
 | [databases/kafka-internals.md](./databases/kafka-internals.md) | Log segments, ISR/HW/LEO, producer acks, consumer group offsets, exactly-once, log compaction | SDE-2 |
 | [databases/clickhouse-internals.md](./databases/clickhouse-internals.md) | MergeTree family, columnar storage, granules, vectorized execution, materialized views | SDE-2 |
+| [databases/elasticsearch-internals.md](./databases/elasticsearch-internals.md) | Inverted index, segments, sharding, replication, mappings, Query DSL, aggregations, ILM, performance | SDE-2 |
+| [databases/replication.md](./databases/replication.md) | Sync/async/semi-sync, WAL shipping, logical vs physical, PostgreSQL/MySQL/MongoDB/Redis/Kafka replication, Raft/Paxos, cross-region | SDE-2 |
+| [databases/caching.md](./databases/caching.md) | Cache tiers, eviction policies, cache-aside/write-through/write-behind, Redis vs Memcached, stampede, warming, consistency | SDE-1/2 |
 
 ---
 
@@ -264,6 +273,21 @@ Running stateful databases on Kubernetes — system design, replication, failove
 | [on-prem-k8s/redis-cluster.md](./on-prem-k8s/redis-cluster.md) | Hash slots, 6-node cluster, failover gossip, RDB vs AOF, backups | SDE-2 |
 | [on-prem-k8s/kafka.md](./on-prem-k8s/kafka.md) | Strimzi operator, ISR, partition leader election, min.insync.replicas, MirrorMaker | SDE-2 |
 | [on-prem-k8s/clickhouse.md](./on-prem-k8s/clickhouse.md) | ClickHouse Operator, sharding, async replication, clickhouse-backup | SDE-2 |
+
+---
+
+## System Design
+
+| File | Topics | Level |
+|------|--------|-------|
+| [system-design/scaling.md](./system-design/scaling.md) | 3-tier architecture, vertical vs horizontal scaling, DB read replicas, sharding strategies, resharding, consistent hashing, celebrity problem (hot key), fan-out patterns, circuit breaker, backpressure | SDE-1/2 |
+| [system-design/cap-pacelc.md](./system-design/cap-pacelc.md) | CAP theorem, CP vs AP systems, consistency models (linearizable→eventual), PACELC, quorum math (W+R>N), vector clocks, tunable consistency | SDE-2 |
+| [system-design/rate-limiting.md](./system-design/rate-limiting.md) | Fixed window, sliding window, token bucket, leaky bucket — Redis implementation, distributed rate limiting, nginx, AWS API GW | SDE-1/2 |
+| [system-design/async-patterns.md](./system-design/async-patterns.md) | Message queues, pub/sub, DLQ, Saga (choreography/orchestration), outbox pattern, CQRS, event sourcing, idempotency, backpressure | SDE-2 |
+| [system-design/api-design.md](./system-design/api-design.md) | REST vs GraphQL vs gRPC, versioning, pagination (cursor/keyset), idempotency keys, API gateway, auth patterns, webhooks, OpenAPI | SDE-1/2 |
+| [system-design/distributed-transactions.md](./system-design/distributed-transactions.md) | Dual-write problem, 2PC, Saga, outbox pattern, CDC/Debezium, distributed locking (Redlock), optimistic concurrency, TCC | SDE-2 |
+
+**Read order:** scaling → cap-pacelc → rate-limiting → async-patterns → api-design → distributed-transactions
 
 ---
 

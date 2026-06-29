@@ -310,3 +310,20 @@ resource "aws_instance" "web" {
 | `prevent_destroy` | Production databases, S3 buckets — protect from accidental destroy |
 | `ignore_changes` | Tags/attrs managed by AWS or external tools |
 | `replace_triggered_by` | Force replacement when a dependency changes but Terraform wouldn't detect it |
+
+---
+
+## Ansible
+
+Ansible handles **configuration management** — what goes _inside_ the infrastructure that Terraform provisions.
+
+| File | Topics | Level |
+|------|--------|-------|
+| [ansible/README.md](./ansible/README.md) | Architecture, how Ansible works, SSH internals, Mermaid diagrams, ansible.cfg | SDE-1 |
+| [ansible/core-concepts.md](./ansible/core-concepts.md) | Inventory, playbooks, modules, tasks, handlers, variables, facts, Jinja2 templates | SDE-1 |
+| [ansible/cloud-integration.md](./ansible/cloud-integration.md) | AWS SSM + SSH, GCP OS Login + IAP, dynamic inventory, cloud modules | SDE-1/2 |
+| [ansible/advanced.md](./ansible/advanced.md) | Roles, collections, Vault, AWX/Tower, performance tuning, Molecule testing | SDE-2 |
+
+**Terraform vs Ansible in one line:** Terraform creates the VM. Ansible configures what's inside it.
+
+**Read order:** ansible/README.md → core-concepts → cloud-integration → advanced

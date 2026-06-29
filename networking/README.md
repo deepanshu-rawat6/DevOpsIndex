@@ -20,5 +20,7 @@ tcp-udp.md      → understand the transport layer (TCP state machine, TIME_WAIT
 tls-encryption.md → understand TLS 1.2 vs 1.3, certificate validation
 http-versions.md  → HTTP/2 multiplexing, status codes, headers
 grpc-graphql.md   → modern API protocols built on top
+load-balancers.md → L4/L7, algorithms, AWS ALB/NLB, GCP, nginx, HAProxy
 ```
 | [linux-networking.md](./linux-networking.md) | Linux packet RX/TX path, netfilter hooks, conntrack, network namespaces, veth pairs, SO_REUSEPORT, debugging commands |
+| [load-balancers.md](./load-balancers.md) | L4 vs L7, algorithms, health checks, sticky sessions, TLS termination, AWS ALB/NLB, GCP GLB, nginx, HAProxy, common issues |
