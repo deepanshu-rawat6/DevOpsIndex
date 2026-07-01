@@ -277,3 +277,166 @@ graph TD
     PA -->|dirty_ratio hit| WB[Writeback stall]
     SW -->|si/so > 0| LAT[Latency spike]
 ```
+
+---
+
+## OOM Killer — Score Tuning and Process Protection
+
+The Linux OOM killer picks a victim using an **oom_score** (0–1000). Higher score = more likely to be killed. The score is calculated from memory usage as a percentage of total RAM, with adjustments.
+
+### Reading and tuning OOM scores
+
+```bash
+# See the current OOM score for a process
+cat /proc/<pid>/oom_score
+# 0 = never killed (init/systemd), 1000 = killed first
+
+# See the OOM score adjustment (tunable by root or the process itself)
+cat /proc/<pid>/oom_score_adj
+# Range: -1000 to +1000
+# -1000 = completely exempt from OOM killing (use for critical daemons)
+# +1000 = first target when OOM occurs
+# 0     = default (no adjustment)
+
+# Protect a critical process (e.g., your monitoring agent)
+echo -1000 > /proc/$(pidof prometheus)/oom_score_adj
+
+# Make a low-priority process the first OOM target
+echo 1000 > /proc/$(pidof batch-job)/oom_score_adj
+
+# Persist across restarts (systemd unit file)
+# [Service]
+# OOMScoreAdjust=-1000
+```
+
+**Kubernetes and oom_score_adj:**
+```
+QoS class         oom_score_adj set by kubelet
+Guaranteed        -997   (protected, killed last)
+Burstable         2 to 999  (proportional to memory usage vs request)
+BestEffort        1000   (killed first)
+```
+
+The kubelet sets `oom_score_adj` automatically based on QoS class. This is why Guaranteed pods survive node memory pressure while BestEffort pods are the first to go.
+
+### Memory pressure debugging with PSI
+
+Pressure Stall Information (PSI) gives a percentage of time tasks were stalled waiting for memory. Available in kernels 4.20+ and cgroup v2.
+
+```bash
+# System-wide memory pressure (requires CONFIG_PSI=y)
+cat /proc/pressure/memory
+# some avg10=12.50 avg60=5.20 avg300=2.10 total=8732101
+# full avg10=0.50  avg60=0.20 avg300=0.10 total=1231456
+
+# "some" = at least one task stalled (memory unavailable for at least one process)
+# "full" = ALL tasks stalled (all processes waiting for memory simultaneously)
+# avg10/60/300 = percentage over last 10s / 60s / 300s
+
+# Per-cgroup PSI (for specific pods/containers)
+cat /sys/fs/cgroup/kubepods/burstable/pod<uid>/memory.pressure
+# Same format — shows pressure for that specific cgroup
+
+# A value above 20% on avg60 = significant memory contention
+# A value above 5% on "full" = severe pressure, consider adding RAM
+
+# Monitor PSI with a simple threshold alert (bash)
+while true; do
+  psi=$(awk '/some/{print $2}' /proc/pressure/memory | cut -d= -f2)
+  if (( $(echo "$psi > 20" | bc -l) )); then
+    echo "ALERT: memory pressure avg10=$psi%"
+  fi
+  sleep 10
+done
+```
+
+### Swap behavior
+
+```bash
+# Check current swap usage
+free -h
+swapon --show
+
+# vm.swappiness controls tendency to swap (0-200, default 60)
+# 0  = avoid swapping until absolutely necessary (memory filled)
+# 60 = balanced (kernel's default)
+# 100 = swap aggressively to keep file cache warm
+# 200 = (kernel 5.8+) swap memory pages even if RAM available (for memory pressure early-warning)
+
+# Check current value
+cat /proc/sys/vm/swappiness
+
+# Tune for a latency-sensitive server (prefer keeping process pages in RAM)
+sysctl -w vm.swappiness=10
+echo "vm.swappiness=10" >> /etc/sysctl.d/99-memory.conf
+
+# Tune for a desktop or batch workload (aggressive swap)
+sysctl -w vm.swappiness=80
+```
+
+**zswap — compressed swap in RAM (best of both worlds):**
+```bash
+# zswap compresses evicted pages and stores them in a RAM pool
+# before writing to disk. Reduces I/O, improves swap performance.
+# Enable:
+echo 1 > /sys/module/zswap/parameters/enabled
+echo lz4 > /sys/module/zswap/parameters/compressor
+echo 20 > /sys/module/zswap/parameters/max_pool_percent  # max 20% of RAM
+
+# Check zswap stats
+cat /sys/kernel/debug/zswap/*
+```
+
+### Memory pressure debugging workflow
+
+```bash
+# 1. Check if OOM kills are happening
+dmesg -T | grep -i "oom\|killed process\|out of memory"
+# Output: "Out of memory: Kill process 12345 (java) score 891"
+# "Killed process 12345 (java) total-vm:2097152kB, anon-rss:1048576kB"
+
+# 2. Identify what's consuming memory
+ps aux --sort=-%mem | head -20
+cat /proc/meminfo | grep -E "MemTotal|MemFree|MemAvailable|Cached|Buffers|SwapTotal|SwapFree"
+# MemAvailable = actual available (includes reclaimable cache) — more accurate than MemFree
+
+# 3. Find memory-hungry cgroups (K8s nodes)
+find /sys/fs/cgroup/kubepods -name "memory.current" -exec sh -c 'echo "$1: $(cat $1)" ' _ {} \; | sort -t: -k2 -n | tail -10
+
+# 4. Check for slab cache bloat
+slabtop -o | head -20
+cat /proc/slabinfo | sort -k3 -rn | head -20
+# inode_cache, dentry_cache, kmalloc-* growing = likely a kernel memory leak
+
+# 5. Check transparent huge pages — THP can cause latency spikes
+cat /sys/kernel/mm/transparent_hugepage/enabled
+# [always] madvise never
+# "always" causes compaction stalls. For latency-sensitive:
+echo madvise > /sys/kernel/mm/transparent_hugepage/enabled
+echo defer+madvise > /sys/kernel/mm/transparent_hugepage/defrag
+
+# 6. Drop caches to reclaim if legitimate need
+# (safe to do — kernel will repopulate from disk on next access)
+sync && echo 3 > /proc/sys/vm/drop_caches
+# 1 = page cache only, 2 = dentries/inodes, 3 = both
+# WARNING: causes temporary I/O spike as caches repopulate
+```
+
+### GOMEMLIMIT — Go garbage collector and K8s memory limits
+
+Go 1.19+ supports `GOMEMLIMIT` — a soft memory limit that tells the GC to collect more aggressively before reaching the limit. Set it to ~90% of the K8s memory limit to prevent OOMKill.
+
+```yaml
+env:
+  - name: GOMEMLIMIT
+    valueFrom:
+      resourceFieldRef:
+        resource: limits.memory
+        divisor: "1"   # bytes
+# This sets GOMEMLIMIT = limits.memory value exactly
+# Better: set to 90% via init container or manually:
+  - name: GOMEMLIMIT
+    value: "460MiB"   # 90% of 512Mi limit
+```
+
+Without `GOMEMLIMIT`, Go GC targets 100% heap growth by default. The heap can spike 2x before GC kicks in — easily exceeding K8s memory limits → OOMKill. With `GOMEMLIMIT`, GC collects proactively near the limit.
