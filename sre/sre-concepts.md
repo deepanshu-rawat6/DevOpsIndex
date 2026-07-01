@@ -597,3 +597,221 @@ Who is affected and how.
 ## Escalation
 If not resolved in 30 min → page [team/person]
 ```
+
+---
+
+## Error Budget Burn Rate Alerting
+
+Error budget burn rate tells you how fast you're consuming your monthly error budget. A burn rate of 1 = exactly consuming budget at the rate that empties it in 30 days. A burn rate of 14.4 = budget exhausted in 2 hours.
+
+### Multi-window multi-burn-rate alert (Google SRE Book)
+
+```yaml
+# Assumes: recording rule
+# job:slo_errors:rate5m = error rate over 5m window
+# job:slo_errors:rate1h = error rate over 1h window
+# etc.
+# error_budget_threshold = 1 - slo_target (e.g. 0.001 for 99.9% SLO)
+
+groups:
+  - name: slo.burn_rate
+    rules:
+      # Page immediately: burning >14.4x in last 1h AND 5m (2 hour burn-down)
+      - alert: ErrorBudgetBurnCritical
+        expr: |
+          (
+            job:slo_errors:rate1h{job="payments"} > (14.4 * 0.001)
+            and
+            job:slo_errors:rate5m{job="payments"} > (14.4 * 0.001)
+          )
+        for: 2m
+        labels:
+          severity: critical
+          slo: payments-availability
+        annotations:
+          summary: "Payments burning error budget at 14.4x — exhausted in 2h"
+          runbook: https://wiki/sre/payments-runbook
+
+      # Page: 6x burn over 6h AND 30m (5 day burn-down)
+      - alert: ErrorBudgetBurnHigh
+        expr: |
+          (
+            job:slo_errors:rate6h{job="payments"} > (6 * 0.001)
+            and
+            job:slo_errors:rate30m{job="payments"} > (6 * 0.001)
+          )
+        for: 15m
+        labels:
+          severity: page
+          slo: payments-availability
+
+      # Ticket: 3x burn over 3d AND 6h (10 day burn-down)
+      - alert: ErrorBudgetBurnMedium
+        expr: |
+          (
+            job:slo_errors:rate3d{job="payments"} > (3 * 0.001)
+            and
+            job:slo_errors:rate6h{job="payments"} > (3 * 0.001)
+          )
+        for: 1h
+        labels:
+          severity: ticket
+
+      # Inform: 1x burn over 3d (budget will run out by month end)
+      - alert: ErrorBudgetBurnLow
+        expr: |
+          job:slo_errors:rate3d{job="payments"} > (1 * 0.001)
+        for: 3h
+        labels:
+          severity: info
+```
+
+**The two-window trick:** requiring both a short window (high sensitivity) and a long window (high specificity) eliminates most false positives. A spike that lasts 10 minutes fires the short window but not the long — no page. A real sustained degradation fires both.
+
+### Error budget math
+
+```
+SLO target: 99.9%
+Error budget per 30 days: 0.1% × 30 × 24 × 60 = 43.2 minutes of downtime
+
+Burn rate 1:   consuming budget at exact pace — 43.2 min downtime/month
+Burn rate 14.4: consuming 14.4× budget — 43.2 ÷ 14.4 = 3 hours to exhaust
+Burn rate 6:   consuming 6× budget    — 43.2 ÷ 6   = 7.2 hours to exhaust
+
+When to page vs ticket:
+  > 2% budget consumed in 1 hour → page (critical)
+  > 5% budget consumed in 6 hours → page (high)
+  > 10% budget consumed in 3 days → ticket
+```
+
+---
+
+## Incident Command Playbook
+
+### The 5-minute triage script
+
+Every on-call engineer should run this mentally (or literally) in the first 5 minutes of any page:
+
+```
+0:00 — Acknowledge the alert. Set a 5-minute timer.
+       Don't start fixing yet. Understand first.
+
+0:30 — What is the user impact?
+       "X% of /checkout requests are failing"
+       "Latency p99 is 8s (normal: 200ms)"
+       NOT "Prometheus alert fired"
+
+1:00 — Is this getting better, worse, or stable?
+       Look at rate of change, not absolute value.
+       A metric that's bad-but-stable is different from bad-and-worsening.
+
+2:00 — What changed recently?
+       git log --since="1 hour ago"
+       Recent deployments: kubectl rollout history deployment -A
+       Recent config changes: check audit log
+
+3:00 — What is the blast radius?
+       One service? One region? One customer? All customers?
+       If blast radius is large → escalate now, even without a fix.
+
+4:00 — Can I mitigate faster than I can fix?
+       Rollback? Feature flag off? Scale up? Redirect traffic?
+       Mitigation (stop the bleeding) ≠ resolution (fix the root cause).
+       Mitigate first, investigate after.
+
+5:00 — Declare severity and bring in help if needed.
+       Don't be a hero. A second pair of eyes is never wrong.
+```
+
+### Severity levels and response expectations
+
+| Severity | Definition | Response | Example |
+|---|---|---|---|
+| SEV-1 | Complete service outage or data loss | Page IC + responders immediately, 24/7 | Checkout 100% down |
+| SEV-2 | Major feature degraded, significant user impact | Page on-call within 15 min | 30% of logins failing |
+| SEV-3 | Minor feature degraded, workaround exists | Ticket next business day | Slow report generation |
+| SEV-4 | Performance degradation, no user-visible impact | Informational, fix in sprint | Latency p99 elevated |
+
+### Incident Commander responsibilities
+
+The IC's job is **coordination, not technical work**. If you're the IC, you should not be typing commands.
+
+```
+IC Checklist:
+  [ ] Open incident channel (#incident-YYYY-MM-DD-description)
+  [ ] Assign roles: IC, tech lead, scribe, comms
+  [ ] First status update within 10 min: what we know, what we don't, ETA for next update
+  [ ] Status update every 15-30 min during active incident
+  [ ] Keep tech team focused: "What is the next action and who owns it?"
+  [ ] Declare mitigation: "User impact has stopped as of HH:MM UTC"
+  [ ] Declare resolution: "Root cause fixed, monitoring for recurrence"
+  [ ] Schedule postmortem within 72h
+```
+
+### Scribe template (real-time during incident)
+
+```
+## Incident: [title]
+Declared: HH:MM UTC  |  IC: @name  |  Severity: SEV-X
+
+### Timeline
+HH:MM — Alert fired: [alert name]
+HH:MM — On-call acknowledged
+HH:MM — [observation]: kubectl get pods shows 3/5 pods CrashLoopBackOff
+HH:MM — [hypothesis]: Memory leak in v2.3.1 deployed at HH:MM
+HH:MM — [action]: Rolled back to v2.3.0
+HH:MM — [result]: Error rate dropping, pods recovering
+HH:MM — Mitigation declared
+
+### Current state
+Impact: [what users see]
+Ongoing actions: [who is doing what]
+Next update: HH:MM UTC
+
+### Hypotheses tried
+1. DB overload — ruled out (no slow queries)
+2. Memory leak in v2.3.1 — CONFIRMED (OOMKill in logs)
+```
+
+---
+
+## Toil Tracking
+
+Toil is manual, repetitive, automatable operational work that grows with service scale. It has no lasting value — doing it once doesn't prevent doing it again.
+
+### Identifying toil
+
+```
+Is it:
+  ✓ Manual (requires a human to execute)?
+  ✓ Repetitive (you've done it before)?
+  ✓ Automatable (a machine could do it)?
+  ✓ Reactive (triggered by external event, not proactive)?
+  ✓ No lasting value (doesn't improve the system, just keeps it running)?
+
+→ Yes to 3+: it's toil. Track it.
+```
+
+### Toil log — track it before eliminating it
+
+```markdown
+| Date | Task | Time spent | Trigger | Automatable? | Ticket |
+|------|------|-----------|---------|-------------|--------|
+| 2026-07-01 | Manually restart payments pod after OOM | 15 min | Alert | Yes — VPA | ENG-123 |
+| 2026-07-01 | Rotate DB password in Secrets Manager | 30 min | Quarterly reminder | Yes — ESO rotation | ENG-124 |
+| 2026-07-02 | Scale up Kafka consumers manually | 20 min | Lag alert | Yes — KEDA | ENG-125 |
+```
+
+**SRE target:** toil < 50% of on-call engineer's time. The rest should be engineering work that reduces future toil. If toil > 50%, escalate to engineering leadership — you need dedicated headcount for toil reduction.
+
+### Common toil patterns and automation paths
+
+| Toil | Automation |
+|---|---|
+| Restart pod after OOM | VPA (auto right-size) + GOMEMLIMIT |
+| Scale service on high traffic | HPA or KEDA |
+| Rotate secrets manually | ESO + AWS Secrets Manager auto-rotation |
+| Approve repetitive deploy PRs | ArgoCD auto-sync + automated tests |
+| Investigate same alert repeatedly | Alert on root cause, not symptom; or self-healing via Argo Events |
+| Manually fix cert expiry | cert-manager |
+| Clear disk on nodes | Alert + automated cleanup CronJob |

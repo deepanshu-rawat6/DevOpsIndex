@@ -392,3 +392,248 @@ spec:
 
 ---
 
+
+---
+
+## Debugging Services Without SSH or SSM Access
+
+In production EKS/GKE environments you often have no direct shell access to nodes. This is the full toolkit ordered from least to most invasive.
+
+### Layer 1 — kubectl (no exec required)
+
+```bash
+# Pod state and events — always start here
+kubectl get pods -n <ns> -l app=<name> -o wide
+kubectl describe pod <pod> -n <ns>
+# Read the Events section at the bottom first:
+# "Back-off restarting failed container" → CrashLoopBackOff with logs available
+# "OOMKilling"                           → memory limit hit
+# "Liveness probe failed"                → readiness/liveness misconfigured
+# "FailedScheduling"                     → no node can fit the pod
+
+# Logs — current and previous container
+kubectl logs <pod> -n <ns> --tail=200 -f
+kubectl logs <pod> -n <ns> --previous        # last crashed container's logs
+kubectl logs -l app=<name> -n <ns> --tail=50  # all pods in selector simultaneously
+
+# Is the Service actually backed by healthy pods?
+kubectl get endpoints <svc-name> -n <ns>
+# Empty = pods not matching selector labels OR no pods in Ready state
+
+# Events timeline across namespace
+kubectl get events -n <ns> --sort-by='.lastTimestamp' | tail -30
+```
+
+### Layer 2 — Port-forward to isolate the problem
+
+Port-forward bypasses the entire LB → Ingress → Service → kube-proxy chain. Use it to test the pod in isolation:
+
+```bash
+# Test pod directly (eliminates LB, Ingress, Service, kube-proxy as suspects)
+kubectl port-forward pod/<pod-name> 8080:8080 -n <ns>
+curl -v localhost:8080/healthz
+
+# Test via Service (validates kube-proxy rules and endpoint selection)
+kubectl port-forward svc/<svc-name> 8080:80 -n <ns>
+curl -v localhost:8080/healthz
+
+# Decision tree:
+# pod PF works + svc PF works → problem is at Ingress or LB layer
+# pod PF works + svc PF fails → kube-proxy or endpoint selector issue
+# pod PF fails               → problem is in the application itself
+```
+
+### Layer 3 — Ephemeral debug containers (K8s 1.23+)
+
+Inject a debug container into a running pod. It shares the pod's namespaces without modifying the original container or requiring a pod restart:
+
+```bash
+# Inject busybox into a running pod
+kubectl debug -it <pod> -n <ns> \
+  --image=busybox:latest \
+  --target=<container-name>
+
+# Inject netshoot (full network tools)
+kubectl debug -it <pod> -n <ns> \
+  --image=nicolaka/netshoot \
+  --target=<container-name>
+# Now you can: curl, tcpdump, ss, nslookup, traceroute, iperf3
+
+# The --target flag shares the target container's process namespace
+# so you can see the app's processes and file descriptors
+
+# Ephemeral containers are not restarted and cannot be removed until pod dies
+kubectl describe pod <pod> -n <ns>   # shows ephemeral containers section
+```
+
+### Layer 4 — Temporary debug pod in the same namespace
+
+When you need network tools but the target pod is CrashLoopBackOff (no exec possible):
+
+```bash
+# Run netshoot as a temporary pod in the problem namespace
+kubectl run debug-pod --rm -it \
+  --image=nicolaka/netshoot \
+  --restart=Never \
+  -n <ns> \
+  -- bash
+
+# Now inside netshoot — same namespace as the broken service:
+# DNS resolution
+nslookup payments-svc.payments.svc.cluster.local
+nslookup payments-svc   # short name, relies on search domains
+
+# Connectivity test
+curl -v http://payments-svc:8080/healthz
+curl -v http://10.96.45.20:8080/healthz   # direct ClusterIP (bypasses DNS)
+
+# Port scan (is the app even listening?)
+nc -zv payments-svc 8080
+
+# Trace route to pod (shows where packets are dropped)
+traceroute payments-svc
+
+# Capture traffic (if you know which pod IP)
+tcpdump -i eth0 host <pod-ip> and port 8080
+```
+
+### Layer 5 — Debug a node problem (via privileged DaemonSet)
+
+When the issue is at the node level (disk pressure, kernel issue, iptables corruption) and you have no SSH:
+
+```bash
+# Create a privileged pod on a specific node
+kubectl run node-debug \
+  --image=busybox \
+  --restart=Never \
+  --rm -it \
+  --overrides='{
+    "spec": {
+      "nodeName": "<node-name>",
+      "hostPID": true,
+      "hostNetwork": true,
+      "containers": [{
+        "name": "node-debug",
+        "image": "busybox",
+        "stdin": true,
+        "tty": true,
+        "securityContext": {"privileged": true},
+        "volumeMounts": [{"name": "host-root","mountPath": "/host"}]
+      }],
+      "volumes": [{"name": "host-root","hostPath": {"path": "/"}}]
+    }
+  }' -- sh
+
+# Inside: chroot to host filesystem
+chroot /host bash
+# Now you have full access to the node's filesystem and processes
+# Check iptables, ss, top, dmesg, journalctl
+iptables -t nat -L KUBE-SERVICES | head -50
+ss -tlnp
+journalctl -u kubelet --tail=100
+```
+
+### Layer 6 — AWS-specific (CloudWatch, X-Ray)
+
+```bash
+# Search application logs via CloudWatch Logs Insights
+# (assumes Fluent Bit DaemonSet shipping to CloudWatch Container Insights)
+aws logs start-query \
+  --log-group-name /aws/containerinsights/<cluster>/application \
+  --start-time $(date -u -v-1H +%s) \
+  --end-time $(date -u +%s) \
+  --query-string '
+    fields @timestamp, kubernetes.pod_name, log
+    | filter kubernetes.namespace_name = "payments"
+    | filter log like /ERROR|PANIC|fatal/
+    | sort @timestamp desc
+    | limit 50
+  '
+# Get query ID from response, then:
+aws logs get-query-results --query-id <id>
+
+# ALB target health (why are targets unhealthy?)
+aws elbv2 describe-target-health \
+  --target-group-arn <arn> --region <region>
+# "Reason": "Target.FailedHealthChecks" = app not responding on health check port
+# "Reason": "Target.DeregistrationInProgress" = pod draining
+
+# EKS control plane logs (scheduler, authenticator, API server)
+# Enable first: EKS Console → Cluster → Logging → enable scheduler + api
+aws logs filter-log-events \
+  --log-group-name /aws/eks/<cluster>/cluster \
+  --log-stream-name-prefix kube-scheduler \
+  --filter-pattern '"<pod-name>"'
+
+aws logs filter-log-events \
+  --log-group-name /aws/eks/<cluster>/cluster \
+  --log-stream-name-prefix authenticator \
+  --filter-pattern '"Unauthorized"'
+
+# X-Ray — trace 5XX errors end-to-end
+aws xray get-trace-summaries \
+  --start-time $(date -u -v-1H +%s) \
+  --end-time $(date -u +%s) \
+  --filter-expression 'http.status = 500' \
+  --region <region>
+```
+
+### Decision tree — which tool to use
+
+```
+Pod is CrashLoopBackOff
+├── kubectl logs --previous       ← always start here
+└── Logs empty?
+    └── kubectl describe pod      ← exit code 137=OOM, 1=app error
+
+Pod is Running but 5XX
+├── kubectl port-forward pod      ← does pod respond directly?
+│   ├── YES → kubectl port-forward svc → check Service/endpoints
+│   └── NO  → application bug, check kubectl logs -f
+├── kubectl get endpoints         ← is Service backed by any pod?
+│   └── Empty → label mismatch on selector
+└── kubectl exec OR kubectl debug ← test internal connectivity
+    └── curl postgres-svc         ← DNS + connectivity in one shot
+
+Pod is Pending
+└── kubectl describe pod          ← Events: FailedScheduling + reason
+    ├── Insufficient memory/cpu   ← kubectl top nodes
+    ├── No nodes match affinity   ← check nodeSelector/affinity
+    └── PVC unbound               ← kubectl describe pvc
+
+No kubectl access (pure AWS)
+├── CloudWatch Logs Insights      ← application logs
+├── ALB target health             ← is pod receiving traffic?
+└── EKS control plane logs        ← auth failures, scheduling issues
+```
+
+### Useful netshoot commands cheatsheet
+
+```bash
+# DNS
+nslookup svc-name.namespace.svc.cluster.local
+dig svc-name.namespace.svc.cluster.local
+# Check /etc/resolv.conf for search domains
+cat /etc/resolv.conf
+
+# Connectivity
+curl -sv http://svc:port/path 2>&1 | head -50
+nc -zv svc-name port               # TCP reachability without curl
+wget -qO- http://svc:port/healthz
+
+# Network state
+ss -tlnp                           # listening ports inside pod
+ss -tnp state established          # active connections
+
+# Packet capture
+tcpdump -i eth0 -nn port 8080 -w /tmp/capture.pcap
+tcpdump -i eth0 -nn 'host 10.0.1.5'
+
+# Routing
+ip route show
+ip addr
+
+# TLS
+openssl s_client -connect svc:443 -servername hostname
+curl -kv https://svc:443/          # ignore cert errors
+```
