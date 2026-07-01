@@ -474,3 +474,285 @@ master_secret = HKDF-Extract(derived(handshake_secret), 0)
 client_handshake_traffic_secret = HKDF-Expand-Label(handshake_secret, "c hs traffic", transcript_hash)
 server_handshake_traffic_secret = HKDF-Expand-Label(handshake_secret, "s hs traffic", transcript_hash)
 ```
+
+---
+
+## mTLS — Mutual TLS Between Services
+
+Standard TLS: client verifies server's certificate. mTLS: **both sides present and verify certificates**. The server also authenticates the client. This is the foundation of zero-trust service-to-service communication.
+
+### mTLS handshake vs TLS handshake
+
+```
+TLS (one-way):
+  Client → Server: ClientHello
+  Server → Client: Certificate (server proves identity)
+  Client → Server: [key exchange, Finished]
+  Connection established. Server identity verified. Client anonymous.
+
+mTLS (two-way):
+  Client → Server: ClientHello
+  Server → Client: Certificate + CertificateRequest (server asks for client cert)
+  Client → Server: Certificate + CertificateVerify (client proves identity)
+  Server verifies client cert against its CA
+  Connection established. Both sides authenticated.
+```
+
+### cert-manager — automated certificate lifecycle
+
+cert-manager is a Kubernetes controller that automates issuing, renewing, and rotating TLS certificates from multiple sources (Let's Encrypt, Vault, AWS PCA, self-signed CA).
+
+```bash
+# Install cert-manager
+kubectl apply -f https://github.com/cert-manager/cert-manager/releases/latest/download/cert-manager.yaml
+
+# Verify
+kubectl get pods -n cert-manager
+```
+
+**Self-signed CA for internal service mTLS:**
+```yaml
+# Step 1: Create a self-signed CA certificate
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: selfsigned-issuer
+spec:
+  selfSigned: {}
+
+---
+# Step 2: Issue a CA certificate from the self-signed issuer
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: internal-ca
+  namespace: cert-manager
+spec:
+  isCA: true
+  commonName: internal-ca
+  secretName: internal-ca-secret
+  privateKey:
+    algorithm: ECDSA
+    size: 256
+  issuerRef:
+    name: selfsigned-issuer
+    kind: ClusterIssuer
+    group: cert-manager.io
+
+---
+# Step 3: Create a CA issuer that uses this CA to sign service certs
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: internal-ca-issuer
+spec:
+  ca:
+    secretName: internal-ca-secret   # references the CA cert Secret above
+```
+
+**Issue a service certificate:**
+```yaml
+apiVersion: cert-manager.io/v1
+kind: Certificate
+metadata:
+  name: payments-tls
+  namespace: payments
+spec:
+  secretName: payments-tls-secret    # cert-manager creates this Secret
+  duration: 24h                      # short-lived = more secure
+  renewBefore: 8h                    # renew when 8h remain
+  dnsNames:
+    - payments-svc.payments.svc.cluster.local
+    - payments-svc.payments.svc
+    - payments-svc
+  issuerRef:
+    name: internal-ca-issuer
+    kind: ClusterIssuer
+```
+
+```yaml
+# Mount the cert in your pod
+spec:
+  volumes:
+    - name: tls
+      secret:
+        secretName: payments-tls-secret  # cert-manager keeps this up to date
+  containers:
+    - name: payments
+      volumeMounts:
+        - name: tls
+          mountPath: /etc/tls
+          readOnly: true
+      env:
+        - name: TLS_CERT_FILE
+          value: /etc/tls/tls.crt
+        - name: TLS_KEY_FILE
+          value: /etc/tls/tls.key
+        - name: CA_CERT_FILE
+          value: /etc/tls/ca.crt
+```
+
+### Implementing mTLS in a Go service
+
+```go
+import (
+    "crypto/tls"
+    "crypto/x509"
+    "os"
+)
+
+func newMTLSServer(certFile, keyFile, caFile string) (*http.Server, error) {
+    // Load our own certificate and key
+    cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+    if err != nil {
+        return nil, err
+    }
+
+    // Load the CA that we use to verify client certificates
+    caCert, err := os.ReadFile(caFile)
+    if err != nil {
+        return nil, err
+    }
+    caPool := x509.NewCertPool()
+    caPool.AppendCertsFromPEM(caCert)
+
+    tlsConfig := &tls.Config{
+        Certificates: []tls.Certificate{cert},
+        ClientAuth:   tls.RequireAndVerifyClientCert,  // enforce mTLS
+        ClientCAs:    caPool,
+        MinVersion:   tls.VersionTLS13,
+    }
+
+    return &http.Server{
+        Addr:      ":8443",
+        TLSConfig: tlsConfig,
+    }, nil
+}
+
+func newMTLSClient(certFile, keyFile, caFile string) (*http.Client, error) {
+    cert, _ := tls.LoadX509KeyPair(certFile, keyFile)
+    caCert, _ := os.ReadFile(caFile)
+    caPool := x509.NewCertPool()
+    caPool.AppendCertsFromPEM(caCert)
+
+    tlsConfig := &tls.Config{
+        Certificates: []tls.Certificate{cert},  // present client cert
+        RootCAs:      caPool,                    // verify server cert
+        MinVersion:   tls.VersionTLS13,
+    }
+    return &http.Client{
+        Transport: &http.Transport{TLSClientConfig: tlsConfig},
+    }, nil
+}
+```
+
+### Certificate rotation — zero-downtime
+
+cert-manager renews before expiry and updates the Secret. But pods that mounted the Secret at startup have the old cert in memory — they need to reload without restarting.
+
+**Option 1 — watch for file changes:**
+```go
+// Use inotify/fsnotify to reload certs when Secret is updated
+watcher, _ := fsnotify.NewWatcher()
+watcher.Add("/etc/tls/tls.crt")
+go func() {
+    for event := range watcher.Events {
+        if event.Op&fsnotify.Write != 0 {
+            newCert, _ := tls.LoadX509KeyPair(certFile, keyFile)
+            tlsConfig.Certificates = []tls.Certificate{newCert}
+            log.Println("TLS certificate rotated")
+        }
+    }
+}()
+```
+
+**Option 2 — use `GetCertificate` callback (preferred for servers):**
+```go
+tlsConfig := &tls.Config{
+    GetCertificate: func(*tls.ClientHelloInfo) (*tls.Certificate, error) {
+        // Called on every new TLS handshake — always reads the latest cert
+        cert, err := tls.LoadX509KeyPair(certFile, keyFile)
+        return &cert, err
+    },
+}
+// Existing connections use the old cert; new connections use the new cert.
+// No restart required.
+```
+
+**Option 3 — Istio/Linkerd handle rotation transparently:**
+Service meshes manage cert issuance and rotation for you. Sidecars hold the mTLS identity; your app code makes plain HTTP/gRPC calls; the sidecar wraps them in mTLS. Rotation is invisible to the app.
+
+### Let's Encrypt with cert-manager (public services)
+
+```yaml
+apiVersion: cert-manager.io/v1
+kind: ClusterIssuer
+metadata:
+  name: letsencrypt-prod
+spec:
+  acme:
+    email: ops@myorg.com
+    server: https://acme-v02.api.letsencrypt.org/directory
+    privateKeySecretRef:
+      name: letsencrypt-prod-key
+    solvers:
+      - http01:                        # HTTP-01 challenge (port 80 reachable)
+          ingress:
+            class: nginx
+      # Alternative: DNS-01 challenge (for wildcard certs / internal clusters)
+      - dns01:
+          route53:
+            region: us-east-1
+            hostedZoneID: Z123456789
+            role: arn:aws:iam::123456789:role/cert-manager-dns
+
+---
+# Use the issuer in an Ingress annotation
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  annotations:
+    cert-manager.io/cluster-issuer: letsencrypt-prod
+spec:
+  tls:
+    - hosts: [api.example.com]
+      secretName: api-tls-cert    # cert-manager auto-creates and renews this
+  rules:
+    - host: api.example.com
+      ...
+```
+
+### Debugging TLS/mTLS issues
+
+```bash
+# Test TLS connection and inspect certificate chain
+openssl s_client -connect payments-svc:8443 \
+  -servername payments-svc.payments.svc.cluster.local \
+  -showcerts 2>/dev/null | openssl x509 -noout -text
+
+# Test mTLS (present client cert)
+openssl s_client -connect payments-svc:8443 \
+  -cert /etc/tls/tls.crt \
+  -key /etc/tls/tls.key \
+  -CAfile /etc/tls/ca.crt
+
+# Check cert expiry
+openssl x509 -in /etc/tls/tls.crt -noout -dates
+# notBefore=Jun  1 00:00:00 2026 GMT
+# notAfter=Jun  2 00:00:00 2026 GMT  ← short-lived, 24h
+
+# Check cert-manager certificate status
+kubectl describe certificate payments-tls -n payments
+# Conditions:
+#   Ready: True   ← cert issued and valid
+#   Ready: False  reason: Failed  ← look at Events for CA/DNS errors
+
+# Check cert-manager logs for failures
+kubectl logs -n cert-manager \
+  -l app.kubernetes.io/component=controller --tail=100
+
+# List all certificates and their expiry
+kubectl get certificates -A
+# NAME           READY   SECRET               AGE
+# payments-tls   True    payments-tls-secret  2d
+```
