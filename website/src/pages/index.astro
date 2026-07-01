@@ -15,34 +15,210 @@ for (const t of allTopics) {
 }
 const sections = Array.from(sectionMap.values()).sort((a, b) => a.order - b.order);
 
-// Color groups (SDE-1 oriented → SDE-2 oriented)
-const cardColor = (order: number) => {
-  if (order <= 4)  return 'bg-blue-900/40 border-blue-700/50 hover:border-blue-500';
-  if (order <= 8)  return 'bg-violet-900/40 border-violet-700/50 hover:border-violet-500';
-  if (order <= 12) return 'bg-emerald-900/40 border-emerald-700/50 hover:border-emerald-500';
-  return             'bg-orange-900/40 border-orange-700/50 hover:border-orange-500';
+// Color tiers — each tier represents a learning phase
+const tierInfo = (order: number): { card: string; badge: string; tier: string } => {
+  if (order <= 4)  return {
+    card:  'bg-blue-900/40 border-blue-700/50 hover:border-blue-500',
+    badge: 'bg-blue-900 text-blue-300',
+    tier:  'Foundation',
+  };
+  if (order <= 8)  return {
+    card:  'bg-violet-900/40 border-violet-700/50 hover:border-violet-500',
+    badge: 'bg-violet-900 text-violet-300',
+    tier:  'Core',
+  };
+  if (order <= 12) return {
+    card:  'bg-emerald-900/40 border-emerald-700/50 hover:border-emerald-500',
+    badge: 'bg-emerald-900 text-emerald-300',
+    tier:  'Advanced',
+  };
+  return {
+    card:  'bg-orange-900/40 border-orange-700/50 hover:border-orange-500',
+    badge: 'bg-orange-900 text-orange-300',
+    tier:  'Specialist',
+  };
 };
 
-const badgeColor = (order: number) => {
-  if (order <= 4)  return 'bg-blue-900 text-blue-300';
-  if (order <= 8)  return 'bg-violet-900 text-violet-300';
-  if (order <= 12) return 'bg-emerald-900 text-emerald-300';
-  return             'bg-orange-900 text-orange-300';
-};
+// Recommended learning path — two tracks
+const sde1Path = [
+  { step: 1,  section: 'linux',         pages: ['commands', 'boot', 'systemd', 'networking', 'signals', 'containers-evolution'] },
+  { step: 2,  section: 'networking',    pages: ['osi-model', 'tcp-udp', 'tls-encryption', 'http-versions'] },
+  { step: 3,  section: 'docker',        pages: ['networking', 'debugging'] },
+  { step: 4,  section: 'kubernetes',    pages: ['kubectl-cheatsheet', 'workloads', 'resource-limits', 'networking', 'storage', 'rbac', 'helm'] },
+  { step: 5,  section: 'cicd',          pages: ['github-actions', 'argocd'] },
+  { step: 6,  section: 'iac',           pages: ['terraform', 'cloudformation'] },
+  { step: 7,  section: 'aws',           pages: ['services-overview', 'storage-databases', 'messaging-serverless-observability'] },
+  { step: 8,  section: 'monitoring',    pages: ['prometheus', 'alertmanager', 'grafana', 'loki', 'alerting-philosophy'] },
+  { step: 9,  section: 'git',           pages: ['git-workflows', 'git-fixes'] },
+  { step: 10, section: 'sre',           pages: ['k8s-debugging', 'k8s-scenarios', 'aws-scenarios'] },
+];
+
+const sde2Path = [
+  { step: 1,  section: 'linux',         pages: ['io-models', 'scheduler', 'security', 'memory-tuning', 'cgroup-v2', 'proc-internals', 'strace-perf', 'ebpf-bpftrace'] },
+  { step: 2,  section: 'networking',    pages: ['linux-networking', 'grpc-graphql', 'load-balancers', 'cdn'] },
+  { step: 3,  section: 'docker',        pages: ['buildkit', 'docker-security', 'internals'] },
+  { step: 4,  section: 'kubernetes',    pages: ['autoscaling', 'coredns', 'pod-lifecycle', 'kube-proxy-modes', 'cross-node-networking', 'eks-architecture', 'node-shutdown', 'policy-security'] },
+  { step: 5,  section: 'aws',           pages: ['databases-deep-dive', 'ecs-fargate', 'request-flow-alb-to-pod'] },
+  { step: 6,  section: 'monitoring',    pages: ['opentelemetry', 'performance-debugging', 'slo-sli', 'thanos-mimir'] },
+  { step: 7,  section: 'git',           pages: ['git-internals'] },
+  { step: 8,  section: 'advanced',      pages: ['service-mesh', 'ebpf-observability', 'chaos-engineering', 'backup-dr'] },
+  { step: 9,  section: 'cicd',          pages: ['gitops-secrets', 'argo-rollouts', 'pipeline-design'] },
+  { step: 10, section: 'sre',           pages: ['linux-debugging', 'cicd-scenarios', 'iac-scenarios', 'sre-concepts'] },
+  { step: 11, section: 'gcp',           pages: ['services-overview', 'gke', 'bigquery'] },
+  { step: 12, section: 'databases',     pages: ['postgres-internals', 'mysql-internals', 'kafka-internals', 'redis-internals', 'replication', 'caching'] },
+  { step: 13, section: 'on-prem-k8s',   pages: ['postgres', 'kafka', 'redis-cluster'] },
+  { step: 14, section: 'system-design', pages: ['scaling', 'cap-pacelc', 'async-patterns', 'api-design', 'distributed-transactions'] },
+  { step: 15, section: 'ai-infra',      pages: ['gpu-scheduling', 'kuberay', 'model-serving', 'llmops'] },
+  { step: 16, section: 'mlops',         pages: ['experiment-tracking', 'training-pipelines', 'data-drift'] },
+];
 ---
 
 <BaseLayout title="DevOpsIndex">
-  <div class="max-w-6xl mx-auto">
+  <div class="max-w-6xl mx-auto space-y-10">
+
     <!-- Hero -->
-    <div class="mb-8">
+    <div>
       <h1 class="text-3xl font-bold text-slate-100 mb-2">DevOpsIndex</h1>
       <p class="text-slate-400">
         {allTopics.length} reference pages across {sections.length} sections — Kubernetes, Linux, Docker, AWS, GCP, CI/CD, SRE and more.
       </p>
     </div>
 
+    <!-- Color legend -->
+    <div class="rounded-xl border border-slate-700 bg-slate-800/50 p-5">
+      <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider mb-4">Color Guide — Learning Tiers</h2>
+      <div class="grid grid-cols-2 sm:grid-cols-4 gap-3">
+        <div class="rounded-lg border border-blue-700/50 bg-blue-900/30 px-4 py-3">
+          <div class="text-xs font-bold text-blue-300 mb-1">🔵 Foundation</div>
+          <div class="text-xs text-slate-400">Sections 1–4</div>
+          <div class="text-xs text-slate-500 mt-1">Linux · Networking · Docker · Kubernetes</div>
+        </div>
+        <div class="rounded-lg border border-violet-700/50 bg-violet-900/30 px-4 py-3">
+          <div class="text-xs font-bold text-violet-300 mb-1">🟣 Core</div>
+          <div class="text-xs text-slate-400">Sections 5–8</div>
+          <div class="text-xs text-slate-500 mt-1">CI/CD · IaC · AWS · GCP</div>
+        </div>
+        <div class="rounded-lg border border-emerald-700/50 bg-emerald-900/30 px-4 py-3">
+          <div class="text-xs font-bold text-emerald-300 mb-1">🟢 Advanced</div>
+          <div class="text-xs text-slate-400">Sections 9–12</div>
+          <div class="text-xs text-slate-500 mt-1">Monitoring · Git · Advanced · AI Infra</div>
+        </div>
+        <div class="rounded-lg border border-orange-700/50 bg-orange-900/30 px-4 py-3">
+          <div class="text-xs font-bold text-orange-300 mb-1">🟠 Specialist</div>
+          <div class="text-xs text-slate-400">Sections 13–16</div>
+          <div class="text-xs text-slate-500 mt-1">MLOps · Databases · On-Prem K8s · SRE</div>
+        </div>
+      </div>
+      <p class="text-xs text-slate-500 mt-4">
+        Start with <span class="text-blue-400">Foundation</span> sections regardless of experience level — they establish the mental models everything else builds on. Move to <span class="text-violet-400">Core</span> once comfortable with containers and K8s basics. <span class="text-emerald-400">Advanced</span> and <span class="text-orange-400">Specialist</span> sections assume you're operating production systems.
+      </p>
+    </div>
+
+    <!-- Recommended learning path (collapsible) -->
+    <details class="rounded-xl border border-slate-700 bg-slate-800/50 group" open>
+      <summary class="flex items-center justify-between px-5 py-4 cursor-pointer list-none select-none hover:bg-slate-800/80 rounded-xl transition-colors">
+        <h2 class="text-sm font-semibold text-slate-300 uppercase tracking-wider">📚 Recommended Learning Path</h2>
+        <svg class="w-4 h-4 text-slate-500 transition-transform group-open:rotate-180" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
+        </svg>
+      </summary>
+
+      <div class="px-5 pb-5 space-y-6">
+        <!-- Tab switcher -->
+        <div class="flex gap-2 pt-2">
+          <button
+            id="tab-sde1"
+            onclick="switchTab('sde1')"
+            class="px-4 py-1.5 rounded-lg text-xs font-semibold bg-blue-700 text-white transition-colors"
+          >
+            SDE-1 Track
+          </button>
+          <button
+            id="tab-sde2"
+            onclick="switchTab('sde2')"
+            class="px-4 py-1.5 rounded-lg text-xs font-semibold bg-slate-700 text-slate-400 hover:bg-slate-600 transition-colors"
+          >
+            SDE-2 Track
+          </button>
+          <span class="ml-auto text-xs text-slate-600 self-center hidden sm:block">Read top-to-bottom within each step</span>
+        </div>
+
+        <!-- SDE-1 track -->
+        <div id="path-sde1" class="space-y-3">
+          <p class="text-xs text-slate-500">Start here if you're new to DevOps / joining as a junior engineer. Focus on understanding how things work before optimising them.</p>
+          <div class="space-y-2">
+            {sde1Path.map(step => {
+              const sec = sections.find(s => s.slug === step.section);
+              const { card, badge } = tierInfo(sec?.order ?? 1);
+              return (
+                <div class={`flex items-start gap-3 rounded-lg border p-3 ${card}`}>
+                  <span class={`shrink-0 mt-0.5 text-xs font-bold px-2 py-0.5 rounded ${badge}`}>
+                    {step.step}
+                  </span>
+                  <div class="min-w-0">
+                    <a
+                      href={`/topic/${step.section}`}
+                      class="text-sm font-semibold text-slate-200 hover:text-blue-400 transition-colors"
+                    >
+                      {sec?.title ?? step.section}
+                    </a>
+                    <div class="flex flex-wrap gap-1.5 mt-1.5">
+                      {step.pages.map(page => (
+                        <a
+                          href={`/topic/${step.section}/${page}`}
+                          class="text-xs bg-slate-800/80 border border-slate-700 rounded px-2 py-0.5 text-slate-400 hover:text-blue-400 hover:border-blue-700 transition-colors"
+                        >
+                          {page}
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+
+        <!-- SDE-2 track -->
+        <div id="path-sde2" class="space-y-3 hidden">
+          <p class="text-xs text-slate-500">Continue here after completing the SDE-1 track, or start here if you already have production experience. Focus on internals, failure modes and system design.</p>
+          <div class="space-y-2">
+            {sde2Path.map(step => {
+              const sec = sections.find(s => s.slug === step.section);
+              const { card, badge } = tierInfo(sec?.order ?? 1);
+              return (
+                <div class={`flex items-start gap-3 rounded-lg border p-3 ${card}`}>
+                  <span class={`shrink-0 mt-0.5 text-xs font-bold px-2 py-0.5 rounded ${badge}`}>
+                    {step.step}
+                  </span>
+                  <div class="min-w-0">
+                    <a
+                      href={`/topic/${step.section}`}
+                      class="text-sm font-semibold text-slate-200 hover:text-blue-400 transition-colors"
+                    >
+                      {sec?.title ?? step.section}
+                    </a>
+                    <div class="flex flex-wrap gap-1.5 mt-1.5">
+                      {step.pages.map(page => (
+                        <a
+                          href={`/topic/${step.section}/${page}`}
+                          class="text-xs bg-slate-800/80 border border-slate-700 rounded px-2 py-0.5 text-slate-400 hover:text-blue-400 hover:border-blue-700 transition-colors"
+                        >
+                          {page}
+                        </a>
+                      ))}
+                    </div>
+                  </div>
+                </div>
+              );
+            })}
+          </div>
+        </div>
+      </div>
+    </details>
+
     <!-- Search -->
-    <div class="mb-8">
+    <div>
       <input
         type="text"
         id="section-search"
@@ -53,23 +229,33 @@ const badgeColor = (order: number) => {
     </div>
 
     <!-- Section grid -->
-    <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4" id="section-grid">
-      {sections.map(s => (
-        <a
-          href={`/topic/${s.slug}`}
-          class={`section-card block rounded-xl border p-4 transition-all duration-200 ${cardColor(s.order)}`}
-          data-title={s.title.toLowerCase()}
-        >
-          <div class="flex items-start justify-between gap-2">
-            <h2 class="font-semibold text-slate-100 text-sm">{s.title}</h2>
-            <span class={`shrink-0 text-xs px-2 py-0.5 rounded font-medium ${badgeColor(s.order)}`}>
-              #{s.order}
-            </span>
-          </div>
-          <p class="text-xs text-slate-500 mt-2">{s.count} page{s.count !== 1 ? 's' : ''}</p>
-        </a>
-      ))}
+    <div>
+      <h2 class="text-sm font-semibold text-slate-500 uppercase tracking-wider mb-3">All Sections</h2>
+      <div class="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-3 gap-4" id="section-grid">
+        {sections.map(s => {
+          const { card, badge, tier } = tierInfo(s.order);
+          return (
+            <a
+              href={`/topic/${s.slug}`}
+              class={`section-card block rounded-xl border p-4 transition-all duration-200 ${card}`}
+              data-title={s.title.toLowerCase()}
+            >
+              <div class="flex items-start justify-between gap-2">
+                <h2 class="font-semibold text-slate-100 text-sm">{s.title}</h2>
+                <span class={`shrink-0 text-xs px-2 py-0.5 rounded font-medium ${badge}`}>
+                  #{s.order}
+                </span>
+              </div>
+              <div class="flex items-center justify-between mt-2">
+                <p class="text-xs text-slate-500">{s.count} page{s.count !== 1 ? 's' : ''}</p>
+                <span class="text-xs text-slate-600">{tier}</span>
+              </div>
+            </a>
+          );
+        })}
+      </div>
     </div>
+
   </div>
 
   <script>
@@ -81,5 +267,29 @@ const badgeColor = (order: number) => {
       });
     }
     (window as any).filterSections = filterSections;
+
+    function switchTab(tab: 'sde1' | 'sde2') {
+      const sde1 = document.getElementById('path-sde1');
+      const sde2 = document.getElementById('path-sde2');
+      const btn1 = document.getElementById('tab-sde1');
+      const btn2 = document.getElementById('tab-sde2');
+
+      if (tab === 'sde1') {
+        sde1?.classList.remove('hidden');
+        sde2?.classList.add('hidden');
+        btn1?.classList.replace('bg-slate-700', 'bg-blue-700');
+        btn1?.classList.replace('text-slate-400', 'text-white');
+        btn2?.classList.replace('bg-blue-700', 'bg-slate-700');
+        btn2?.classList.replace('text-white', 'text-slate-400');
+      } else {
+        sde2?.classList.remove('hidden');
+        sde1?.classList.add('hidden');
+        btn2?.classList.replace('bg-slate-700', 'bg-blue-700');
+        btn2?.classList.replace('text-slate-400', 'text-white');
+        btn1?.classList.replace('bg-blue-700', 'bg-slate-700');
+        btn1?.classList.replace('text-white', 'text-slate-400');
+      }
+    }
+    (window as any).switchTab = switchTab;
   </script>
 </BaseLayout>
