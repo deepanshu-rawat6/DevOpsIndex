@@ -358,3 +358,260 @@ docker builder prune -af       # build cache
 ```
 
 **Prevention:** Add a weekly cron job on every CI host: `docker system prune -af --volumes --filter "until=168h"`. Set `"log-opts": {"max-size": "50m", "max-file": "3"}` in `/etc/docker/daemon.json` to cap container log sizes. Alert on host disk usage > 70% before Docker fills the drive.
+
+---
+
+## 11. Multi-Stage Build Pitfalls
+
+Multi-stage builds reduce image size but have subtle failure modes.
+
+**Stage output not copied — silent size bloat:**
+```dockerfile
+# WRONG: final stage copies from wrong alias
+FROM golang:1.22 AS builder
+RUN go build -o /app .
+
+FROM gcr.io/distroless/static
+COPY --from=build /app /app   # "build" doesn't exist — Docker silently skips this
+                               # or errors depending on version; image has no binary
+# FIX:
+COPY --from=builder /app /app  # alias must match exactly
+```
+
+**Build cache invalidated by COPY order:**
+```dockerfile
+# BAD — copies all source first, invalidates go mod cache on any code change
+COPY . .
+RUN go mod download
+RUN go build -o /app .
+
+# GOOD — dependencies cached unless go.sum changes
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+RUN go build -o /app .
+```
+
+**Missing CA certificates in distroless/scratch:**
+```dockerfile
+FROM scratch
+COPY --from=builder /app /app
+# PROBLEM: app making HTTPS calls fails — no /etc/ssl/certs
+# FIX option 1: copy certs from builder
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+# FIX option 2: use distroless/base instead of scratch
+FROM gcr.io/distroless/base-debian12
+COPY --from=builder /app /app
+```
+
+**Timezone data missing:**
+```dockerfile
+# App using time.LoadLocation("America/New_York") panics in scratch/distroless/static
+COPY --from=builder /usr/share/zoneinfo /usr/share/zoneinfo
+# or use distroless/base which includes tzdata
+```
+
+---
+
+## 12. Secret Leaks in Image Layers
+
+Every `RUN` command that writes a file and every `ENV` creates a layer. Even if you delete a file in a later layer, it is permanently readable in the earlier layer's blob.
+
+```dockerfile
+# CATASTROPHIC — AWS key baked into layer forever
+RUN aws s3 cp s3://my-bucket/config.yaml /app/config.yaml  # uses ambient creds or...
+ENV AWS_SECRET_ACCESS_KEY=AKIAIOSFODNN7EXAMPLE  # baked in every image pushed
+
+# WRONG — delete in later layer doesn't help
+RUN echo "secretpassword" > /tmp/secret && \
+    do-something-with /tmp/secret
+RUN rm /tmp/secret   # still in previous layer's filesystem snapshot
+```
+
+```dockerfile
+# CORRECT — use BuildKit secret mounts (never written to any layer)
+# syntax=docker/dockerfile:1
+FROM node:20-alpine AS builder
+RUN --mount=type=secret,id=npm_token \
+    NPM_TOKEN=$(cat /run/secrets/npm_token) \
+    npm ci
+
+# Build:
+docker build --secret id=npm_token,src=~/.npmrc .
+```
+
+```dockerfile
+# CORRECT — SSH agent forwarding for private git repos
+# syntax=docker/dockerfile:1
+FROM golang:1.22 AS builder
+RUN --mount=type=ssh \
+    go get github.com/myorg/private-module@v1.2.3
+
+# Build:
+docker build --ssh default .
+```
+
+**Audit an existing image for secrets:**
+```bash
+# Inspect all layers for secret patterns
+docker save myimage:latest | tar -xO | \
+  strings | grep -iE 'AKIA|password|secret|token|BEGIN.*KEY'
+
+# Use dive to inspect layer-by-layer
+dive myimage:latest
+
+# Use trivy to scan for exposed secrets
+trivy image --scanners secret myimage:latest
+```
+
+---
+
+## 13. Distroless and Scratch — Production Hardening
+
+Distroless images contain only the application and its runtime dependencies — no shell, no package manager, no debug tools. This is the correct production posture.
+
+```dockerfile
+# Go — fully static binary, use scratch
+FROM golang:1.22-alpine AS builder
+WORKDIR /app
+COPY go.mod go.sum ./
+RUN go mod download
+COPY . .
+# CGO_ENABLED=0: no libc dependency; -ldflags="-w -s": strip debug info
+RUN CGO_ENABLED=0 GOOS=linux go build \
+    -ldflags="-w -s" \
+    -trimpath \
+    -o /app/server .
+
+FROM scratch
+COPY --from=builder /etc/ssl/certs/ca-certificates.crt /etc/ssl/certs/
+COPY --from=builder /app/server /server
+USER 65534:65534   # nobody
+EXPOSE 8080
+ENTRYPOINT ["/server"]
+```
+
+```dockerfile
+# Java — use distroless/java
+FROM maven:3.9-eclipse-temurin-21 AS builder
+WORKDIR /app
+COPY pom.xml .
+RUN mvn dependency:go-offline
+COPY src ./src
+RUN mvn package -DskipTests
+
+FROM gcr.io/distroless/java21-debian12
+COPY --from=builder /app/target/app.jar /app.jar
+USER nonroot
+EXPOSE 8080
+ENTRYPOINT ["java", "-jar", "/app.jar"]
+```
+
+```dockerfile
+# Python — use distroless/python
+FROM python:3.12-slim AS builder
+WORKDIR /app
+COPY requirements.txt .
+RUN pip install --no-cache-dir --prefix=/install -r requirements.txt
+
+FROM gcr.io/distroless/python3-debian12
+COPY --from=builder /install /usr/local
+COPY --from=builder /app /app
+WORKDIR /app
+USER nonroot
+CMD ["main.py"]
+```
+
+**Debugging distroless in production:**
+```bash
+# No shell inside distroless — use ephemeral debug containers
+kubectl debug -it <pod> \
+  --image=gcr.io/distroless/base:debug \   # debug variant has busybox shell
+  --target=<container>
+
+# OR use a sidecar debug container
+kubectl debug <pod> \
+  --image=nicolaka/netshoot \
+  --copy-to=debug-pod \   # creates a copy of the pod with the debug container
+  -it -- bash
+```
+
+**Distroless variants:**
+
+| Image | Use case | Shell |
+|---|---|---|
+| `distroless/static` | Static binaries (Go, Rust) | No |
+| `distroless/base` | Dynamic linking (libc) | No |
+| `distroless/java21` | JVM apps | No |
+| `distroless/python3` | Python apps | No |
+| `distroless/static:debug` | Any — debug variant | busybox via `sh` |
+| `scratch` | Fully static, minimal attack surface | No |
+
+---
+
+## 14. Image Layer Squashing and Size Optimization
+
+```bash
+# Inspect image layers and their sizes
+docker history myimage:latest --no-trunc
+docker image inspect myimage:latest | jq '.[0].RootFS.Layers | length'
+
+# Analyze with dive
+dive myimage:latest
+# Shows: layer sizes, what each layer adds, wasted space (files modified/deleted)
+```
+
+**Common size culprits and fixes:**
+
+```dockerfile
+# BAD: separate RUN commands = separate layers, apt cache stays
+RUN apt-get update
+RUN apt-get install -y curl wget git
+RUN rm -rf /var/lib/apt/lists/*   # only cleans the LAST layer; update+install layers still fat
+
+# GOOD: single RUN = single layer, cache cleaned in same layer
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends curl wget && \
+    rm -rf /var/lib/apt/lists/*
+```
+
+```dockerfile
+# BAD: build tools left in final image
+FROM ubuntu:22.04
+RUN apt-get install -y gcc make libssl-dev
+COPY . .
+RUN make build
+# gcc, make, libssl-dev all in final image — hundreds of MB wasted
+
+# GOOD: builder stage isolates build tools
+FROM ubuntu:22.04 AS builder
+RUN apt-get install -y gcc make libssl-dev
+COPY . .
+RUN make build
+
+FROM ubuntu:22.04
+COPY --from=builder /app/binary /app/binary
+# gcc/make/libssl-dev never in final image
+```
+
+**Minimizing node_modules:**
+```dockerfile
+FROM node:20-alpine AS deps
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci --only=production   # no devDependencies
+
+FROM node:20-alpine AS builder
+WORKDIR /app
+COPY package*.json ./
+RUN npm ci
+COPY . .
+RUN npm run build
+
+FROM node:20-alpine
+WORKDIR /app
+COPY --from=deps /app/node_modules ./node_modules
+COPY --from=builder /app/dist ./dist
+USER node
+CMD ["node", "dist/main.js"]
+```
