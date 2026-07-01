@@ -577,3 +577,172 @@ module "ecs" {
   subnet_ids = module.vpc.private_subnets
 }
 ```
+
+---
+
+## State Surgery — Advanced State Management
+
+### terraform import (legacy) vs import block (1.5+)
+
+**Old way — CLI import (not in state, not reviewable):**
+```bash
+# Import existing AWS resource into state (one at a time, no plan preview)
+terraform import aws_s3_bucket.my_bucket my-existing-bucket-name
+terraform import aws_instance.web i-0123456789abcdef0
+# Problem: no dry-run, no code generation, easy to get wrong address
+```
+
+**New way — import block (Terraform 1.5+, preferred):**
+```hcl
+# import.tf — commit this, review in PR, run in CI
+import {
+  id = "my-existing-bucket-name"
+  to = aws_s3_bucket.my_bucket
+}
+
+import {
+  id = "i-0123456789abcdef0"
+  to = aws_instance.web
+}
+```
+
+```bash
+# With import block you get a full plan showing what will be imported
+terraform plan   # shows: "will import aws_s3_bucket.my_bucket"
+
+# -generate-config-out: auto-generate HCL from the live resource
+terraform plan -generate-config-out=generated.tf
+# Produces HCL with all attributes filled from AWS — clean up and commit
+
+terraform apply  # import happens as part of normal apply
+```
+
+### moved block — safe resource address refactoring
+
+When you rename a resource in HCL or move it into/out of a module, Terraform sees it as destroy+create without a `moved` block.
+
+```hcl
+# Renamed resource: aws_instance.old_name → aws_instance.new_name
+moved {
+  from = aws_instance.old_name
+  to   = aws_instance.new_name
+}
+
+# Moved into a module: aws_s3_bucket.logs → module.storage.aws_s3_bucket.logs
+moved {
+  from = aws_s3_bucket.logs
+  to   = module.storage.aws_s3_bucket.logs
+}
+
+# Moved from one module call to another
+moved {
+  from = module.app["service-a"]
+  to   = module.app["service-b"]
+}
+```
+
+```bash
+# Verify with plan — should show "move" not "destroy+create"
+terraform plan
+# ~ aws_instance.new_name (moved from aws_instance.old_name)
+#   # (no changes to resource, just address change)
+```
+
+### terraform state commands — surgical operations
+
+```bash
+# List all resources in state
+terraform state list
+terraform state list | grep aws_security_group
+
+# Show full details of one resource in state
+terraform state show aws_s3_bucket.my_bucket
+# Outputs all attributes as they exist in state — useful for debugging diffs
+
+# Remove a resource from state WITHOUT destroying it
+# (hand off to another workspace, or stop managing it)
+terraform state rm aws_s3_bucket.my_bucket
+
+# Move resource between state files (e.g., splitting monolith into modules)
+# In source workspace:
+terraform state mv aws_s3_bucket.logs module.storage.aws_s3_bucket.logs
+# WARNING: modifies state directly with no plan. Take a backup first.
+
+# Pull remote state to local for inspection
+terraform state pull > state_backup_$(date +%Y%m%d).json
+
+# Push modified state back (DANGEROUS — use only for corruption recovery)
+terraform state push state_backup.json
+
+# Manually take a state lock (useful for maintenance windows)
+terraform force-unlock <lock-id>   # release stuck lock after crash
+```
+
+### Module refactoring — splitting a monolith
+
+```
+Before: single root module managing 50 resources
+After:  root module calls network/, compute/, database/ child modules
+```
+
+```bash
+# Step 1: write new module code
+# Step 2: add moved blocks for every resource being re-addressed
+# Step 3: terraform plan — verify zero destroy/create, only moves
+# Step 4: terraform apply — moves are instantaneous (metadata only)
+# Step 5: remove moved blocks in a follow-up PR (they're only needed once)
+```
+
+```hcl
+# Example: moving 5 resources into a network module
+moved { from = aws_vpc.main              to = module.network.aws_vpc.main }
+moved { from = aws_subnet.private_a      to = module.network.aws_subnet.private["a"] }
+moved { from = aws_subnet.private_b      to = module.network.aws_subnet.private["b"] }
+moved { from = aws_internet_gateway.igw  to = module.network.aws_internet_gateway.main }
+moved { from = aws_route_table.public    to = module.network.aws_route_table.public }
+```
+
+### Targeted apply — breaking the plan cycle
+
+```bash
+# Apply only specific resources (bypass unrelated failures)
+terraform apply -target=aws_s3_bucket.my_bucket
+terraform apply -target=module.network
+terraform apply -target=aws_security_group.app -target=aws_security_group.db
+
+# WARNING: targeted apply leaves state inconsistent — dependencies may be stale
+# Always follow with a full plan+apply to ensure consistency
+# Never use -target in automated pipelines
+
+# Similarly for plan (useful for understanding impact)
+terraform plan -target=module.network
+```
+
+### replace — force recreation of a single resource
+
+```bash
+# Taint is deprecated since 1.2. Use -replace instead.
+terraform apply -replace=aws_instance.web
+# Equivalent to: destroy + create in a single apply
+# Use when: resource is corrupted, needs AMI refresh, or is in bad state
+```
+
+### State lock debugging
+
+```bash
+# State is locked when:
+# - Another terraform apply is running
+# - A previous run crashed without releasing the lock
+# - DynamoDB lock table entry is stale
+
+# Check DynamoDB for stuck lock
+aws dynamodb get-item \
+  --table-name terraform-state-lock \
+  --key '{"LockID": {"S": "mybucket/path/to/terraform.tfstate"}}' \
+  --region us-east-1
+
+# Release stuck lock (confirm no apply is actually running first)
+terraform force-unlock <lock-id>
+# Lock ID is in the error message:
+# "Error acquiring the state lock: ID: abc-123-def..."
+```
