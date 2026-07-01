@@ -348,3 +348,146 @@ resources:
     cpu: "2"         # OK to throttle batch jobs
     memory: "512Mi"
 ```
+
+---
+
+## 10. CPU Throttling — The Invisible Performance Killer
+
+A pod can be `Running`, consuming well under its CPU limit in `kubectl top`, and still be severely throttled. This is the most misunderstood resource issue in Kubernetes.
+
+### CFS quota math
+
+The Linux Completely Fair Scheduler enforces CPU limits using **CFS bandwidth control**:
+- Every 100ms (the CFS period), each container gets a quota = `cpu_limit × 100ms`
+- A container with `limits.cpu: 500m` gets 50ms of CPU per 100ms period
+- If it uses all 50ms before the period ends, it is **throttled for the remainder** — sleeping even if the node has idle CPUs
+
+```
+limits.cpu: 500m
+CFS period:  100ms
+CFS quota:   50ms  (500m × 100ms)
+
+Timeline:
+  0ms    Container starts running
+  50ms   Quota exhausted → container THROTTLED (sleeping)
+  100ms  New period begins → quota refilled
+  150ms  Quota exhausted again → throttled
+```
+
+A container with a spiky workload (GC pause, request burst) hits the quota immediately, introducing 50ms latency spikes that don't show up in average CPU metrics.
+
+### Detecting throttling
+
+```bash
+# Prometheus metric — throttle ratio per container
+rate(container_cpu_cfs_throttled_seconds_total[5m])
+  /
+rate(container_cpu_cfs_periods_total[5m])
+# > 0.25 (25%) = significant throttling; investigate and right-size
+# > 0.50 (50%) = severe; app is spending half its time sleeping waiting for quota
+
+# Check throttling for a specific pod directly from cgroup
+NODE=$(kubectl get pod <pod> -o jsonpath='{.spec.nodeName}')
+# On the node (or via privileged debug pod):
+cat /sys/fs/cgroup/cpu/kubepods/burstable/pod<uid>/<container-id>/cpu.stat
+# nr_periods:    100000   ← total CFS periods
+# nr_throttled:  40000    ← periods where throttling occurred  
+# throttled_time: 2000000000  ← nanoseconds throttled (2 seconds)
+# throttle ratio: 40000/100000 = 40% throttled
+```
+
+**PromQL alert:**
+```yaml
+- alert: ContainerCPUThrottling
+  expr: |
+    rate(container_cpu_cfs_throttled_seconds_total{container!=""}[5m])
+    / rate(container_cpu_cfs_periods_total{container!=""}[5m]) > 0.25
+  for: 5m
+  labels:
+    severity: warning
+  annotations:
+    summary: "{{ $labels.pod }}/{{ $labels.container }} throttled {{ $value | humanizePercentage }}"
+```
+
+### Guaranteed vs Burstable — the throttling tradeoff
+
+| QoS | requests == limits | Throttled? | OOM priority |
+|---|---|---|---|
+| **Guaranteed** | Yes (both set equal) | Yes — throttled at limit, no burst | Last to be OOM-killed |
+| **Burstable** | Requests < limits | Only when node is busy OR limit hit | Middle priority |
+| **BestEffort** | Neither set | Never throttled (no limit) | First to be OOM-killed |
+
+**The Guaranteed paradox:** Setting `requests == limits` gives you the highest QoS class and OOM protection, but you get hard throttled at exactly `limits.cpu`. No burst headroom for GC spikes or request bursts.
+
+**Recommended pattern for latency-sensitive services:**
+```yaml
+resources:
+  requests:
+    cpu: "500m"     # what scheduler reserves — keep this accurate
+    memory: "512Mi"
+  limits:
+    memory: "512Mi"  # keep memory limit — OOM is deterministic
+    # NO cpu limit — allows burst to spare node capacity
+    # cpu throttling is often worse than OOM for latency-sensitive apps
+```
+
+Removing the CPU limit converts the pod to **Burstable** QoS. It can use spare CPU capacity freely. The risk: a noisy neighbor pod with no limit can saturate the node. Mitigate with `LimitRange` defaults and node isolation.
+
+### VPA right-sizing workflow
+
+```bash
+# Step 1: Install VPA CRDs and components
+kubectl apply -f https://github.com/kubernetes/autoscaler/releases/latest/download/vertical-pod-autoscaler.yaml
+
+# Step 2: Create VPA in Off mode (observe, don't change)
+cat <<EOF | kubectl apply -f -
+apiVersion: autoscaling.k8s.io/v1
+kind: VerticalPodAutoscaler
+metadata:
+  name: payments-vpa
+  namespace: payments
+spec:
+  targetRef:
+    apiVersion: apps/v1
+    kind: Deployment
+    name: payments
+  updatePolicy:
+    updateMode: "Off"   # recommendations only — no automatic restarts
+EOF
+
+# Step 3: After 24-48h, check recommendations
+kubectl describe vpa payments-vpa -n payments
+# Output:
+#   Recommendation:
+#     Container Recommendations:
+#       Container Name: payments
+#         Lower Bound:  cpu: 100m, memory: 200Mi
+#         Target:       cpu: 350m, memory: 380Mi   ← use this for requests
+#         Upper Bound:  cpu: 1200m, memory: 900Mi
+#         Uncapped Target: cpu: 350m, memory: 380Mi
+
+# Step 4: Apply target as new requests in your deployment
+# requests.cpu: 350m, limits.cpu: (remove or set to 2x)
+# requests.memory: 380Mi, limits.memory: 380Mi (keep equal for Guaranteed)
+
+# Step 5: Switch to Auto mode for ongoing right-sizing
+# updateMode: "Auto"   — VPA evicts and recreates pods with new resources
+# WARNING: VPA in Auto mode conflicts with HPA on CPU metric
+# If using HPA, use VPA in Off or Recommender-only mode
+```
+
+### CPU limit decision matrix
+
+```
+Is the workload latency-sensitive (API, gRPC, real-time)?
+  └── Yes → Remove CPU limit; set accurate requests; use throttling alert
+  └── No  → Set CPU limit; use Guaranteed QoS if memory predictable
+
+Does the workload have GC-heavy language (Java, Go)?
+  └── Yes → GC causes burst; remove limit or set limit to 3-5x requests
+  └── No  → Set limit closer to requests
+
+Is the node shared with untrusted/noisy tenants?
+  └── Yes → Keep CPU limit for isolation; accept some throttling
+  └── No  → Remove limit; rely on requests for fair scheduling
+```

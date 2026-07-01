@@ -300,3 +300,243 @@ flowchart TD
     OK -->|no| RB[Auto rollback<br/>if --atomic]
     PH --> DONE[Save new<br/>release revision]
 ```
+
+---
+
+## 9. OCI Registry — Helm Charts as OCI Artifacts
+
+Helm 3.8+ can push and pull charts from OCI registries (ECR, GCR, Docker Hub) instead of traditional HTTP chart repositories.
+
+```bash
+# Login to ECR as OCI registry
+aws ecr get-login-password --region us-east-1 | \
+  helm registry login \
+  --username AWS \
+  --password-stdin \
+  123456789.dkr.ecr.us-east-1.amazonaws.com
+
+# Push chart to ECR
+helm package ./mychart                          # produces mychart-0.1.0.tgz
+helm push mychart-0.1.0.tgz \
+  oci://123456789.dkr.ecr.us-east-1.amazonaws.com/helm-charts
+
+# Pull and install directly from OCI
+helm install myrelease \
+  oci://123456789.dkr.ecr.us-east-1.amazonaws.com/helm-charts/mychart \
+  --version 0.1.0
+
+# Pull locally to inspect
+helm pull \
+  oci://123456789.dkr.ecr.us-east-1.amazonaws.com/helm-charts/mychart \
+  --version 0.1.0 --untar
+
+# In ArgoCD — reference OCI chart in Application CRD
+# source:
+#   chart: mychart
+#   repoURL: oci://123456789.dkr.ecr.us-east-1.amazonaws.com/helm-charts
+#   targetRevision: 0.1.0
+```
+
+---
+
+## 10. Chart Testing with helm unittest and ct
+
+**helm unittest** (plugin) — unit test Helm templates without a cluster:
+
+```bash
+helm plugin install https://github.com/helm-unittest/helm-unittest
+
+# Test structure:
+# mychart/
+#   tests/
+#     deployment_test.yaml
+#     service_test.yaml
+
+# tests/deployment_test.yaml
+suite: deployment tests
+templates:
+  - deployment.yaml
+tests:
+  - it: should set replica count from values
+    set:
+      replicaCount: 3
+    asserts:
+      - equal:
+          path: spec.replicas
+          value: 3
+  - it: should set image tag
+    set:
+      image.tag: "v2.0.0"
+    asserts:
+      - equal:
+          path: spec.template.spec.containers[0].image
+          value: "myapp:v2.0.0"
+  - it: should not set resource limits when disabled
+    set:
+      resources.limits: null
+    asserts:
+      - notExists:
+          path: spec.template.spec.containers[0].resources.limits
+
+# Run tests
+helm unittest mychart/
+```
+
+**ct (chart-testing)** — lint and integration test in CI:
+
+```bash
+# Install ct
+brew install chart-testing
+
+# Lint all changed charts
+ct lint --config ct.yaml
+
+# ct.yaml
+chart-dirs:
+  - charts
+helm-extra-args: "--timeout 600s"
+check-version-increment: true    # fails if chart changed without version bump
+validate-maintainers: true
+
+# Integration test (deploys chart to kind cluster)
+ct install --config ct.yaml
+```
+
+---
+
+## 11. Post-Render — Kustomize Patches on Helm Output
+
+`--post-renderer` lets you pipe Helm's rendered YAML through any program before applying. Most commonly used with Kustomize:
+
+```bash
+# Post-renderer script: post-render.sh
+#!/bin/bash
+cat <&0 > /tmp/helm-output.yaml
+kubectl kustomize /path/to/overlay >> /tmp/helm-output.yaml
+cat /tmp/helm-output.yaml
+
+chmod +x post-render.sh
+
+# Apply with post-renderer
+helm upgrade --install myapp ./mychart \
+  --post-renderer ./post-render.sh
+```
+
+**Use case — adding annotations Helm chart doesn't expose:**
+```yaml
+# overlay/kustomization.yaml
+resources:
+  - /tmp/helm-output.yaml   # dynamically set by the script
+
+patches:
+  - target:
+      kind: Deployment
+      name: myapp
+    patch: |-
+      - op: add
+        path: /metadata/annotations/prometheus.io~1scrape
+        value: "true"
+      - op: add
+        path: /metadata/annotations/prometheus.io~1port
+        value: "9090"
+```
+
+---
+
+## 12. ArgoCD Integration Patterns
+
+**Helm values from multiple sources (ArgoCD 2.6+):**
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: Application
+metadata:
+  name: payments
+  namespace: argocd
+spec:
+  source:
+    repoURL: https://charts.myorg.com
+    chart: payments
+    targetRevision: 1.4.0
+    helm:
+      valueFiles:
+        - values.yaml
+        - values-production.yaml    # overlay for prod
+      values: |                     # inline overrides (highest priority)
+        image:
+          tag: "git-abc1234"
+      parameters:
+        - name: replicaCount
+          value: "5"
+```
+
+**Multiple sources (ArgoCD 2.6+) — chart from OCI, values from Git:**
+```yaml
+spec:
+  sources:
+    - repoURL: oci://123456789.dkr.ecr.us-east-1.amazonaws.com/helm-charts
+      chart: payments
+      targetRevision: 1.4.0
+      helm:
+        valueFiles:
+          - $values/environments/production/values.yaml
+    - repoURL: https://github.com/myorg/config-repo
+      targetRevision: main
+      ref: values        # variable name used as "$values" above
+```
+
+**Helm release name matching ArgoCD app name:**
+```yaml
+spec:
+  source:
+    helm:
+      releaseName: payments   # default: ArgoCD app name; override here if needed
+```
+
+**ArgoCD + Helmfile (via helmfile ArgoCD plugin):**
+```yaml
+# Install argocd-helmfile plugin in ArgoCD
+# Then reference helmfile.yaml as the source
+spec:
+  source:
+    repoURL: https://github.com/myorg/infra
+    path: deployments/payments
+    targetRevision: main
+    plugin:
+      name: helmfile
+```
+
+---
+
+## 13. Debugging Template Rendering
+
+```bash
+# Render all templates without installing — inspect full YAML output
+helm template myrelease ./mychart \
+  -f values-production.yaml \
+  --set image.tag=v1.2.3 \
+  --debug
+
+# Render a single template
+helm template myrelease ./mychart \
+  --show-only templates/deployment.yaml
+
+# Lint before deploying
+helm lint ./mychart -f values-production.yaml
+# Checks: syntax, required values, chart metadata
+
+# Diff before upgrade (helm-diff plugin)
+helm plugin install https://github.com/databus23/helm-diff
+helm diff upgrade myrelease ./mychart -f values-production.yaml
+# Shows: exactly what will change (green=add, red=remove), like git diff for K8s
+
+# Get computed values for a deployed release
+helm get values myrelease -n payments
+helm get values myrelease -n payments --all  # includes default values
+
+# Get the rendered manifests of a deployed release
+helm get manifest myrelease -n payments
+
+# Rollback (also useful for debugging what changed)
+helm history myrelease -n payments     # list all revisions
+helm rollback myrelease 3 -n payments  # roll back to revision 3
+```
