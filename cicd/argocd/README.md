@@ -654,3 +654,294 @@ Separate projects for prod vs non-prod
   → Different sync policies (manual for prod, auto for staging)
   → Different RBAC (only platform team can sync prod)
 ```
+
+---
+
+## Sync Failure Runbook
+
+### Step 1 — read the sync error
+
+```bash
+# CLI
+argocd app get payments --show-operation
+
+# Or describe the Application CRD
+kubectl describe application payments -n argocd
+# Look at: Status.Conditions, Status.OperationState.Message
+
+# Common error messages and meanings:
+# "rpc error: code = Unknown desc = Forbidden"
+#   → ArgoCD SA lacks permission to create/update this resource
+# "existing object ... is not managed by argocd"
+#   → Resource exists but wasn't created by ArgoCD (no owner annotation)
+#     Fix: argocd app sync payments --force  OR  kubectl annotate ...
+# "one or more objects failed to apply"
+#   → Schema validation error; look for "must be" or "field is required"
+# "ComparisonError: failed to get local objects"
+#   → Cannot render Helm/Kustomize templates; syntax error in values
+```
+
+### Step 2 — sync status taxonomy
+
+| Status | Meaning | Action |
+|---|---|---|
+| `Synced` | Live == desired | None |
+| `OutOfSync` | Live ≠ desired | Review diff, sync |
+| `Unknown` | Can't compare (render failed) | Fix template/values |
+| `SyncFailed` | Apply failed | Read operation message |
+| `Missing` | Resource not in cluster yet | Sync will create it |
+
+### Step 3 — common failure scenarios
+
+**Webhook timeout (sync job runs but never finishes):**
+```bash
+# ArgoCD sync has a default timeout of 1 hour
+# For large apps: extend it
+argocd app set payments --sync-option Timeout=3600
+
+# Or in Application spec:
+spec:
+  syncPolicy:
+    syncOptions:
+      - Timeout=3600
+```
+
+**Resource exists but ArgoCD didn't create it (out-of-band resource):**
+```bash
+# ArgoCD refuses to overwrite resources it doesn't own
+# Option 1: adopt the resource
+kubectl annotate deployment payments \
+  argocd.argoproj.io/managed-by=argocd -n payments
+
+# Option 2: force sync (replaces regardless of ownership)
+argocd app sync payments --force
+
+# Option 3: configure app to adopt all orphaned resources
+spec:
+  syncPolicy:
+    syncOptions:
+      - Replace=true   # uses kubectl replace instead of apply
+```
+
+**CRD missing — app requires CRD that doesn't exist yet:**
+```bash
+# Use sync waves: install CRDs first (wave -1), then CRD-dependent resources (wave 0+)
+# On the CRD manifest:
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "-1"
+
+# On resources that depend on the CRD:
+metadata:
+  annotations:
+    argocd.argoproj.io/sync-wave: "0"
+```
+
+**Hook job failing:**
+```bash
+# Jobs with argocd.argoproj.io/hook: PreSync that fail block the entire sync
+kubectl get jobs -n payments
+kubectl logs job/<hook-job-name> -n payments
+
+# Delete failed hook to unblock sync
+kubectl delete job <hook-job-name> -n payments
+argocd app sync payments
+```
+
+---
+
+## ApplicationSet — Generators
+
+ApplicationSet automates creating many ArgoCD Applications from a single template. Instead of one Application YAML per service/cluster, you write one ApplicationSet.
+
+### Git generator — one app per directory
+
+```yaml
+apiVersion: argoproj.io/v1alpha1
+kind: ApplicationSet
+metadata:
+  name: microservices
+  namespace: argocd
+spec:
+  generators:
+    - git:
+        repoURL: https://github.com/myorg/config-repo
+        revision: main
+        directories:
+          - path: services/*     # one app per directory under services/
+          # exclude: services/experimental  ← can exclude patterns
+  template:
+    metadata:
+      name: '{{path.basename}}'  # app name = directory name
+    spec:
+      project: default
+      source:
+        repoURL: https://github.com/myorg/config-repo
+        targetRevision: main
+        path: '{{path}}'
+      destination:
+        server: https://kubernetes.default.svc
+        namespace: '{{path.basename}}'
+      syncPolicy:
+        automated:
+          prune: true
+          selfHeal: true
+        syncOptions:
+          - CreateNamespace=true
+```
+
+### Matrix generator — every service × every cluster
+
+```yaml
+generators:
+  - matrix:
+      generators:
+        - git:
+            repoURL: https://github.com/myorg/config-repo
+            revision: main
+            files:
+              - path: services/*/config.json   # produces {service: "payments", ...}
+        - list:
+            elements:
+              - cluster: staging
+                url: https://staging.k8s.example.com
+              - cluster: production
+                url: https://prod.k8s.example.com
+template:
+  metadata:
+    name: '{{service}}-{{cluster}}'
+  spec:
+    destination:
+      server: '{{url}}'
+      namespace: '{{service}}'
+    source:
+      path: 'services/{{service}}/{{cluster}}'
+```
+
+### Cluster generator — deploy to all registered clusters
+
+```yaml
+generators:
+  - clusters:
+      selector:
+        matchLabels:
+          environment: production   # only prod clusters
+      # All clusters if no selector
+template:
+  metadata:
+    name: 'monitoring-{{name}}'    # {{name}} = cluster name in ArgoCD
+  spec:
+    destination:
+      server: '{{server}}'         # {{server}} = cluster API URL
+      namespace: monitoring
+    source:
+      repoURL: https://charts.myorg.com
+      chart: monitoring-stack
+      targetRevision: 2.0.0
+```
+
+### Pull Request generator — ephemeral preview environments
+
+```yaml
+generators:
+  - pullRequest:
+      github:
+        owner: myorg
+        repo: config-repo
+        tokenRef:
+          secretName: github-token
+          key: token
+        labels:
+          - preview           # only PRs with this label
+template:
+  metadata:
+    name: 'preview-{{number}}'    # {{number}} = PR number
+  spec:
+    destination:
+      namespace: 'preview-{{number}}'
+    source:
+      helm:
+        parameters:
+          - name: image.tag
+            value: 'pr-{{number}}'
+    syncPolicy:
+      syncOptions:
+        - CreateNamespace=true
+```
+
+---
+
+## Health Check Customization
+
+ArgoCD uses built-in health checks for core K8s resources. You can override them with Lua scripts.
+
+### Custom resource health check
+
+```yaml
+# In argocd-cm ConfigMap:
+data:
+  resource.customizations.health.myorg.io_MyDatabase: |
+    hs = {}
+    hs.status = "Progressing"
+    hs.message = ""
+    if obj.status ~= nil then
+      if obj.status.phase == "Running" then
+        hs.status = "Healthy"
+      elseif obj.status.phase == "Failed" then
+        hs.status = "Degraded"
+        hs.message = obj.status.message
+      end
+    end
+    return hs
+```
+
+### Override Deployment health to check custom condition
+
+```yaml
+resource.customizations.health.apps_Deployment: |
+  hs = {}
+  if obj.status ~= nil then
+    if obj.status.conditions ~= nil then
+      for i, condition in ipairs(obj.status.conditions) do
+        if condition.type == "MyCustomReady" and condition.status == "False" then
+          hs.status = "Degraded"
+          hs.message = condition.message
+          return hs
+        end
+      end
+    end
+  end
+  -- Fall through to default Deployment health check logic
+  hs.status = "Healthy"
+  return hs
+```
+
+### Ignore differences — stop OutOfSync noise
+
+Some controllers mutate resources after ArgoCD applies them (e.g., adding `generation`, `resourceVersion`, or controller-managed fields). Configure ArgoCD to ignore these fields:
+
+```yaml
+# In Application spec:
+spec:
+  ignoreDifferences:
+    - group: apps
+      kind: Deployment
+      jsonPointers:
+        - /spec/replicas          # HPA manages replicas; ignore ArgoCD's desired count
+    - group: ""
+      kind: Service
+      jsonPointers:
+        - /spec/clusterIP         # assigned by K8s, not in git
+    - group: admissionregistration.k8s.io
+      kind: MutatingWebhookConfiguration
+      jsonPointers:
+        - /webhooks/0/clientConfig/caBundle   # cert-manager injects this
+```
+
+```yaml
+# Global ignore (argocd-cm):
+data:
+  resource.customizations.ignoreDifferences.apps_Deployment: |
+    jqPathExpressions:
+      - .spec.replicas
+```
