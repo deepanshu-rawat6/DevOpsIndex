@@ -254,3 +254,239 @@ kubectl describe rolebinding my-app-pod-reader -n payments
 # Check if a specific action is allowed
 kubectl auth can-i create deployments --as=system:serviceaccount:payments:my-app -n payments
 ```
+
+
+# Check if a specific action is allowed
+kubectl auth can-i create deployments --as=system:serviceaccount:payments:my-app -n payments
+
+# Who has cluster-admin? (critical audit check)
+kubectl get clusterrolebindings -o json | \
+  jq '.items[] | select(.roleRef.name=="cluster-admin") | {name: .metadata.name, subjects: .subjects}'
+```
+
+---
+
+## RBAC — Advanced Patterns and EKS
+
+### kubectl auth reconcile
+
+`kubectl apply` on RBAC objects can produce conflicts if a ClusterRole already exists with different rules. `kubectl auth reconcile` is the safe way to apply RBAC — it adds missing rules without removing existing ones:
+
+```bash
+# Apply RBAC idempotently (safe for GitOps pipelines)
+kubectl auth reconcile -f rbac-manifests/
+
+# Dry-run first
+kubectl auth reconcile -f rbac-manifests/ --dry-run=client
+```
+
+### Aggregated ClusterRoles
+
+ClusterRoles can be composed from smaller roles using `aggregationRule`. Any ClusterRole with a matching label automatically has its rules merged in. Used by Kubernetes to build `view`, `edit`, `admin` roles from extension API groups:
+
+```yaml
+# Base aggregated role — collects rules from labeled sub-roles
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: custom-platform-role
+aggregationRule:
+  clusterRoleSelectors:
+    - matchLabels:
+        rbac.example.com/aggregate-to-platform: "true"
+rules: []  # auto-populated from matching ClusterRoles
+
+---
+# Sub-role that gets merged in automatically
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: platform-secrets-reader
+  labels:
+    rbac.example.com/aggregate-to-platform: "true"  # triggers aggregation
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    verbs: ["get", "list"]
+```
+
+### Token projection and bound service account tokens
+
+Modern K8s (1.21+) uses **projected tokens** — short-lived (1h default), audience-bound, and tied to a specific pod. They replace the old static Secrets-based tokens.
+
+```yaml
+# Explicitly configure projected token (usually auto-injected, but here for clarity)
+spec:
+  volumes:
+    - name: token
+      projected:
+        sources:
+          - serviceAccountToken:
+              path: token
+              expirationSeconds: 3600      # 1 hour
+              audience: "https://kubernetes.default.svc"
+  containers:
+    - name: app
+      volumeMounts:
+        - name: token
+          mountPath: /var/run/secrets/kubernetes.io/serviceaccount
+```
+
+```bash
+# Decode the token to inspect claims
+kubectl exec <pod> -- cat /var/run/secrets/kubernetes.io/serviceaccount/token | \
+  cut -d. -f2 | base64 -d 2>/dev/null | jq .
+# {
+#   "aud": ["https://kubernetes.default.svc"],
+#   "exp": 1700000000,
+#   "iat": 1699996400,
+#   "iss": "https://kubernetes.default.svc",
+#   "kubernetes.io": {
+#     "namespace": "payments",
+#     "pod": { "name": "my-app-xxx", "uid": "..." },
+#     "serviceaccount": { "name": "my-app", "uid": "..." }
+#   },
+#   "sub": "system:serviceaccount:payments:my-app"
+# }
+```
+
+### EKS — aws-auth ConfigMap (legacy) vs Access Entries (current)
+
+EKS authenticates using IAM. The mapping from IAM identity → Kubernetes username/groups is configured two ways:
+
+**aws-auth ConfigMap (EKS < 1.30, legacy):**
+```yaml
+# kubectl edit configmap aws-auth -n kube-system
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: aws-auth
+  namespace: kube-system
+data:
+  mapRoles: |
+    # Worker node IAM role → system:nodes group (required for nodes to join)
+    - rolearn: arn:aws:iam::123456789:role/eks-node-role
+      username: system:node:{{EC2PrivateDNSName}}
+      groups:
+        - system:bootstrappers
+        - system:nodes
+    # Human IAM role → Kubernetes RBAC group
+    - rolearn: arn:aws:iam::123456789:role/devops-team
+      username: devops-{{SessionName}}
+      groups:
+        - platform-admins   # bind this group to a ClusterRole in RBAC
+  mapUsers: |
+    # Specific IAM user (avoid when possible — use roles)
+    - userarn: arn:aws:iam::123456789:user/alice
+      username: alice
+      groups:
+        - developers
+```
+
+**Access Entries (EKS 1.30+, recommended):**
+```bash
+# Create an access entry (replaces aws-auth ConfigMap rows)
+aws eks create-access-entry \
+  --cluster-name my-cluster \
+  --principal-arn arn:aws:iam::123456789:role/devops-team \
+  --type STANDARD \
+  --kubernetes-groups platform-admins
+
+# Associate with an access policy (AWS-managed or custom)
+aws eks associate-access-policy \
+  --cluster-name my-cluster \
+  --principal-arn arn:aws:iam::123456789:role/devops-team \
+  --policy-arn arn:aws:eks::aws:cluster-access-policy/AmazonEKSClusterAdminPolicy \
+  --access-scope '{"type": "cluster"}'
+
+# List all access entries
+aws eks list-access-entries --cluster-name my-cluster
+```
+
+Access Entries survive `aws-auth` ConfigMap corruption (a common incident that locks everyone out of the cluster).
+
+### IRSA — IAM Roles for Service Accounts
+
+IRSA lets a Kubernetes ServiceAccount assume an AWS IAM role without static credentials. The pod gets a projected token, exchanges it at the STS OIDC endpoint, and receives temporary AWS credentials.
+
+```bash
+# 1. Create OIDC provider for your EKS cluster (one-time per cluster)
+eksctl utils associate-iam-oidc-provider \
+  --cluster my-cluster --approve
+
+# 2. Create IAM role with trust policy scoped to specific ServiceAccount
+OIDC_ID=$(aws eks describe-cluster --name my-cluster \
+  --query "cluster.identity.oidc.issuer" --output text | cut -d/ -f5)
+
+aws iam create-role \
+  --role-name my-app-s3-role \
+  --assume-role-policy-document '{
+    "Version": "2012-10-17",
+    "Statement": [{
+      "Effect": "Allow",
+      "Principal": {"Federated": "arn:aws:iam::123456789:oidc-provider/oidc.eks.us-east-1.amazonaws.com/id/'"$OIDC_ID"'"},
+      "Action": "sts:AssumeRoleWithWebIdentity",
+      "Condition": {
+        "StringEquals": {
+          "oidc.eks.us-east-1.amazonaws.com/id/'"$OIDC_ID"':aud": "sts.amazonaws.com",
+          "oidc.eks.us-east-1.amazonaws.com/id/'"$OIDC_ID"':sub": "system:serviceaccount:payments:my-app"
+        }
+      }
+    }]
+  }'
+```
+
+```yaml
+# 3. Annotate the ServiceAccount
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: my-app
+  namespace: payments
+  annotations:
+    eks.amazonaws.com/role-arn: arn:aws:iam::123456789:role/my-app-s3-role
+    eks.amazonaws.com/token-expiration: "3600"  # optional: shorter token lifetime
+```
+
+```bash
+# 4. Verify — pod should have these env vars injected by the EKS pod identity webhook:
+kubectl exec <pod> -- env | grep AWS
+# AWS_ROLE_ARN=arn:aws:iam::123456789:role/my-app-s3-role
+# AWS_WEB_IDENTITY_TOKEN_FILE=/var/run/secrets/eks.amazonaws.com/serviceaccount/token
+# AWS_DEFAULT_REGION=us-east-1
+
+# If missing: check the pod admission mutation webhook is running
+kubectl get mutatingwebhookconfigurations | grep pod-identity
+```
+
+### Common RBAC misconfigurations
+
+| Misconfiguration | Risk | Detection |
+|---|---|---|
+| `default` SA used for all pods | Blast radius: any compromised pod has the same identity | `kubectl get rolebindings,clusterrolebindings -A -o json \| jq '.items[].subjects[] \| select(.name=="default")'` |
+| `cluster-admin` for CI/CD SA | CI pipeline compromise = full cluster takeover | `kubectl get clusterrolebindings -o json \| jq ... \| select(.roleRef.name=="cluster-admin")'` |
+| `automountServiceAccountToken: true` on non-API pods | Token in every pod, even ones that don't need K8s API | Set `false` on Deployment spec, override on SA |
+| Wildcard verb+resource | `verbs: ["*"] resources: ["*"]` = cluster-admin equivalent | Audit: `kubectl get roles,clusterroles -A -o yaml \| grep '"*"'` |
+| RoleBinding to system:authenticated | Every authenticated user (including service accounts) gets the role | Audit ClusterRoleBindings for system:authenticated subject |
+| Stale bindings after team changes | Former employees' IAM roles still mapped in aws-auth | Review `aws-auth` ConfigMap quarterly |
+
+### RBAC audit one-liners
+
+```bash
+# Find all cluster-admin bindings
+kubectl get clusterrolebindings -o json | \
+  jq -r '.items[] | select(.roleRef.name=="cluster-admin") |
+  "\(.metadata.name): \(.subjects // [] | map(.name) | join(", "))"'
+
+# Find all ServiceAccounts with cluster-wide permissions
+kubectl get clusterrolebindings -o json | \
+  jq -r '.items[] | .subjects[]? | select(.kind=="ServiceAccount") |
+  "\(.namespace)/\(.name)"' | sort -u
+
+# What can a given ServiceAccount do across all namespaces?
+for ns in $(kubectl get ns -o jsonpath='{.items[*].metadata.name}'); do
+  kubectl auth can-i --list \
+    --as=system:serviceaccount:payments:my-app \
+    -n $ns 2>/dev/null | grep -v "^Resources" | grep -v "^\*"
+done
+```

@@ -1163,3 +1163,217 @@ graph LR
 ```
 
 Pod A → Pod C: `cni0 bridge → eth0 → CNI network → eth0 (Node 2) → cni0 bridge → Pod C`. From Pod A's perspective it's just a direct IP connection to `10.0.2.5`.
+
+---
+
+## NetworkPolicy — Advanced Patterns
+
+### AND vs OR in selector logic
+
+The most common NetworkPolicy bug: accidentally writing OR when you mean AND.
+
+```yaml
+# OR — either condition grants access (two separate list items)
+ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          env: prod        # any pod in the prod namespace
+    - podSelector:         # OR any pod with app=api in ANY namespace
+        matchLabels:
+          app: api
+
+# AND — pod must satisfy BOTH conditions (same list item, same indent)
+ingress:
+  - from:
+    - namespaceSelector:
+        matchLabels:
+          env: prod        # pod must be in prod namespace
+      podSelector:         # AND must have app=api label
+        matchLabels:
+          app: api
+```
+
+The YAML indentation is the semantic difference. `namespaceSelector` + `podSelector` at the same indent level under the same `- {}` block = AND. Separate `- {}` items = OR.
+
+### Deny-all templates
+
+```yaml
+# Deny all ingress to all pods in namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-ingress
+  namespace: payments
+spec:
+  podSelector: {}      # {} = all pods
+  policyTypes: [Ingress]
+  # No ingress rules = deny all
+
+---
+# Deny all egress from all pods in namespace
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-egress
+  namespace: payments
+spec:
+  podSelector: {}
+  policyTypes: [Egress]
+  # No egress rules = deny all (note: also blocks DNS — add port 53 exception)
+
+---
+# Recommended default-deny with DNS allowed
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: default-deny-with-dns
+  namespace: payments
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  egress:
+    - ports:
+        - port: 53
+          protocol: UDP
+        - port: 53
+          protocol: TCP   # TCP fallback for large DNS responses
+```
+
+### Egress to Kubernetes API server
+
+When you lock down egress, pods that call the K8s API (operators, controllers, admission webhooks, pods using `kubectl`) stop working. The API server ClusterIP is `10.96.0.1:443` by default.
+
+```bash
+# Find the API server ClusterIP in your cluster
+kubectl get svc kubernetes -n default
+# NAME         TYPE        CLUSTER-IP   EXTERNAL-IP   PORT(S)   AGE
+# kubernetes   ClusterIP   10.96.0.1    <none>        443/TCP   30d
+```
+
+```yaml
+# Allow egress to K8s API server
+egress:
+  - to:
+    - ipBlock:
+        cidr: 10.96.0.1/32   # API server ClusterIP — get from above
+    ports:
+      - port: 443
+        protocol: TCP
+  - ports:                    # DNS always required
+    - port: 53
+      protocol: UDP
+```
+
+### Isolating namespaces from each other
+
+```yaml
+# Namespace A: allow only intra-namespace traffic
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: namespace-isolation
+  namespace: team-a
+spec:
+  podSelector: {}
+  policyTypes: [Ingress, Egress]
+  ingress:
+    - from:
+      - podSelector: {}   # only pods in THIS namespace (no namespaceSelector = same NS only)
+  egress:
+    - to:
+      - podSelector: {}   # same — only same namespace
+    - ports:
+      - port: 53
+        protocol: UDP
+```
+
+### Allow monitoring namespace to scrape all namespaces
+
+```yaml
+# In every application namespace: allow Prometheus to scrape metrics
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: allow-prometheus-scrape
+  namespace: payments           # repeat per app namespace, or use Kyverno to auto-generate
+spec:
+  podSelector: {}
+  policyTypes: [Ingress]
+  ingress:
+    - from:
+      - namespaceSelector:
+          matchLabels:
+            kubernetes.io/metadata.name: monitoring
+        podSelector:
+          matchLabels:
+            app: prometheus
+      ports:
+        - port: 9090             # change to your metrics port
+```
+
+### CNI enforcement matrix
+
+Not all CNI plugins enforce NetworkPolicy. Applying a policy to a cluster where the CNI ignores it gives false security.
+
+| CNI | NetworkPolicy enforcement | Notes |
+|---|---|---|
+| Flannel (vanilla) | ❌ No | Policies accepted but silently ignored |
+| Calico | ✅ Yes | Also supports Calico-native GlobalNetworkPolicy (cluster-wide) |
+| Cilium | ✅ Yes | Also supports L7 (HTTP path/method) via CiliumNetworkPolicy |
+| Weave | ✅ Yes | Deprecated project, use with caution |
+| AWS VPC CNI (EKS) | ✅ Yes (with network-policy addon) | Must explicitly enable: `--enable-network-policy-controller` |
+| kube-router | ✅ Yes | Uses iptables/IPVS |
+
+**EKS-specific:** VPC CNI network policy enforcement requires the `aws-network-policy-agent` DaemonSet. Without it, NetworkPolicy objects are accepted by the API but not enforced.
+```bash
+# Check if network policy agent is running
+kubectl get ds -n kube-system aws-node
+kubectl get ds -n kube-system aws-network-policy-agent
+```
+
+### Istio L7 AuthorizationPolicy — beyond L4 NetworkPolicy
+
+NetworkPolicy controls which pods can connect to which other pods (L4 — IP/port). It cannot block based on HTTP path, method, or headers. For L7 control, use Istio's `AuthorizationPolicy`.
+
+```yaml
+# Only allow GET requests to /public path — block everything else
+apiVersion: security.istio.io/v1beta1
+kind: AuthorizationPolicy
+metadata:
+  name: payments-authz
+  namespace: payments
+spec:
+  selector:
+    matchLabels:
+      app: payments
+  action: ALLOW
+  rules:
+    - from:
+        - source:
+            principals: ["cluster.local/ns/frontend/sa/frontend-sa"]  # mTLS identity
+      to:
+        - operation:
+            methods: ["GET"]
+            paths: ["/public/*"]
+    - from:
+        - source:
+            principals: ["cluster.local/ns/backend/sa/orders-sa"]
+      to:
+        - operation:
+            methods: ["POST", "PUT"]
+            paths: ["/api/payments/*"]
+```
+
+**NetworkPolicy + AuthorizationPolicy together:** NetworkPolicy is enforced by the CNI at the kernel level (L4). AuthorizationPolicy is enforced by the Envoy sidecar (L7). Use both: NetworkPolicy as the first line of defense (block pods that shouldn't even connect), AuthorizationPolicy for fine-grained HTTP-level control.
+
+### Common NetworkPolicy mistakes
+
+| Mistake | Symptom | Fix |
+|---|---|---|
+| Forgetting DNS egress | Everything resolves as NXDOMAIN, no connectivity | Add `egress: port 53 UDP/TCP` |
+| OR when AND intended | More permissive than expected | Use same-indent namespaceSelector+podSelector |
+| CNI doesn't enforce | Policy exists but traffic not blocked | Check CNI type; EKS needs explicit addon |
+| No policy on new namespace | New namespaces are wide-open | Use Kyverno/OPA to auto-apply default-deny on namespace creation |
+| Blocking kube-apiserver egress | Operators and admission webhooks fail | Allow egress to API server ClusterIP:443 |
+| Forgetting metrics port | Prometheus scrapes fail | Add ingress rule for port 9090 from monitoring NS |

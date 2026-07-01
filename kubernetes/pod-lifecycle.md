@@ -251,3 +251,177 @@ spec:
         exec:
           command: ["/bin/sh", "-c", "sleep 5"]
 ```
+
+---
+
+## 5. Why a Pod Won't Die — Complete Troubleshooting Guide
+
+`kubectl delete pod` sets `deletionTimestamp` on the pod object. The kubelet then orchestrates shutdown. If the pod stays in `Terminating` indefinitely, one of these is the cause.
+
+### Diagnostic flow
+
+```mermaid
+flowchart TD
+    DELETE["kubectl delete pod"] --> DT["deletionTimestamp set on pod"]
+    DT --> CHECK{Pod still Terminating?}
+    CHECK -->|yes| FIN["kubectl get pod -o json\ncheck .metadata.finalizers"]
+    FIN -->|"finalizers present"| FBLOCK["Controller that owns finalizer\nis stuck or crashed"]
+    CHECK -->|yes| PRESTOP["preStop hook hanging?\ncheck pod events for\n'PreStopHook timeout'"]
+    CHECK -->|yes| NODE["kubectl get node — is node NotReady?\nkubelet offline → deletion never executed"]
+    CHECK -->|yes| WEBHOOK["kubectl get validatingwebhookconfigurations\nwebhook with failurePolicy:Fail blocking delete"]
+    CHECK -->|yes| VOL["Volume unmount stuck?\ncheck kubelet logs on the node"]
+    CHECK -->|yes| PDB["kubectl get pdb -n ns\nminAvailable blocking eviction"]
+```
+
+### 1. Finalizers blocking deletion
+
+A finalizer is a string in `metadata.finalizers`. Kubernetes won't remove the object from etcd until every finalizer is cleared by its owning controller.
+
+```bash
+# Check for finalizers
+kubectl get pod <name> -n <ns> -o json | jq '.metadata.finalizers'
+
+# Common finalizers:
+# "kubernetes.io/pvc-protection"      — storage controller
+# "foregroundDeletion"                — cascade delete in progress
+# "batch.kubernetes.io/job-tracking"  — job controller
+# Custom controllers (ArgoCD, Istio) add their own
+
+# Emergency removal — bypasses the controller's cleanup logic
+kubectl patch pod <name> -n <ns> \
+  -p '{"metadata":{"finalizers":[]}}' --type=merge
+# Warning: only do this if the controller is confirmed dead/broken
+# The finalizer exists to run cleanup code — skipping it may leak resources
+```
+
+### 2. PodDisruptionBudget blocking eviction
+
+PDB only blocks *eviction* (node drain, rolling update), not `kubectl delete`. But it blocks the drain → the drain blocks the node upgrade → people see pods "stuck". Clarify: `kubectl delete` ignores PDB. `kubectl drain` respects it.
+
+```bash
+kubectl get pdb -n <ns>
+# NAME           MIN AVAILABLE   MAX UNAVAILABLE   ALLOWED DISRUPTIONS   AGE
+# payments-pdb   2               N/A               0                     5d
+# ALLOWED DISRUPTIONS = 0 means drain will block
+
+# See why PDB is blocking:
+kubectl describe pdb payments-pdb -n <ns>
+# "Cannot disrupt pod payments-xxx: would violate PodDisruptionBudget"
+
+# Options:
+# 1. Scale up the deployment first so minAvailable is met
+# 2. Delete the PDB temporarily (risky)
+# 3. Use --disable-eviction on kubectl drain (bypasses PDB entirely, use with care)
+kubectl drain <node> --disable-eviction --ignore-daemonsets
+```
+
+### 3. PID 1 not forwarding signals — the silent killer
+
+When a container's `CMD` uses shell form, the shell becomes PID 1. Shell does NOT forward signals to child processes by default. SIGTERM goes to the shell, the child never sees it, grace period expires, SIGKILL fires.
+
+```bash
+# Check what PID 1 is inside a running pod
+kubectl exec <pod> -- ps -p 1
+# If PID 1 is "sh" or "bash" → signal forwarding broken
+```
+
+```dockerfile
+# BROKEN — shell form: /bin/sh -c "java -jar app.jar"
+# sh is PID 1, java is a child. SIGTERM → sh → sh exits, java gets SIGKILL
+CMD ["sh", "-c", "java -jar app.jar"]
+
+# FIXED — exec form: java is PID 1 directly
+CMD ["java", "-jar", "app.jar"]
+
+# FIXED — use tini as a minimal init that forwards signals
+FROM debian:bookworm-slim
+RUN apt-get install -y tini
+ENTRYPOINT ["/usr/bin/tini", "--"]
+CMD ["java", "-jar", "app.jar"]
+# tini: PID 1, reaps zombies, forwards signals to java
+
+# FIXED — dumb-init alternative
+ADD https://github.com/Yelp/dumb-init/releases/download/v1.2.5/dumb-init_1.2.5_x86_64 /usr/bin/dumb-init
+RUN chmod +x /usr/bin/dumb-init
+ENTRYPOINT ["/usr/bin/dumb-init", "--"]
+CMD ["java", "-jar", "app.jar"]
+```
+
+**Shell script workaround (when you must use a shell wrapper):**
+```bash
+#!/bin/sh
+# Pass signals to child — exec replaces the shell with the child
+exec java -jar /app/app.jar
+```
+
+The `exec` call replaces the shell process with java — java becomes PID 1 and receives signals directly.
+
+**Docker STOPSIGNAL:**
+```dockerfile
+# Override the signal sent on docker stop / kubectl delete
+# Default is SIGTERM. Some apps (nginx) use SIGQUIT for graceful drain.
+STOPSIGNAL SIGQUIT
+```
+
+### 4. Node partition / NotReady
+
+If the node hosting the pod loses connectivity, the API server marks it `NotReady`. The kubelet is offline, so it cannot execute the deletion. Pod stays in `Terminating` until the node recovers or an operator intervenes.
+
+```bash
+kubectl get nodes  # node is NotReady
+
+# Option 1: Wait for node recovery (kubelet reconnects and finishes deletion)
+
+# Option 2: Force-delete the pod from etcd (object removed; kubelet may still
+# be running the container on the partitioned node until it recovers)
+kubectl delete pod <name> -n <ns> --grace-period=0 --force
+
+# Option 3: Apply out-of-service taint — triggers non-graceful pod deletion
+# across ALL pods on the node, correctly handles StatefulSet volumes
+kubectl taint nodes <node-name> \
+  node.kubernetes.io/out-of-service=nodeshutdown:NoExecute
+# Remove taint after node is confirmed gone:
+kubectl taint nodes <node-name> node.kubernetes.io/out-of-service-
+```
+
+`--force --grace-period=0` removes the pod object from etcd immediately. The container may still be running on the node if the kubelet is still alive (rescheduled StatefulSet pods with the same name could conflict with the old container until the node syncs). Use with care for stateful workloads.
+
+### 5. Admission webhook blocking the delete
+
+A validating webhook with `failurePolicy: Fail` intercepts the delete API call. If the webhook is down or returns a rejection, the delete is refused.
+
+```bash
+# List webhooks with Fail policy
+kubectl get validatingwebhookconfigurations -o json | \
+  jq '.items[] | select(.webhooks[].failurePolicy=="Fail") | .metadata.name'
+
+# Check if webhook pods are running
+kubectl get pods -n <webhook-namespace>
+
+# Emergency: delete the webhook configuration (re-apply after fixing the webhook)
+kubectl delete validatingwebhookconfiguration <name>
+```
+
+### 6. Volume unmount hanging
+
+If a CSI or NFS volume is stuck unmounting (network storage timeout, buggy CSI driver), the kubelet hangs in the teardown phase and never completes pod deletion.
+
+```bash
+# Check kubelet logs on the affected node (via node-shell or DaemonSet log pod)
+# or via EKS/CloudWatch if direct access unavailable
+kubectl get events -n <ns> --sort-by='.lastTimestamp' | grep -i volume
+
+# Force-unmount (dangerous) or restart kubelet (will try again)
+# For CSI: check the CSI driver pod logs in kube-system
+kubectl logs -n kube-system -l app=<csi-driver> --tail=100
+```
+
+### Quick reference: force delete vs graceful delete
+
+| Method | What happens | When to use |
+|---|---|---|
+| `kubectl delete pod` | Sets deletionTimestamp, kubelet runs shutdown sequence | Normal operations |
+| `kubectl delete pod --grace-period=0` | Sets deletionTimestamp with 0s grace; kubelet sends SIGKILL immediately | App is hung, grace period too long |
+| `kubectl delete pod --grace-period=0 --force` | Removes from etcd immediately, bypasses kubelet | Node is offline, pod stuck in Terminating |
+| `kubectl patch pod -p '{"metadata":{"finalizers":[]}}'` | Clears finalizers; object deleted after next sync | Finalizer controller dead |
+| Out-of-service taint on node | Triggers non-graceful deletion of all pods on node | Node confirmed dead, need volumes freed |
