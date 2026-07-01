@@ -46,7 +46,7 @@ Kubernetes, Linux, Docker, AWS, GCP, CI/CD, IaC, Monitoring, Git, and SRE — or
 | [linux/cgroup-v2.md](./linux/cgroup-v2.md) | cgroup v2 hierarchy, cpu.max/weight, memory.high, PSI pressure files, I/O limits, K8s mapping | SDE-2 |
 | [linux/proc-internals.md](./linux/proc-internals.md) | /proc/maps, /proc/smaps (RSS/PSS/Private_Dirty), /proc/status, /proc/fd, signal masks | SDE-2 |
 | [linux/ebpf-bpftrace.md](./linux/ebpf-bpftrace.md) | eBPF hooks, bpftrace one-liners for CPU/memory/network/disk, BCC tools, overhead comparison | SDE-2 |
-| [linux/signals.md](./linux/signals.md) | SIGTERM vs SIGKILL internals, signal delivery, signal masks, SIGCHLD/zombies, Go graceful shutdown | SDE-1/2 |
+| [linux/signals.md](./linux/signals.md) | SIGTERM vs SIGKILL internals, signal delivery, signal masks, SIGCHLD/zombies, Go graceful shutdown; PID 1 problem, shell vs exec form, tini/dumb-init, STOPSIGNAL, graceful shutdown checklist | SDE-1/2 |
 
 **Read order:** README → commands → boot → systemd → networking → network-tools → io-models → scheduler → security → memory-tuning → strace-perf → containers-evolution → cgroup-v2 → proc-internals → ebpf-bpftrace → signals
 
@@ -92,15 +92,15 @@ Kubernetes, Linux, Docker, AWS, GCP, CI/CD, IaC, Monitoring, Git, and SRE — or
 | [kubernetes/README.md](./kubernetes/README.md) | Architecture, kubectl apply flow, scheduler internals, taints, nodeAffinity, podAffinity/anti-affinity, GPU scenarios | SDE-1/2 |
 | [kubernetes/kubectl-cheatsheet.md](./kubernetes/kubectl-cheatsheet.md) | Context switching, pod/deployment/debug operations, one-liners, jsonpath | SDE-1 |
 | [kubernetes/workloads.md](./kubernetes/workloads.md) | Pod lifecycle, probes, QoS, Deployments, StatefulSets, DaemonSets, Jobs | SDE-1 |
-| [kubernetes/networking.md](./kubernetes/networking.md) | Services, ClusterIP/iptables, DNS, Ingress, NetworkPolicy, CNI, per-node virtual networks | SDE-1/2 |
+| [kubernetes/networking.md](./kubernetes/networking.md) | Services, ClusterIP/iptables, DNS, Ingress, NetworkPolicy, CNI, per-node virtual networks; AND vs OR selectors, deny-all templates, egress to K8s API, Istio AuthorizationPolicy, CNI enforcement matrix | SDE-1/2 |
 | [kubernetes/resource-limits.md](./kubernetes/resource-limits.md) | Requests vs limits, CPU throttling math, OOMKill, QoS classes, LimitRange, ResourceQuota, node allocatable chain, VPA | SDE-1/2 |
 | [kubernetes/storage.md](./kubernetes/storage.md) | PV/PVC/StorageClass, dynamic provisioning, CSI, volume snapshots | SDE-1 |
 | [kubernetes/autoscaling.md](./kubernetes/autoscaling.md) | HPA, VPA, KEDA, Cluster Autoscaler, Karpenter | SDE-2 |
-| [kubernetes/rbac.md](./kubernetes/rbac.md) | ServiceAccount, Role/ClusterRole, RoleBinding, auth chain | SDE-1 |
+| [kubernetes/rbac.md](./kubernetes/rbac.md) | ServiceAccount, Role/ClusterRole, RoleBinding, auth chain; IRSA, EKS aws-auth/Access Entries, token projection, aggregated roles, RBAC audit one-liners | SDE-1/2 |
 | [kubernetes/helm.md](./kubernetes/helm.md) | Chart structure, templating, hooks, library charts, Helmfile, debugging | SDE-1/2 |
 | [kubernetes/eks-architecture.md](./kubernetes/eks-architecture.md) | EKS managed control plane, VPC CNI, IRSA, node groups, Fargate | SDE-1/2 |
 | [kubernetes/coredns.md](./kubernetes/coredns.md) | Corefile plugins, ndots:5 problem + fix, forwarding, caching, dnsPolicy options, debugging, NodeLocal DNSCache | SDE-1/2 |
-| [kubernetes/pod-lifecycle.md](./kubernetes/pod-lifecycle.md) | Startup sequence (sandbox→CNI→image→probes→Endpoints), admission controller chain, server-side apply, termination race + preStop fix | SDE-2 |
+| [kubernetes/pod-lifecycle.md](./kubernetes/pod-lifecycle.md) | Startup sequence (sandbox→CNI→image→probes→Endpoints), admission controller chain, server-side apply, termination race + preStop fix; why pod won't die: finalizers, PDB, PID 1, node partition, force delete, webhook blocking | SDE-2 |
 | [kubernetes/kube-proxy-modes.md](./kubernetes/kube-proxy-modes.md) | iptables O(n) + conntrack, IPVS O(1) + LB algorithms, Cilium/eBPF socket-level LB (no DNAT), comparison | SDE-2 |
 | [kubernetes/cross-node-networking.md](./kubernetes/cross-node-networking.md) | Same-node veth/bridge, VXLAN overlay, Calico BGP direct routing, AWS VPC CNI flat network, MTU table | SDE-2 |
 | [kubernetes/hpa-vpa-internals.md](./kubernetes/hpa-vpa-internals.md) | HPA internals every stage, VPA components, singleton VPA, HPA+VPA conflict | SDE-1/2 |
@@ -145,7 +145,7 @@ Kubernetes, Linux, Docker, AWS, GCP, CI/CD, IaC, Monitoring, Git, and SRE — or
 
 | File | Topics | Level |
 |------|--------|-------|
-| [aws/README.md](./aws/README.md) | VPC, subnets, SGs vs NACLs, NAT GW, IGW, VPC Peering, Transit Gateway | SDE-1 |
+| [aws/README.md](./aws/README.md) | VPC, subnets, SGs vs NACLs, NAT GW, IGW, VPC Peering, Transit Gateway; route table deep-dive: local entry, longest-prefix match, VPC endpoint routes, TGW/VGW routes, blackhole routes, per-AZ NAT | SDE-1/2 |
 | [aws/ecs-fargate.md](./aws/ecs-fargate.md) | ECS Fargate task definition, networking, rolling updates, auto scaling, debugging | SDE-1/2 |
 | [aws/request-flow-alb-to-pod.md](./aws/request-flow-alb-to-pod.md) | Route53→ALB→TargetGroup→Pod full flow, ALB vs NLB, L4 vs L7, debug commands | SDE-1/2 |
 | [aws/services-overview.md](./aws/services-overview.md) | IAM, ALB/NLB, Route 53, ECS vs EKS, TLS/mTLS | SDE-1 |
@@ -177,7 +177,7 @@ Kubernetes, Linux, Docker, AWS, GCP, CI/CD, IaC, Monitoring, Git, and SRE — or
 | [monitoring/alertmanager.md](./monitoring/alertmanager.md) | Routing tree, grouping, inhibition, silences, complete config, debugging | SDE-1/2 |
 | [monitoring/grafana.md](./monitoring/grafana.md) | Panel types, variables, USE/RED/SLO dashboards, provisioning as code | SDE-1/2 |
 | [monitoring/opentelemetry.md](./monitoring/opentelemetry.md) | Three pillars (traces/metrics/logs), OTEL Collector, Go SDK, auto-instrumentation | SDE-2 |
-| [monitoring/loki.md](./monitoring/loki.md) | Architecture, labels vs content, LogQL, Promtail config, trace correlation | SDE-1/2 |
+| [monitoring/loki.md](./monitoring/loki.md) | Architecture, labels vs content, LogQL, Promtail config, trace correlation; Fluent Bit zero-loss ELK: filesystem buffer, Retry_Limit False, Kafka buffer, DLQ/S3 fallback, Prometheus alerts | SDE-1/2 |
 | [monitoring/performance-debugging.md](./monitoring/performance-debugging.md) | USE method, RED method, 60-second checklist, Go pprof, bpftrace one-liners | SDE-2 |
 | [monitoring/monitoring-scenarios.md](./monitoring/monitoring-scenarios.md) | 12 scenarios with Prevention: target DOWN, missing metrics, Prometheus OOM, slow PromQL, alert not notifying, alert storm, Grafana no data, Loki missing logs, no OTEL traces, K8s scrape issues | SDE-1/2 |
 | [monitoring/slo-sli.md](./monitoring/slo-sli.md) | SLI/SLO/Error Budget math, multi-window multi-burn-rate alerts, recording rules, Grafana SLO dashboard, decision framework | SDE-2 |
@@ -296,7 +296,7 @@ Running stateful databases on Kubernetes — system design, replication, failove
 | File | Topics | Level |
 |------|--------|-------|
 | [sre/README.md](./sre/README.md) | Index + quick triage cheatsheets | — |
-| [sre/k8s-debugging.md](./sre/k8s-debugging.md) | 5XX runbooks (K8s + EKS) with Prevention, OOMKilled recovery | SDE-1/2 |
+| [sre/k8s-debugging.md](./sre/k8s-debugging.md) | 5XX runbooks (K8s + EKS) with Prevention, OOMKilled recovery; debugging without SSH: ephemeral containers, netshoot, port-forward decision tree, CloudWatch Logs Insights, X-Ray | SDE-1/2 |
 | [sre/k8s-scenarios.md](./sre/k8s-scenarios.md) | 20 K8s scenarios with Prevention: CrashLoop, DNS, NetworkPolicy, HPA, rollout, webhooks, etcd, RBAC | SDE-1/2 |
 | [sre/linux-debugging.md](./sre/linux-debugging.md) | 10 Linux scenarios with Prevention: high CPU, I/O wait, zombies, FD exhaustion, inodes, NFS, OOM, kernel panic | SDE-1/2 |
 | [sre/aws-scenarios.md](./sre/aws-scenarios.md) | 10 AWS scenarios with Prevention: EC2 SSH, Lambda timeout, ALB 502, S3 denied, RDS refused, ECS restart, CF stuck, API GW 429, EKS nodes, high bill | SDE-1/2 |
