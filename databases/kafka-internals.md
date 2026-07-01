@@ -333,3 +333,144 @@ kafka-log-dirs.sh --bootstrap-server kafka:9092 \
 kafka-leader-election.sh --bootstrap-server kafka:9092 \
   --election-type PREFERRED --all-topic-partitions
 ```
+
+---
+
+## Consumer Lag Deep-Dive
+
+Consumer lag = `log-end-offset - committed-offset`. It tells you how far behind a consumer group is from the head of the partition.
+
+### Reading lag correctly
+
+```bash
+# View lag per partition for a consumer group
+kafka-consumer-groups.sh \
+  --bootstrap-server kafka:9092 \
+  --describe \
+  --group payments-processor
+
+# Output:
+# GROUP               TOPIC      PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG  CONSUMER-ID
+# payments-processor  payments   0          45000           45100           100  consumer-1
+# payments-processor  payments   1          44900           45050           150  consumer-2
+# payments-processor  payments   2          44800           46000          1200  consumer-3 ← spike
+
+# Total lag = sum of all partition lags = 1450
+# Partition 2 has 10x the lag of others → partition imbalance
+```
+
+**Why per-partition lag matters:** a consumer group may show low average lag while one partition is 10,000 messages behind. Average lag hides the worst case. Always look at max lag per partition.
+
+### Lag alert with Prometheus (Kafka Exporter)
+
+```yaml
+# kafka-exporter exposes: kafka_consumergroup_lag{consumergroup, topic, partition}
+- alert: KafkaConsumerLagHigh
+  expr: |
+    sum(kafka_consumergroup_lag{consumergroup="payments-processor"}) by (consumergroup, topic) > 10000
+  for: 5m
+  labels:
+    severity: warning
+
+- alert: KafkaConsumerLagCritical
+  expr: |
+    max(kafka_consumergroup_lag{consumergroup="payments-processor"}) by (partition) > 50000
+  for: 2m
+  labels:
+    severity: critical
+  annotations:
+    summary: "Single partition lag > 50k — consumer likely dead or partition hot"
+```
+
+### Root causes and fixes
+
+| Cause | Lag pattern | Fix |
+|---|---|---|
+| Consumer too slow | Steadily growing across all partitions | Scale consumers (add instances up to partition count) |
+| Hot partition | One partition 10x lag of others | Key redesign; add partitions; spot the hot key |
+| Consumer died | One partition at 0 throughput | Check consumer logs; rebalance trigger |
+| Rebalance storm | Lag spikes every few minutes | Increase `session.timeout.ms`, tune `max.poll.interval.ms` |
+| GC pause in consumer | Sporadic lag spikes | Tune JVM GC; reduce `max.poll.records` |
+| Message processing error | Lag at specific offset | Consumer stuck in retry loop; add DLQ |
+
+### Producer tuning for throughput vs durability
+
+```properties
+# High throughput (analytics, logs) — batch more, weaker guarantees
+acks=1                     # leader ACK only (not all replicas)
+batch.size=65536           # 64KB batch (default 16KB)
+linger.ms=10               # wait 10ms to fill batch before sending
+compression.type=lz4       # compress batches (lz4 best CPU/ratio tradeoff)
+buffer.memory=67108864     # 64MB producer buffer
+max.in.flight.requests.per.connection=5
+
+# High durability (payments, orders) — ensure no data loss
+acks=all                   # all ISR replicas must ACK
+retries=2147483647         # retry forever (Java MAX_INT)
+max.in.flight.requests.per.connection=1   # prevent message reordering on retry
+enable.idempotence=true    # exactly-once on producer side
+delivery.timeout.ms=120000 # 2 minutes total retry window
+```
+
+### Partition strategy — choosing partition count
+
+```
+Partition count determines max consumer parallelism.
+More partitions → more parallelism + more overhead (open file handles, leader elections).
+
+Rule of thumb:
+  target_throughput_MB/s  ÷  throughput_per_partition_MB/s = partitions needed
+
+Single partition throughput (approximate):
+  Producer:  ~50-100 MB/s (disk sequential write speed)
+  Consumer:  ~50-100 MB/s (network + processing bound in practice)
+
+Example:
+  Need 500 MB/s total throughput
+  Each partition handles ~50 MB/s
+  → 10 partitions minimum
+
+For consumer parallelism:
+  max_consumers_in_group = partition_count
+  If you have 20 consumer instances, you need ≥20 partitions
+  Extra consumers beyond partition count sit idle
+```
+
+```bash
+# Add partitions to an existing topic (can only increase, never decrease)
+kafka-topics.sh \
+  --bootstrap-server kafka:9092 \
+  --alter \
+  --topic payments \
+  --partitions 20
+# WARNING: adding partitions changes key→partition mapping for new messages.
+# Old messages stay on old partitions. Consumers must handle reordering.
+# For strict ordering by key: pre-plan partition count at topic creation.
+```
+
+### Rebalance debugging
+
+Consumer rebalances (triggered by member join/leave/timeout) pause ALL consumers in the group while a new partition assignment is computed.
+
+```bash
+# Check rebalance frequency
+kafka-consumer-groups.sh \
+  --bootstrap-server kafka:9092 \
+  --describe --group payments-processor
+# CONSUMER-ID changes on rebalance
+
+# Common causes of excessive rebalancing:
+# 1. max.poll.interval.ms too low — consumer takes longer to process than allowed
+#    Fix: increase max.poll.interval.ms or reduce max.poll.records
+# 2. session.timeout.ms too low — consumer heartbeat misses under GC pause
+#    Fix: increase session.timeout.ms (but lag detection slower)
+# 3. Rolling restart — each pod restart triggers two rebalances (leave + rejoin)
+#    Fix: use static group membership
+```
+
+```properties
+# Static group membership — survive restarts without rebalance
+group.instance.id=payments-consumer-0   # unique, stable ID per consumer instance
+session.timeout.ms=60000                # how long before a static member is considered dead
+# With static membership, restarts within session.timeout.ms skip rebalance
+```

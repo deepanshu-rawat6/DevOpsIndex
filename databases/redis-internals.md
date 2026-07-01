@@ -305,3 +305,138 @@ redis-cli MEMORY DOCTOR               # automated analysis
 redis-cli --bigkeys                   # scan for large keys (run off-peak)
 redis-cli --memkeys                   # sample keys by memory usage
 ```
+
+---
+
+## Cluster Failure Modes
+
+### Slot coverage loss — the cluster goes read-only
+
+Redis Cluster requires all 16384 hash slots to be covered by a reachable master. If a master goes down AND its replica fails to be promoted (or there is no replica), those slots become unavailable. The cluster refuses writes to uncovered slots.
+
+```bash
+# Check cluster health
+redis-cli -h redis-node-1 -p 6379 CLUSTER INFO
+# cluster_state:ok        ← healthy
+# cluster_state:fail      ← one or more slots uncovered
+
+# Find which slots are uncovered
+redis-cli -h redis-node-1 -p 6379 CLUSTER NODES | grep fail
+# <node-id> <ip>:6379 master,fail - ...   ← failed master
+
+# Manual failover (if replica is running but hasn't promoted)
+redis-cli -h <replica-host> -p 6379 CLUSTER FAILOVER
+# or force (ignores replication lag — may lose recent writes)
+redis-cli -h <replica-host> -p 6379 CLUSTER FAILOVER FORCE
+```
+
+**Recovery checklist:**
+```bash
+# After failed node comes back
+redis-cli -h redis-node-1 CLUSTER MEET <recovered-node-ip> 6379
+redis-cli -h redis-node-1 CLUSTER REPLICATE <new-master-id>
+# Resync: node downloads full RDB from master (can take minutes for large datasets)
+redis-cli -h <recovered-node> REPLICATION  # watch master_sync_in_progress
+```
+
+### Split-brain — cluster partitioned
+
+Redis Cluster prevents split-brain by requiring quorum (majority of masters) to elect new masters. With 6 nodes (3 masters + 3 replicas), losing one AZ means:
+- 1 master unreachable → its replica promotes ✓
+- 2 masters unreachable (minority) → quorum lost → cluster goes down ✗
+
+```
+3-master cluster loses 2 masters simultaneously:
+  Masters remaining: 1 (cannot form quorum of 2 out of 3)
+  Result: cluster_state:fail, writes rejected
+  Fix: multi-AZ with odd number of masters ≥ 3
+```
+
+**Multi-AZ layout for resilience:**
+```
+AZ-a: master-1 (slots 0-5460)    + replica-4
+AZ-b: master-2 (slots 5461-10922) + replica-5
+AZ-c: master-3 (slots 10923-16383) + replica-6
+# Replicas are in DIFFERENT AZ from their master
+# AZ loss takes one master and one replica (for a different master)
+# Quorum of 2 masters remains → cluster stays up
+```
+
+### Hot key problem
+
+A hot key is a single key receiving a disproportionate share of traffic. In Redis Cluster, a hot key maps to one slot → one master → that node becomes the bottleneck.
+
+**Detection:**
+```bash
+# redis-cli hot key analysis (requires maxmemory-policy != noeviction)
+redis-cli -h redis-node-1 --hotkeys
+# OUTPUT: hot key 'user:session:12345' - freq: 50000/sec
+
+# Monitor in real time
+redis-cli -h redis-node-1 MONITOR | grep "GET\|SET" | head -100
+# Warning: MONITOR is O(n) per command, use sparingly in production
+
+# Use redis-cell or keydb for rate info
+redis-cli -h redis-node-1 OBJECT FREQ <keyname>   # LFU policy only
+```
+
+**Solutions:**
+
+```
+1. Client-side caching (Redis 6+ tracking mode)
+   Client caches value locally; server sends invalidation when key changes
+   → reduces hot key traffic by 90%+ for mostly-read keys
+
+2. Key sharding — append suffix to spread across slots
+   "user:session" → "user:session:{0}", "user:session:{1}", ..., "user:session:{N}"
+   Client randomly picks a shard; reads from any, writes to all
+   → N shards = N nodes share the load
+   N = 10-50 for very hot keys
+
+3. Local in-process cache (L1)
+   Store hot key in application memory (sync with Redis TTL)
+   → near-zero latency, no network, but stale by TTL window
+
+4. Read replicas
+   READONLY command on replica allows reads
+   → distributes read traffic across replica + master
+   redis-cli -h <replica> READONLY
+   GET user:session:12345   # served by replica
+```
+
+```python
+# Python: client-side sharding for hot key
+import hashlib, random
+
+def hot_key_get(redis_client, base_key: str, shards: int = 10) -> str:
+    shard = random.randint(0, shards - 1)
+    return redis_client.get(f"{base_key}:{shard}")
+
+def hot_key_set(redis_client, base_key: str, value: str, shards: int = 10):
+    pipe = redis_client.pipeline()
+    for i in range(shards):
+        pipe.set(f"{base_key}:{i}", value, ex=300)
+    pipe.execute()
+```
+
+### Sentinel vs Cluster — decision guide
+
+| | Sentinel | Cluster |
+|---|---|---|
+| Use case | Single dataset, HA failover | Horizontal scale + HA |
+| Data sharding | No (all nodes have full dataset) | Yes (16384 hash slots) |
+| Scale-out | No | Yes — add masters for more capacity |
+| Multi-key ops | All keys work | Keys must be in same slot (use hash tags `{user}`) |
+| Complexity | Low | High |
+| Min nodes | 3 Sentinels + 1 master + 1 replica | 6 nodes (3 master + 3 replica) |
+| Failover time | ~30s (default) | ~15s (faster gossip-based) |
+| When to use | <100GB dataset, simplicity preferred | >100GB or >1M ops/sec |
+
+**Hash tags for multi-key ops in cluster:**
+```
+Without hash tag:
+  MGET user:1:name user:1:email  → may be on different slots → CROSSSLOT error
+
+With hash tag (curly braces define the slot key):
+  MGET {user:1}:name {user:1}:email  → both hash to "user:1" → same slot → works
+```
