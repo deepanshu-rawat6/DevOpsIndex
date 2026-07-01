@@ -344,3 +344,173 @@ Each VPC's route table only needs: `0.0.0.0/0 → tgw-abc123`. TGW route tables 
 | Best for | Simple, few VPCs | Enterprise, many VPCs, on-prem hybrid |
 
 **Rule of thumb:** 2 VPCs → use peering (free, lower latency). 3+ VPCs, cross-region, or on-prem hybrid → use Transit Gateway (centralized, transitive, worth the cost).
+
+---
+
+## Route Tables — Deep Dive
+
+Every subnet is associated with exactly one route table. Routes are evaluated using **longest prefix match** — the most specific matching route wins, regardless of the order entries are listed.
+
+### The "local" route
+
+Every route table in every VPC contains a `local` entry that cannot be deleted or modified:
+
+```
+Destination     Target
+10.0.0.0/16     local
+```
+
+This means: any packet destined for an IP within the VPC CIDR (`10.0.0.0/16`) is routed internally within AWS's network fabric — directly to the target ENI without leaving the VPC. No gateway, no NAT, no internet hop.
+
+The `local` route is why:
+- An EC2 in `10.0.1.0/24` can reach an RDS in `10.0.10.0/24` without any gateway
+- A private subnet app server can talk to a private subnet database
+- Cross-AZ communication within the same VPC is transparent
+
+**Important:** `local` routes cannot be replaced or overridden for the VPC CIDR itself. You cannot route VPC-internal traffic to a NAT GW or IGW.
+
+### Longest prefix match — concrete examples
+
+```
+Route table:
+  10.0.0.0/16        local
+  10.0.5.0/24        vpce-s3-xxxx        (S3 VPC endpoint)
+  172.16.0.0/12      tgw-abc123          (Transit Gateway for on-prem)
+  0.0.0.0/0          nat-xyz789
+
+Packet to 10.0.5.20:
+  10.0.0.0/16  matches (/16)
+  10.0.5.0/24  matches (/24) ← MORE specific — WINS
+  Result: routed to VPC endpoint (stays on AWS backbone, free)
+
+Packet to 10.0.99.5:
+  10.0.0.0/16  matches (/16) ← WINS
+  10.0.5.0/24  doesn't match
+  Result: routed via local (VPC-internal)
+
+Packet to 172.16.50.1:
+  172.16.0.0/12  matches (/12) ← WINS
+  Result: routed to Transit Gateway (on-prem traffic)
+
+Packet to 8.8.8.8:
+  No specific match → 0.0.0.0/0  ← default route WINS
+  Result: routed to NAT Gateway
+```
+
+### Complete route table examples
+
+**Public subnet (internet-facing):**
+```
+Destination           Target                  Note
+10.0.0.0/16           local                   VPC-internal (all subnets reachable)
+pl-68a54001           vpce-s3-xxxx            S3 prefix list → VPC endpoint (free)
+0.0.0.0/0             igw-abc123              All other traffic → Internet Gateway
+```
+
+**Private subnet (AZ-a, with NAT):**
+```
+Destination           Target                  Note
+10.0.0.0/16           local                   VPC-internal
+pl-68a54001           vpce-s3-xxxx            S3 via AWS backbone (avoids NAT cost)
+pl-60b04049           vpce-ddb-xxxx           DynamoDB via AWS backbone (avoids NAT cost)
+10.1.0.0/16           pcx-peering123          VPC peering to data platform VPC
+172.16.0.0/12         tgw-abc123              On-prem via Transit Gateway
+0.0.0.0/0             nat-xyz789              Internet-bound via NAT GW in AZ-a
+```
+
+**Private subnet (AZ-b) — separate NAT GW:**
+```
+Destination           Target
+10.0.0.0/16           local
+pl-68a54001           vpce-s3-xxxx
+0.0.0.0/0             nat-def456              Different NAT GW — same AZ as this subnet
+```
+
+**Why separate NAT Gateway per AZ:**
+Cross-AZ data transfer costs ~$0.01/GB. A private subnet in AZ-b routing through a NAT GW in AZ-a incurs this charge on every outbound byte. More critically, if AZ-a fails, the NAT GW in AZ-a is gone — all private subnets in other AZs lose internet connectivity. Per-AZ NAT is both cheaper and more resilient.
+
+### VPC Endpoint routes
+
+Gateway endpoints (S3 and DynamoDB) inject prefix list entries into route tables:
+
+```bash
+# List S3 and DynamoDB prefix lists in your region
+aws ec2 describe-prefix-lists --region us-east-1 \
+  --query 'PrefixLists[*].{ID:PrefixListId,Name:PrefixListName}'
+# pl-68a54001  com.amazonaws.us-east-1.s3
+# pl-60b04049  com.amazonaws.us-east-1.dynamodb
+```
+
+When you create a Gateway Endpoint, AWS automatically adds these prefix list routes to the route tables you specify. Traffic that matches goes directly to AWS services over the private backbone — free, no NAT, no IGW, no bandwidth charges.
+
+Interface endpoints (ECR, SSM, Secrets Manager, etc.) work differently — they create ENIs in your subnet with private IPs, and use private DNS to override the service's public hostname.
+
+### Transit Gateway routes
+
+```
+# Route to on-prem via TGW
+172.16.0.0/12     tgw-abc123
+
+# Route to another VPC via TGW (alternative to VPC peering)
+10.1.0.0/16       tgw-abc123    ← VPC B's CIDR
+10.2.0.0/16       tgw-abc123    ← VPC C's CIDR
+```
+
+The TGW itself has its own route table that maps CIDR ranges to attachments (VPC attachment, VPN attachment, Direct Connect GW). You can segment with multiple TGW route tables for isolation (e.g., prod VPCs cannot talk to dev VPCs even through the same TGW).
+
+### Virtual Private Gateway (VPN/Direct Connect)
+
+```
+# On-prem routes learned via BGP from a VGW (Virtual Private Gateway)
+192.168.0.0/16    vgw-abc123    ← on-prem data center
+10.100.0.0/16     vgw-abc123    ← another on-prem range
+```
+
+With **route propagation enabled**, VGW dynamically injects routes learned via BGP into your route table. No manual route management needed.
+
+```bash
+# Enable route propagation in a route table
+aws ec2 enable-vgw-route-propagation \
+  --route-table-id rtb-xxx \
+  --gateway-id vgw-xxx
+```
+
+### Blackhole routes
+
+A route with target `blackhole` silently drops matched traffic — no ICMP unreachable, no TCP RST:
+
+```
+10.0.99.0/24    blackhole    ← traffic to this range is dropped
+```
+
+Blackhole routes appear when:
+- A VPC peering connection is deleted but the route entry isn't removed
+- A NAT GW or VPN GW is deleted while still referenced in a route table
+- Manually created for security (block specific IP ranges)
+
+```bash
+# Find blackhole routes in all route tables
+aws ec2 describe-route-tables --region us-east-1 \
+  --query 'RouteTables[*].Routes[?State==`blackhole`]'
+```
+
+### Troubleshooting route table issues
+
+```bash
+# Which route table is associated with a subnet?
+aws ec2 describe-subnets --subnet-ids subnet-xxx \
+  --query 'Subnets[0].{SubnetId:SubnetId,AZ:AvailabilityZone}'
+
+aws ec2 describe-route-tables \
+  --filters "Name=association.subnet-id,Values=subnet-xxx" \
+  --query 'RouteTables[0].Routes'
+
+# Test reachability between two resources (uses VPC Reachability Analyzer)
+aws ec2 create-network-insights-path \
+  --source <src-eni-id> \
+  --destination <dst-eni-id> \
+  --protocol TCP
+aws ec2 start-network-insights-analysis \
+  --network-insights-path-id <path-id>
+# Shows exactly which SG rule, NACL, or route table entry blocks or allows the path
+```
