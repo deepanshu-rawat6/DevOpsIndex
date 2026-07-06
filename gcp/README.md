@@ -335,12 +335,64 @@ More granular than Private Google Access. Create a **PSC endpoint** (a forwardin
 
 ---
 
-## Additional Files
+## All Files
 
+### Networking (this file)
+VPC, subnets, firewall rules, Cloud NAT, VPC Peering, Shared VPC, Private Google Access, Private Service Connect
+
+### AWS Engineers Start Here
 | File | Topics |
 |------|--------|
-| [gke.md](./gke.md) | GKE Standard vs Autopilot, Workload Identity, VPC-native networking, container-native LB, GPU node pools, upgrade strategy |
+| [from-aws.md](./from-aws.md) | Mental model shifts, resource hierarchy vs AWS Orgs, IAM additive model, global VPC, pricing quirks, CLI cheatsheet |
+
+### Compute
+| File | Topics |
+|------|--------|
+| [compute.md](./compute.md) | GCE vs EC2, machine families, custom machine types, disk types, Preemptible/Spot VMs, MIGs, live migration, IAP SSH |
+| [gke.md](./gke.md) | GKE Standard vs Autopilot, Workload Identity, VPC-native networking, container-native LB (NEG), GPU node pools, upgrade strategy |
+
+### Storage
+| File | Topics |
+|------|--------|
+| [storage.md](./storage.md) | GCS vs S3 (storage classes, Autoclass, lifecycle, versioning), Persistent Disk, Local SSD, Filestore (NFS), Storage Transfer Service |
+
+### Databases
+| File | Topics |
+|------|--------|
+| [databases.md](./databases.md) | Cloud SQL (Postgres/MySQL), AlloyDB, Cloud Spanner (TrueTime), Firestore, Memorystore (Redis), database selection guide |
 | [bigquery.md](./bigquery.md) | Columnar storage, partitioning, clustering, slots, streaming vs batch load, external tables, time travel, cost optimization |
 | [bigtable.md](./bigtable.md) | Wide-column data model, row key design, LSM tree, replication, HBase API, monitoring |
+
+### Application Services
+| File | Topics |
+|------|--------|
+| [serverless.md](./serverless.md) | Cloud Run (concurrency, traffic splitting, VPC, triggers), Cloud Functions Gen2, Cloud Run Jobs, Cloud Scheduler, Secret Manager |
+| [messaging.md](./messaging.md) | Pub/Sub (topic/subscription, DLQ, Lite), Cloud Tasks (rate-limited queues), Eventarc (event routing), service selection guide |
+
+### Operations
+| File | Topics |
+|------|--------|
+| [observability.md](./observability.md) | Cloud Monitoring (metrics, alerting, uptime), Cloud Logging (LQL, sinks, retention), Cloud Trace, Cloud Audit Logs, Error Reporting, Profiler |
+| [cicd.md](./cicd.md) | Cloud Build (cloudbuild.yaml, triggers, caching), Artifact Registry (Docker/Helm, scanning), Cloud Deploy (canary, approval gates), GHA integration |
+
+### Comparison & Scenarios
+| File | Topics |
+|------|--------|
 | [gcp-vs-aws.md](./gcp-vs-aws.md) | Service-by-service mapping, global VPC vs regional, BigQuery vs Redshift, GKE vs EKS, when to choose which |
 | [scenarios.md](./scenarios.md) | 7 debugging scenarios: Workload Identity 403, autoscaler not scaling, BigQuery cost spike, cold starts, Spanner hotspot, Pub/Sub backlog, GCS access denied |
+
+---
+
+## Recommended Read Order
+
+```
+Coming from AWS:
+  from-aws.md → README.md → compute.md → gke.md → storage.md
+  → databases.md → bigquery.md → serverless.md → messaging.md
+  → observability.md → cicd.md → gcp-vs-aws.md → scenarios.md
+
+GCP-first learner:
+  README.md → services-overview.md → compute.md → gke.md
+  → storage.md → databases.md → serverless.md → messaging.md
+  → observability.md → cicd.md → scenarios.md
+```
