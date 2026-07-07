@@ -348,7 +348,7 @@ VPC, subnets, firewall rules, Cloud NAT, VPC Peering, Shared VPC, Private Google
 ### Compute
 | File | Topics |
 |------|--------|
-| [compute.md](./compute.md) | GCE vs EC2, machine families, custom machine types, disk types, Preemptible/Spot VMs, MIGs, live migration, IAP SSH |
+| [compute.md](./compute.md) | GCE vs EC2, machine families, custom machine types, disk types, Preemptible/Spot VMs, Managed vs Unmanaged Instance Groups (MIG/UIG), auto-healing, auto-scaling, rolling updates, serial ports 1–4, live migration, IAP SSH |
 | [gke.md](./gke.md) | GKE Standard vs Autopilot, Workload Identity, VPC-native networking, container-native LB (NEG), GPU node pools, upgrade strategy |
 
 ### Storage

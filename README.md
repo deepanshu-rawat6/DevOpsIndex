@@ -205,6 +205,9 @@ Kubernetes, Linux, Docker, AWS, GCP, CI/CD, IaC, Monitoring, Git, and SRE — or
 | [advanced/ebpf-observability.md](./advanced/ebpf-observability.md) | eBPF verifier, bpftrace, BCC tools, Cilium, Tetragon, Hubble | SDE-2 |
 | [advanced/chaos-engineering.md](./advanced/chaos-engineering.md) | Litmus Chaos, Chaos Mesh, game days, failure injection patterns | SDE-2 |
 | [advanced/backup-dr.md](./advanced/backup-dr.md) | RTO/RPO math, Velero, etcd backup, PITR, AWS DR patterns, 3-2-1 rule | SDE-2 |
+| [advanced/low-latency-networking.md](./advanced/low-latency-networking.md) | AWS Direct Connect, BGP tuning, Transit Gateway multicast (IGMP), DPDK kernel bypass, EFA/RDMA, CPU isolation for HFT | SDE-2 |
+| [advanced/fintech-security.md](./advanced/fintech-security.md) | SEBI CSCRF, CERT-In 6hr incident reporting, K8s audit policy for regulators, PAM/Teleport, zero-downtime secrets rotation with Vault dynamic secrets and AWS Secrets Manager | SDE-2 |
+| [advanced/trading-data-streaming.md](./advanced/trading-data-streaming.md) | Kafka latency-first config (linger.ms=0, acks=1), broker I/O tuning, KRaft Express mode, Redis order book (AOF always, min-replicas-to-write, CP vs AP partition choice) | SDE-2 |
 
 ---
 

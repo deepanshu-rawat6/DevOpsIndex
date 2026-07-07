@@ -38,7 +38,7 @@ const SECTIONS = [
   },
   {
     slug: 'gcp', title: 'GCP', order: 8,
-    readOrder: ['README', 'services-overview', 'gke', 'bigquery', 'bigtable', 'gcp-vs-aws', 'scenarios'],
+    readOrder: ['README', 'from-aws', 'services-overview', 'compute', 'gke', 'storage', 'databases', 'bigquery', 'bigtable', 'serverless', 'messaging', 'observability', 'cicd', 'gcp-vs-aws', 'scenarios'],
   },
   {
     slug: 'monitoring', title: 'Monitoring', order: 9,
@@ -50,7 +50,7 @@ const SECTIONS = [
   },
   {
     slug: 'advanced', title: 'Advanced', order: 11,
-    readOrder: ['service-mesh', 'ebpf-observability', 'chaos-engineering', 'backup-dr'],
+    readOrder: ['service-mesh', 'ebpf-observability', 'chaos-engineering', 'backup-dr', 'low-latency-networking', 'fintech-security', 'trading-data-streaming'],
   },
   {
     slug: 'ai-infra', title: 'AI Infrastructure', order: 12,
