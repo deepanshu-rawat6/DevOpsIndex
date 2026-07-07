@@ -345,10 +345,15 @@ aws/databases-deep-dive.md
 monitoring/opentelemetry.md → monitoring/performance-debugging.md
 monitoring/slo-sli.md → monitoring/thanos-mimir.md
 sre/db-monitoring.md
-gcp/README.md → gcp/services-overview.md
+gcp/from-aws.md → gcp/README.md → gcp/services-overview.md
+gcp/compute.md → gcp/gke.md
+gcp/storage.md → gcp/databases.md → gcp/bigquery.md → gcp/bigtable.md
+gcp/serverless.md → gcp/messaging.md
+gcp/observability.md → gcp/cicd.md → gcp/gcp-vs-aws.md → gcp/scenarios.md
 git/git-internals.md
 advanced/service-mesh.md → advanced/ebpf-observability.md
 advanced/chaos-engineering.md → advanced/backup-dr.md
+advanced/low-latency-networking.md → advanced/fintech-security.md → advanced/trading-data-streaming.md
 cicd/gitops-secrets.md → cicd/argo-rollouts.md
 sre/k8s-scenarios.md (advanced) → sre/linux-debugging.md
 sre/cicd-scenarios.md → sre/iac-scenarios.md
