@@ -145,7 +145,7 @@ ClickHouseMetrics_Query                    # active queries
 ClickHouseAsyncMetrics_MemoryResident      # RSS memory
 ClickHouseMetrics_BackgroundMergesAndMutations  # merge queue
 ClickHouseProfileEvents_MergedRows         # rows merged per second
-ClickHouseMetrics_ReplicatedChecks         # replication queue depth
+ClickHouseMetrics_ReplicasMaxQueueSize      # replication queue depth (pending fetches/merges)
 ```
 
 ---

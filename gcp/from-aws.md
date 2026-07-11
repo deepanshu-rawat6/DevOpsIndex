@@ -2,6 +2,8 @@
 
 Everything you know from AWS transfers — but several core abstractions work differently. This guide focuses on the paradigm shifts, not the feature lists.
 
+> For a flat service-by-service mapping table and "when to choose which," see the companion doc [`gcp-vs-aws.md`](./gcp-vs-aws.md). This file is the conceptual/mental-model view; that one is the lookup table.
+
 ---
 
 ## The Mental Model Shifts
@@ -280,8 +282,8 @@ Cloud NAT is **distributed** — unlike AWS NAT Gateway (one per AZ), a single C
 | VM discount for long-running | Reserved Instances (1-3yr commit) | **Sustained use: automatic**, no commitment |
 | Data warehouse idle cost | Redshift: pay per cluster-hour (always on) | BigQuery: $0 idle, pay per query ($5/TB) |
 | Cross-zone egress (same region) | Charged | Free |
-| K8s control plane | EKS: $0.10/hr ($73/mo) always | GKE Standard zonal: **free**; regional: $74/mo |
-| Preemptible / Spot discount | Up to 90% | Up to 91% (Preemptible: 24hr max) |
+| K8s control plane | EKS: $0.10/hr ($73/mo) always | GKE: $0.10/hr ($73/mo) per cluster; **one free zonal cluster** per billing account |
+| Preemptible / Spot discount | Up to 90% | Up to 91% (legacy Preemptible had a 24hr cap; **Spot VMs**, the successor, have no time limit) |
 
 ---
 

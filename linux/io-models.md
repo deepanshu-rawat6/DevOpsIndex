@@ -163,7 +163,7 @@ graph LR
 - Works for files, not just sockets (epoll doesn't work on regular files — `O_NONBLOCK` on files is a lie)
 - No context switches in `SQPOLL` mode — kernel thread polls SQ continuously
 
-**In Go:** Go 1.21+ has experimental io_uring support. Not yet default (as of 2025). Tokio (Rust) uses it heavily. For now, Go's epoll-based netpoller is excellent for most cases.
+**In Go:** Go's runtime netpoller is still **epoll-based** (as of Go 1.23) — the standard library does not use io_uring. io_uring is available only through third-party libraries (e.g. `iceber/iouring-go`). Tokio (Rust) can use it heavily. For most workloads Go's epoll-based netpoller is excellent and io_uring is unnecessary.
 
 ---
 

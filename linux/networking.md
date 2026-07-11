@@ -1,4 +1,8 @@
-# Linux Networking Internals
+# Linux Kernel TCP/IP Stack
+
+How the Linux kernel moves packets through the TCP/IP stack — sockets, the accept queue, TCP state machine, TIME_WAIT, netfilter/iptables, and connection tuning.
+
+> For the packet RX/TX path, conntrack, network namespaces, veth pairs, and SO_REUSEPORT from a platform-networking angle, see also [`networking/linux-networking.md`](../networking/linux-networking.md).
 
 ---
 
@@ -97,6 +101,8 @@ sysctl -w net.ipv4.ip_local_port_range="1024 65535"
 # Enable TCP timestamps (required for tw_reuse to work safely)
 sysctl -w net.ipv4.tcp_timestamps=1
 ```
+
+> ⚠️ **Do not use `net.ipv4.tcp_tw_recycle`.** It was **removed in kernel 4.12** (2017) and no longer exists. On older kernels it aggressively recycled TIME_WAIT sockets using per-host timestamps, which silently broke connections from clients behind NAT/load balancers (multiple clients sharing a source IP with unsynchronized timestamps got their SYNs dropped). Any blog or Stack Overflow answer still recommending it is stale. Use `tcp_tw_reuse` (safe for outbound/client sockets) instead.
 
 ---
 

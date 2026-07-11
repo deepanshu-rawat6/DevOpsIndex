@@ -200,6 +200,7 @@ rate(redis_keyspace_hits_total[5m]) /
 # Cluster state (1 = ok)
 redis_cluster_state != 1
 
-# Replication lag (bytes)
+# Replica count (this counts replicas, NOT lag)
 redis_connected_slaves < 1  # alert if no replicas
+# For true lag use: master_repl_offset − slave's slave_repl_offset (bytes behind)
 ```

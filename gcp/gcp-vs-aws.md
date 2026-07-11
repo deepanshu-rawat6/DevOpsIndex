@@ -1,5 +1,7 @@
 # GCP vs AWS — Service Comparison
 
+> This is the service-mapping lookup table. For the conceptual mental-model shifts an AWS engineer needs (resource hierarchy, additive IAM, global VPC, pricing model differences), see the companion doc [`from-aws.md`](./from-aws.md).
+
 ## Core Philosophy Difference
 
 ```mermaid
@@ -14,7 +16,7 @@ graph LR
 
 | Dimension | AWS | GCP |
 |-----------|-----|-----|
-| Market share | ~32% | ~11% |
+| Market share (cloud infra, ~2024) | ~32% | ~11% |
 | Enterprise adoption | Dominant | Growing |
 | Kubernetes | EKS (solid) | GKE (best-in-class, invented K8s) |
 | Data/Analytics | Redshift, Athena, EMR | BigQuery (simpler, often cheaper) |

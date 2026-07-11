@@ -60,8 +60,8 @@ graph TD
 
 ```bash
 # EFA-enabled instance types
-# p4d.24xlarge  → 4x A100, 4x 100 Gbps EFA
-# p5.48xlarge   → 8x H100, 32x 100 Gbps EFA
+# p4d.24xlarge  → 8x A100 (40GB), 4x 100 Gbps EFA (400 Gbps total)
+# p5.48xlarge   → 8x H100, 32x 100 Gbps EFA (3200 Gbps total)
 
 # Install AWS EFA driver on GPU nodes (via user data or DaemonSet)
 # EFA plugin exposes vpc.amazonaws.com/efa as a K8s resource
@@ -74,14 +74,14 @@ kind: Pod
 spec:
   containers:
   - name: training
-    image: nvcr.io/nvidia/pytorch:24.01-py3
+    image: nvcr.io/nvidia/pytorch:25.01-py3
     resources:
       limits:
         nvidia.com/gpu: "8"
         vpc.amazonaws.com/efa: "4"    # request 4 EFA interfaces
     env:
     - name: NCCL_SOCKET_IFNAME
-      value: "eth"                    # use EFA for NCCL AllReduce
+      value: "eth0"                   # control-plane NIC for NCCL bootstrap (data path uses EFA/libfabric)
     - name: FI_PROVIDER
       value: "efa"                    # use EFA provider for libfabric
     - name: NCCL_DEBUG

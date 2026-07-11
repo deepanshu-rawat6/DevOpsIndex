@@ -154,7 +154,7 @@ redis_memory_used_bytes / redis_memory_max_bytes > 0.8
 rate(redis_keyspace_hits_total[5m]) /
 (rate(redis_keyspace_hits_total[5m]) + rate(redis_keyspace_misses_total[5m])) < 0.9
 
-# Replication lag
+# Replica count (counts replicas, NOT lag — for lag use master_repl_offset − slave_repl_offset)
 redis_connected_slaves < 1
 
 # Evicted keys per second (should be 0 for non-cache workloads)

@@ -293,7 +293,7 @@ Sustained use discounts are **fully automatic** — just run a VM for most of th
 | Spot/Preemptible notice | 30 seconds ACPI | 2 minutes (Spot) |
 | GPU types | A100, H100, L4, T4 | V100, A100, H100, Inf |
 | TPU access | Yes (unique to GCP) | No |
-| Free control plane | GKE Standard: free | EKS: $73/mo |
+| Free control plane | GKE: one free zonal cluster/account, then $73/mo | EKS: $73/mo per cluster |
 
 ---
 

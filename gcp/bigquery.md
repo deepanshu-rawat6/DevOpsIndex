@@ -88,9 +88,11 @@ graph TD
 **Pricing models:**
 | Model | Price | Best for |
 |-------|-------|---------|
-| On-demand | $5/TB scanned | Sporadic queries, unknown usage |
-| Flat-rate (Standard edition) | ~$1600/month/100 slots | Predictable, high-volume workloads |
-| BigQuery Reservations | Purchase slots, assign to projects | Large orgs with multiple teams |
+| On-demand | $5/TB scanned (first 1 TB/mo free) | Sporadic queries, unknown usage |
+| Capacity (Editions) | Standard / Enterprise / Enterprise Plus, billed per **slot-hour** with optional 1- or 3-year commitments; autoscaling slots available | Predictable, high-volume workloads |
+| Reservations + assignments | Buy a baseline of slots in an Edition, then assign capacity to projects/folders | Large orgs sharing capacity across teams |
+
+> The older **flat-rate** model (fixed monthly slot commitments) was replaced by **BigQuery Editions** in 2023. Editions bill per slot-hour and support autoscaling, so you no longer pre-purchase fixed 100-slot blocks.
 
 ---
 
@@ -98,10 +100,13 @@ graph TD
 
 ```mermaid
 graph LR
-    STREAM["Streaming inserts<br>insertAll API<br>rows available immediately<br>$0.01/200MB<br>Use: real-time dashboards"] --> BQ["BigQuery table"]
+    SWAPI["Storage Write API<br>(recommended)<br>gRPC streaming, exactly-once<br>cheaper than insertAll<br>Use: production streaming ingest"] --> BQ["BigQuery table"]
+    STREAM["Legacy streaming inserts<br>insertAll (tabledata REST)<br>rows available immediately<br>$0.01/200MB<br>Use: legacy / simple appends"] --> BQ
     BATCH["Batch load jobs<br>from GCS, Cloud Storage<br>CSV/JSON/Avro/Parquet<br>FREE (no charge for loads)<br>Use: daily ETL"] --> BQ
-    DATAFLOW["Dataflow<br>streaming pipeline<br>Exactly-once semantics<br>Use: production streaming"] --> BQ
+    DATAFLOW["Dataflow<br>streaming pipeline (uses Storage Write API)<br>Exactly-once semantics<br>Use: managed production streaming"] --> BQ
 ```
+
+> The **Storage Write API** (gRPC) is the current recommended path for streaming ingestion — it supports exactly-once delivery, stream-level transactions, and is cheaper than the legacy `insertAll` REST endpoint. Prefer it for new pipelines; `insertAll` remains for simple/legacy append use cases.
 
 ---
 
@@ -153,6 +158,147 @@ FROM `project.dataset`.INFORMATION_SCHEMA.PARTITIONS
 WHERE table_name = 'orders'
 ORDER BY partition_id DESC LIMIT 10;
 ```
+
+---
+
+## Nested & Repeated Fields (STRUCT / ARRAY)
+
+BigQuery is columnar but **not** relational-normalized. Instead of splitting a 1-to-many relationship into two tables joined by a foreign key, you store the child rows *inside* the parent row as a repeated STRUCT. This is idiomatic BigQuery: joins are expensive (require shuffle), but reading a nested column is free because columnar storage stores each leaf field as its own column (Dremel's record shredding). You get normalized-like semantics with denormalized read performance.
+
+- **RECORD / STRUCT** — an ordered set of typed sub-fields, like an embedded row (`address STRUCT<city STRING, zip STRING>`).
+- **REPEATED (ARRAY)** — a column holding zero or more values of the same type. Combine both — `ARRAY<STRUCT<...>>` — to embed a child table.
+
+```sql
+-- Denormalized: orders with line items nested (no separate items table)
+CREATE TABLE `project.dataset.orders` (
+    order_id   STRING,
+    user_id    STRING,
+    created_at TIMESTAMP,
+    shipping   STRUCT<city STRING, zip STRING>,          -- RECORD / STRUCT
+    items      ARRAY<STRUCT<sku STRING, qty INT64, price NUMERIC>>  -- REPEATED STRUCT
+);
+
+-- Insert one order row containing many line items — no join needed
+INSERT INTO `project.dataset.orders` VALUES (
+    'o-1', 'u-42', CURRENT_TIMESTAMP(),
+    STRUCT('Pune', '411001'),
+    [STRUCT('sku-a', 2, 199.00), STRUCT('sku-b', 1, 49.50)]
+);
+
+-- UNNEST() flattens the array back into rows for aggregation
+SELECT
+    o.order_id,
+    o.shipping.city,                 -- dot access into STRUCT
+    item.sku,
+    item.qty * item.price AS line_total
+FROM `project.dataset.orders` AS o,
+     UNNEST(o.items) AS item         -- correlated cross join, but NO shuffle
+WHERE o.shipping.city = 'Pune';
+
+-- Aggregate across the nested array without a real join
+SELECT order_id, SUM(item.qty * item.price) AS order_total
+FROM `project.dataset.orders`, UNNEST(items) AS item
+GROUP BY order_id;
+```
+
+**Why idiomatic vs normalized relational:** in Postgres/MySQL you'd normalize into `orders` + `order_items` and JOIN on `order_id` — correct, but joins on billions of rows trigger a shuffle stage in Dremel. Nesting keeps the child rows physically co-located with the parent, so `UNNEST` is a local operation (no shuffle, no network). Use nesting for stable 1-to-many data owned by the parent; keep separate tables only when the child is independently queried or updated at high volume.
+
+---
+
+## BigQuery ML (BQML)
+
+BQML lets you train and serve ML models using pure SQL — no data movement to a separate ML platform. The model is a first-class dataset object; training runs on BigQuery slots. Good for data teams who know SQL but not Python.
+
+```sql
+-- 1. Train a model (model_type picks the algorithm)
+CREATE OR REPLACE MODEL `project.dataset.churn_model`
+OPTIONS (
+    model_type = 'logistic_reg',        -- linear_reg | logistic_reg | kmeans |
+                                         -- boosted_tree_classifier | boosted_tree_regressor |
+                                         -- dnn_classifier | arima_plus | ...
+    input_label_cols = ['churned'],
+    auto_class_weights = true
+) AS
+SELECT tenure_months, monthly_spend, support_tickets, churned
+FROM `project.dataset.customers`;
+
+-- kmeans (unsupervised) — no label column
+CREATE OR REPLACE MODEL `project.dataset.user_segments`
+OPTIONS (model_type = 'kmeans', num_clusters = 5) AS
+SELECT recency, frequency, monetary FROM `project.dataset.rfm`;
+
+-- 2. Evaluate — returns precision/recall/AUC (classification) or RMSE (regression)
+SELECT * FROM ML.EVALUATE(
+    MODEL `project.dataset.churn_model`,
+    (SELECT tenure_months, monthly_spend, support_tickets, churned
+     FROM `project.dataset.customers_holdout`)
+);
+
+-- 3. Predict — appends predicted_<label> + probabilities
+SELECT customer_id, predicted_churned, predicted_churned_probs
+FROM ML.PREDICT(
+    MODEL `project.dataset.churn_model`,
+    (SELECT customer_id, tenure_months, monthly_spend, support_tickets
+     FROM `project.dataset.customers_active`)
+);
+```
+
+**Remote models — connecting to Vertex AI / LLMs.** BQML can wrap a model hosted in Vertex AI (or a Vertex-hosted foundation model like Gemini) via a BigQuery connection, so you invoke it from SQL:
+
+```sql
+-- Register a remote model backed by a Vertex AI endpoint / foundation model
+CREATE OR REPLACE MODEL `project.dataset.gemini_model`
+REMOTE WITH CONNECTION `project.us.my_vertex_connection`
+OPTIONS (endpoint = 'gemini-1.5-flash');
+
+-- Call the LLM over a table column with ML.GENERATE_TEXT
+SELECT
+    review_id,
+    ml_generate_text_result['candidates'][0]['content'] AS summary
+FROM ML.GENERATE_TEXT(
+    MODEL `project.dataset.gemini_model`,
+    (SELECT review_id, CONCAT('Summarize in one line: ', review_text) AS prompt
+     FROM `project.dataset.reviews`),
+    STRUCT(0.2 AS temperature, 64 AS max_output_tokens)
+);
+```
+
+> The connection's service account needs `Vertex AI User` on the project. Other remote functions: `ML.GENERATE_EMBEDDING` (text/image embeddings for vector search), `ML.UNDERSTAND_TEXT`, `ML.TRANSLATE`.
+
+---
+
+## Materialized Views
+
+A materialized view (MV) precomputes and **physically stores** a query's result, then keeps it fresh incrementally — BigQuery applies only the delta from base-table changes rather than recomputing everything.
+
+```mermaid
+graph LR
+    BASE["Base table (orders)<br>new rows appended"] -->|"incremental refresh (delta only)"| MV["Materialized view<br>precomputed aggregate<br>physically stored"]
+    Q["User query<br>(same aggregate)"] -->|"automatic rewrite"| MV
+    Q -.->|"fallback: recent unmerged rows"| BASE
+```
+
+- **vs regular view:** a regular view is just stored SQL — re-executed (and re-scanned) on every query. An MV stores results, so repeat queries scan far fewer bytes.
+- **vs scheduled query:** a scheduled query writes to a table on a fixed cron and is always stale between runs; you must query the output table by name. An MV refreshes automatically/incrementally and is transparent.
+- **Automatic query rewrite:** you don't have to reference the MV. If you query the *base table* with a pattern the MV covers, BigQuery's optimizer transparently rewrites the query to read the MV (plus a smart delta scan of rows not yet merged) — cheaper and faster with no query change.
+
+```sql
+CREATE MATERIALIZED VIEW `project.dataset.daily_sales`
+OPTIONS (
+    enable_refresh = true,
+    refresh_interval_minutes = 30,      -- background incremental refresh cadence
+    max_staleness = INTERVAL '1' HOUR   -- allow serving slightly stale for lower cost
+) AS
+SELECT
+    DATE(created_at) AS sales_day,
+    shipping.city    AS city,
+    COUNT(*)         AS order_count,
+    SUM(total)       AS revenue
+FROM `project.dataset.orders`
+GROUP BY sales_day, city;
+```
+
+**Limitations:** aggregations are supported (`SUM`, `COUNT`, `MIN`, `MAX`, `AVG`, `COUNT DISTINCT` via HLL, etc.), but there are restrictions on joins (historically only inner joins under specific conditions; no `OUTER`/`CROSS`, no `UNNEST`, no window functions, no `HAVING`, no non-deterministic functions like `RAND()`/`CURRENT_TIMESTAMP()`). MVs must read from a single base table (join support is limited), and non-incremental MVs fall back to full refresh. Check current docs before relying on joins in an MV.
 
 ---
 
