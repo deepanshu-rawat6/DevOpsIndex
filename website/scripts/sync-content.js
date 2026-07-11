@@ -42,15 +42,15 @@ const SECTIONS = [
   },
   {
     slug: 'monitoring', title: 'Monitoring', order: 9,
-    readOrder: ['prometheus', 'alertmanager', 'grafana', 'opentelemetry', 'loki', 'performance-debugging', 'monitoring-scenarios', 'slo-sli', 'alerting-philosophy', 'thanos-mimir'],
+    readOrder: ['README', 'prometheus', 'alertmanager', 'grafana', 'opentelemetry', 'loki', 'performance-debugging', 'monitoring-scenarios', 'slo-sli', 'alerting-philosophy', 'thanos-mimir'],
   },
   {
     slug: 'git', title: 'Git', order: 10,
-    readOrder: ['git-internals', 'git-workflows', 'git-fixes'],
+    readOrder: ['README', 'git-internals', 'git-workflows', 'git-fixes'],
   },
   {
     slug: 'advanced', title: 'Advanced', order: 11,
-    readOrder: ['service-mesh', 'ebpf-observability', 'chaos-engineering', 'backup-dr', 'low-latency-networking', 'fintech-security', 'trading-data-streaming'],
+    readOrder: ['README', 'service-mesh', 'ebpf-observability', 'chaos-engineering', 'backup-dr', 'low-latency-networking', 'fintech-security', 'trading-data-streaming'],
   },
   {
     slug: 'ai-infra', title: 'AI Infrastructure', order: 12,
