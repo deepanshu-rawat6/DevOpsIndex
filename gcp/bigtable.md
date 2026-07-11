@@ -179,3 +179,72 @@ ResultScanner scanner = table.getScanner(scan);
 # Set max versions per cell family
 cbt -project=my-project -instance=my-instance setgcpolicy my-table actions maxversions=1
 ```
+
+---
+
+## Replication & App Profiles
+
+A Bigtable *instance* can have multiple *clusters* in different zones/regions. Adding a second cluster turns on **replication**: every write is asynchronously copied to all clusters. Replication is **eventually consistent** and **per-cluster** — each cluster has its own nodes and serves reads/writes locally, and there is no cross-cluster consensus. This gives HA, geographic read locality, and workload isolation (e.g. serving vs batch), but a read on cluster B may not yet see a write that just landed on cluster A.
+
+**App profiles** decide how a client's requests are routed across those clusters:
+
+```mermaid
+graph TD
+    APP["Client + app profile"] --> ROUTE{"Routing policy"}
+    ROUTE -->|"single-cluster routing"| C1["Cluster A (primary)<br>read-your-writes<br>conditional / RMW writes OK"]
+    ROUTE -->|"multi-cluster routing"| LB["Nearest available cluster<br>auto-failover<br>eventual consistency"]
+    LB --> C1
+    LB --> C2["Cluster B"]
+    C1 -.->|"async replication"| C2
+```
+
+- **Multi-cluster routing** — requests go to the nearest available cluster and automatically fail over if one is down. Best availability, but only **eventual consistency**. Single-row transactions are **not** safe here because `ReadModifyWrite` (atomic increment/append) and `CheckAndMutate` (conditional write) could hit different clusters and race.
+- **Single-cluster routing** — pin the app profile to one cluster. Required for **read-your-writes** consistency and for single-row transactions (`ReadModifyWriteRow`, `CheckAndMutateRow`), because those atomic ops must serialize on one cluster. Trade-off: no automatic failover for that profile.
+
+A common pattern: one single-cluster app profile for the transactional/serving path, and one multi-cluster app profile for read-heavy or batch workloads.
+
+```bash
+# Single-cluster routing profile — needed for conditional / read-modify-write consistency
+gcloud bigtable app-profiles create serving-profile \
+    --instance=my-instance \
+    --route-to=cluster-a \
+    --transactional-writes \
+    --description="Serving path (read-your-writes, single-row txns)"
+
+# Multi-cluster routing profile — HA + auto-failover, eventual consistency
+gcloud bigtable app-profiles create batch-profile \
+    --instance=my-instance \
+    --route-any \
+    --description="Batch/analytics reads, nearest cluster"
+
+# cbt equivalent
+cbt -project=my-project -instance=my-instance createappprofile my-instance serving-profile \
+    "Serving path" route-to=cluster-a
+```
+
+---
+
+## Autoscaling
+
+Instead of provisioning a fixed node count per cluster, Bigtable can autoscale nodes based on utilization targets. Scaling is **per-cluster** and node changes are non-disruptive (data lives on Colossus, so nodes just re-own tablets).
+
+- **min / max nodes** — the bounds Bigtable stays within.
+- **CPU target utilization** — target average CPU load (e.g. 60%); Bigtable adds nodes when CPU exceeds it, removes them when below.
+- **Storage target utilization** — target storage-per-node (e.g. 2560 GB SSD / node); protects against hitting the hard per-node storage limit even when CPU is low. Bigtable scales up to satisfy whichever target (CPU or storage) needs more nodes.
+
+**Manual vs autoscaling:** use **manual** for steady, predictable load or when you must cap cost precisely, and to pre-provision before a known spike (autoscaling reacts, it doesn't predict). Use **autoscaling** for variable/diurnal traffic to avoid over-provisioning while keeping p99 latency in check. Set `min-nodes` high enough to absorb sudden bursts, since scale-up is gradual.
+
+```bash
+# Enable autoscaling on a cluster (replaces fixed --num-nodes)
+gcloud bigtable clusters update cluster-a \
+    --instance=my-instance \
+    --autoscaling-min-nodes=3 \
+    --autoscaling-max-nodes=30 \
+    --autoscaling-cpu-target=60 \
+    --autoscaling-storage-target=2560   # GB per node (SSD)
+
+# Revert to manual scaling with a fixed node count
+gcloud bigtable clusters update cluster-a \
+    --instance=my-instance \
+    --num-nodes=5
+```

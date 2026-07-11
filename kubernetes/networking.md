@@ -276,6 +276,78 @@ graph TD
 
 ---
 
+## Traffic Policies: internalTrafficPolicy & externalTrafficPolicy
+
+Two Service fields control *which* endpoints kube-proxy is allowed to pick: one for traffic entering from outside the cluster, one for traffic between pods. Both trade **client source IP + one network hop** against **even load distribution**.
+
+### externalTrafficPolicy (NodePort / LoadBalancer)
+
+Applies to traffic arriving via a NodePort or cloud LoadBalancer.
+
+- **`Cluster`** (default): a packet landing on *any* node can be forwarded to a pod on *any* node. If the receiving node has no local pod, kube-proxy DNATs to a remote pod → **extra hop** across nodes. Because the source must be rewritten (SNAT) so the return packet comes back through the same node, the **client IP is lost** (pod sees the node IP). Upside: traffic spreads evenly across all endpoints regardless of where it lands.
+- **`Local`**: a node only forwards to pods **running on that same node**. No cross-node hop, **no SNAT**, so the pod sees the real **client source IP**. Downside: if a node has no local pod, traffic to that node is **dropped** (blackholed), and load is only as even as the LB's spread across nodes × pods-per-node.
+
+**healthCheckNodePort** — When `externalTrafficPolicy: Local` is set on a LoadBalancer, kube-proxy opens a dedicated health-check port (auto-assigned in the 30000–32767 range, visible in `.spec.healthCheckNodePort`) that returns HTTP 200 only on nodes that have ≥1 ready local endpoint, else 503. The cloud LB probes this port and **stops sending traffic to nodes with no local pod**, avoiding the blackhole. This is why `Local` needs a spread of pods (e.g. a DaemonSet or good anti-affinity) to keep load balanced.
+
+### internalTrafficPolicy (ClusterIP)
+
+Applies to pod-to-Service (in-cluster) traffic hitting a ClusterIP.
+
+- **`Cluster`** (default): kube-proxy load-balances across **all** ready endpoints cluster-wide.
+- **`Local`**: a pod's traffic to the Service is routed **only to endpoints on the same node**. If there is no local endpoint, the connection **fails** (no fallback to remote). Used for **node-local caches** like NodeLocal DNSCache, or to **cut cross-AZ data-transfer cost** by keeping traffic on-node.
+
+### Client source IP: why Local preserves it
+
+- **Cluster** path: node A receives the packet, must DNAT it to a pod on node B, then **SNAT** the source to node A's IP so the reply returns through A for reverse DNAT via conntrack. The original client IP is overwritten → app sees the node IP.
+- **Local** path: node A DNATs to a pod *on node A*; no SNAT is needed because the reply already exits through A. The original **client IP survives** end-to-end.
+
+```mermaid
+graph TD
+    classDef ext fill:#e74c3c,stroke:#c0392b,color:#fff
+    classDef node fill:#2c3e50,stroke:#1a252f,color:#fff
+    classDef pod fill:#2ecc71,stroke:#27ae60,color:#fff
+    classDef drop fill:#f39c12,stroke:#d68910,color:#000
+
+    C["Client (real src IP)"]:::ext --> LB["Cloud LB / NodePort"]:::node
+    LB -->|"Cluster: lands on Node A"| NA["Node A (no local pod)"]:::node
+    NA -->|"DNAT + SNAT (extra hop, client IP lost)"| PB["Pod on Node B"]:::pod
+    LB -->|"Local: lands on Node C"| NC["Node C (has local pod)"]:::node
+    NC -->|"DNAT only (no hop, client IP kept)"| PC["Pod on Node C"]:::pod
+    LB -.->|"Local: Node D has no pod (healthCheckNodePort 503)"| DROP["Traffic not sent (blackhole avoided)"]:::drop
+```
+
+### Cluster vs Local
+
+| Aspect | `Cluster` (default) | `Local` |
+|--------|---------------------|---------|
+| Extra network hop | Possible (may forward to another node) | Never (same-node only) |
+| Client source IP | Lost (SNAT applied) | Preserved (no SNAT) |
+| Load distribution | Even across all endpoints | Depends on per-node pod spread; can be skewed |
+| No local endpoint | Still served (uses remote pod) | Dropped / connection fails |
+| Typical use | General default | Preserve client IP, node-local cache, cut cross-AZ cost |
+
+### Service example (both fields)
+
+```yaml
+apiVersion: v1
+kind: Service
+metadata:
+  name: web
+spec:
+  type: LoadBalancer
+  selector:
+    app: web
+  ports:
+    - port: 80
+      targetPort: 8080
+  externalTrafficPolicy: Local   # preserve client IP for external traffic; LB uses healthCheckNodePort
+  internalTrafficPolicy: Cluster # in-cluster callers still load-balance across all endpoints
+```
+
+> Combine `externalTrafficPolicy: Local` with a DaemonSet (or pod anti-affinity) so every node that receives external traffic has a local endpoint — otherwise the healthCheckNodePort takes nodes out of rotation and load concentrates on the remaining nodes.
+
+---
+
 ## DNS in Kubernetes
 
 ```mermaid

@@ -295,7 +295,193 @@ Raw TCP performance matters?     → NLB
 
 ---
 
-## 11. GCP Cloud Load Balancing
+## 11. LCU and NLCU — Capacity Units and Pricing
+
+AWS bills ALB and NLB on two axes: a flat **hourly charge** plus a **capacity-unit charge** based on actual usage. Understanding the capacity unit is essential for cost forecasting and for diagnosing throttling under load. Elastic Load Balancing does not bill you the sum of all dimensions — it bills you on the **single highest dimension** consumed in each hour.
+
+### 11.1 ALB — Load Balancer Capacity Unit (LCU)
+
+An LCU measures the traffic an ALB processes across **four independent dimensions**. Each hour, AWS computes how many LCUs you consumed on each dimension, takes the **maximum**, and bills that.
+
+| Dimension | 1 LCU provides | What it measures |
+|---|---|---|
+| **New connections** | 25 new connections/sec | Newly established connections per second (avg over the hour) |
+| **Active connections** | 3,000 active connections/min | Concurrent connections sampled per minute |
+| **Processed bytes** | 1 GB/hour (EC2/IP/Lambda targets) | Bytes handled by the ALB in both directions |
+| **Rule evaluations** | 1,000 rule evaluations/sec | (Rules processed − 10 free) × request rate |
+
+```
+Billed LCUs for the hour = MAX(
+    new_connections_dim,
+    active_connections_dim,
+    processed_bytes_dim,
+    rule_evaluations_dim
+)
+```
+
+**Rule evaluations** is the subtle one. The first 10 rule evaluations per request are free. If a request matches after evaluating 15 rules, only 5 count. The dimension value is:
+
+```
+rule_eval_LCU = (request_rate/sec × max(0, rules_evaluated − 10)) / 1000
+```
+
+So a rule-heavy listener (deep rule chains, many host/path conditions) can make **rule evaluations** — not bytes — the dominant cost driver.
+
+#### Worked ALB Example
+
+An API service over one hour:
+- 1,000 new connections/sec
+- 60,000 active connections (sampled/min)
+- 5 GB/hour processed
+- 20 rules evaluated per request, 1,000 requests/sec
+
+```
+New connections:    1,000 / 25       = 40.0  LCU
+Active connections: 60,000 / 3,000   = 20.0  LCU
+Processed bytes:    5 GB / 1 GB      =  5.0  LCU
+Rule evaluations:   (1,000 × (20−10)) / 1,000 = 10.0 LCU
+
+Billed = MAX(40, 20, 5, 10) = 40 LCU  → new connections dominates
+```
+
+At the us-east-1 rate of **$0.008/LCU-hour**:
+```
+LCU cost  = 40 LCU × $0.008              = $0.32/hour
+Hourly LB = $0.0225/hour (ALB base)      = $0.0225/hour
+Total     ≈ $0.34/hour  ≈ $248/month
+```
+
+**Takeaway**: new-connection rate dominated here. Enabling **HTTP keep-alive** so clients reuse connections would collapse the new-connection dimension and cut the bill dramatically.
+
+### 11.2 NLB — Network Load Balancer Capacity Unit (NLCU)
+
+NLB uses NLCU, with dimensions that differ by protocol (TCP vs UDP vs TLS). Only **three dimensions**, and again you're billed on the max.
+
+| Dimension | 1 NLCU provides (TCP) | Notes |
+|---|---|---|
+| **New connections/flows** | 800 new flows/sec | TCP; UDP measured as flows |
+| **Active connections/flows** | 100,000 active flows/min | Concurrent flows |
+| **Processed bytes** | 1 GB/hour | Bytes in both directions |
+
+Protocol-specific rates matter:
+
+| Protocol | New flows per NLCU | Active flows per NLCU | Bytes per NLCU |
+|---|---|---|---|
+| **TCP** | 800/sec | 100,000/min | 1 GB/hr |
+| **UDP** | 400/sec | 50,000/min | 1 GB/hr |
+| **TLS** | 50/sec | 3,000/min | 1 GB/hr |
+
+**TLS on NLB is expensive** — the TLS dimension gives you only 50 new connections/sec per NLCU (vs 800 for raw TCP), because the NLB does the TLS handshake termination. High-churn TLS connections on an NLB burn NLCUs fast.
+
+#### Worked NLB Example (TLS)
+
+A TLS service: 500 new TLS connections/sec, 30,000 active flows, 8 GB/hour.
+
+```
+New TLS connections: 500 / 50        = 10.0  NLCU
+Active flows:        30,000 / 3,000  = 10.0  NLCU
+Processed bytes:     8 GB / 1 GB     =  8.0  NLCU
+
+Billed = MAX(10, 10, 8) = 10 NLCU
+```
+
+At **$0.006/NLCU-hour**:
+```
+NLCU cost = 10 × $0.006             = $0.06/hour
+Hourly LB = $0.0225/hour (NLB base) = $0.0225/hour
+Total     ≈ $0.083/hour ≈ $60/month
+```
+
+### 11.3 ALB LCU vs NLB NLCU — Side by Side
+
+| | ALB (LCU) | NLB (NLCU) |
+|---|---|---|
+| Dimensions | 4 (adds rule evaluations) | 3 (no rule evaluations) |
+| New conn / unit | 25/sec | 800/sec (TCP) |
+| Active conn / unit | 3,000/min | 100,000/min (TCP) |
+| Bytes / unit | 1 GB/hr | 1 GB/hr |
+| Unit price (us-east-1) | ~$0.008/LCU-hr | ~$0.006/NLCU-hr |
+| TLS impact | Terminates, counts in conns | Separate low TLS rate (50/sec) |
+| Billing | MAX of dimensions | MAX of dimensions |
+
+**Why NLB is cheaper at scale for raw TCP**: 1 NLCU absorbs 800 new connections/sec vs 25 for an LCU — a 32× difference on the connection dimension. For high-throughput TCP with long-lived connections, NLB's capacity-unit math is far more favorable.
+
+### 11.4 Capacity Planning and the Max-Dimension Trap
+
+The single most common costing mistake is optimizing the wrong dimension. Always identify which dimension is your **binding constraint**:
+
+```
+Workload profile                    Likely dominant dimension
+────────────────────────────────────────────────────────────
+Chatty API, no keep-alive          New connections   → enable keep-alive
+WebSockets / long-poll             Active connections → size for concurrency
+Large file downloads / streaming   Processed bytes    → consider CloudFront offload
+Complex routing (many rules)       Rule evaluations   → flatten rule chains, use host-based
+Bulk TLS handshakes on NLB         New TLS flows      → move TLS term to ALB or reuse conns
+```
+
+Diagnose with CloudWatch — each dimension has a metric:
+
+```bash
+# ALB consumed LCUs (and per-dimension breakdown)
+aws cloudwatch get-metric-statistics \
+  --namespace AWS/ApplicationELB \
+  --metric-name ConsumedLCUs \
+  --dimensions Name=LoadBalancer,Value=app/my-alb/50dc6c495c0c9188 \
+  --start-time 2024-01-15T00:00:00Z \
+  --end-time 2024-01-15T01:00:00Z \
+  --period 3600 --statistics Maximum
+
+# Per-dimension ALB metrics to find the binding constraint:
+#   NewConnectionCount, ActiveConnectionCount,
+#   ProcessedBytes, RuleEvaluations
+
+# NLB consumed capacity
+aws cloudwatch get-metric-statistics \
+  --namespace AWS/NetworkELB \
+  --metric-name ConsumedLCUs \
+  --dimensions Name=LoadBalancer,Value=net/my-nlb/... \
+  --period 3600 --statistics Maximum
+```
+
+### 11.5 Pre-Warming and Scaling Behavior
+
+ELB scales its own capacity gradually — it is **not instant**. When traffic jumps faster than the LB can add capacity, you see 503s (ALB) or connection failures (NLB).
+
+- ALB/NLB scale up over **minutes**, targeting your observed traffic trend
+- A sudden 10× spike (flash sale, viral event, load test) can outrun the scaling
+- AWS no longer offers self-service pre-warming; for known spikes you **open a support case** (Business/Enterprise support) to request pre-warming, or ramp load gradually
+- **NLB scales faster than ALB** for connection spikes because it does no L7 parsing — another reason to front extreme TCP bursts with NLB
+- Load-test realistically: ramp up, don't slam from 0 to peak, or you'll measure the LB's scaling curve rather than your app
+
+```
+Traffic pattern that triggers 503s:
+   requests/sec
+        │           ╱│  ← instant 10× spike outruns LB scaling
+        │          ╱ │     → 503 Service Unavailable
+        │       ___╱  │
+        │   ___╱      │  ← LB capacity (lags behind)
+        └──────────────── time
+
+Safe pattern:
+        │        ____╱  ← gradual ramp, LB keeps pace
+        │    ___╱
+        └──────────────── time
+```
+
+### 11.6 Cost Optimization Checklist
+
+- **Enable HTTP keep-alive** — collapses the new-connections dimension (biggest ALB win)
+- **Offload large/static responses to CloudFront** — removes bytes from the ALB
+- **Flatten rule chains** — keep the hot path within the first 10 free rule evaluations
+- **Use NLB for raw TCP** at high connection rates — 32× better connection economics
+- **Reuse TLS connections** on NLB — avoid the 50-handshakes/sec TLS ceiling
+- **Right-size deregistration/idle timeouts** — fewer half-open connections inflating the active-connection dimension
+- **Consolidate low-traffic ALBs** — each ALB carries the ~$0.0225/hour base regardless of traffic
+
+---
+
+## 12. GCP Cloud Load Balancing
 
 ### Global Anycast LB
 
@@ -353,7 +539,7 @@ NEGs decouple the LB from instance groups. Instead of routing to a VM, the LB ro
 
 ---
 
-## 12. nginx as Load Balancer
+## 13. nginx as Load Balancer
 
 ### Basic Upstream Config
 
@@ -408,7 +594,7 @@ upstream backend_pool {
 
 ---
 
-## 13. HAProxy
+## 14. HAProxy
 
 ### Config Structure
 
@@ -478,7 +664,7 @@ acl safe_method method GET HEAD OPTIONS
 
 ---
 
-## 14. Comparison Table
+## 15. Comparison Table
 
 | | AWS ALB | AWS NLB | GCP GLB | nginx | HAProxy |
 |---|---|---|---|---|---|
@@ -497,7 +683,7 @@ acl safe_method method GET HEAD OPTIONS
 
 ---
 
-## 15. Common Issues
+## 16. Common Issues
 
 ### 502 Bad Gateway
 
