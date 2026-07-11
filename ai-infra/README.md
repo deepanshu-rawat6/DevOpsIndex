@@ -64,7 +64,7 @@ Phase 1: AI Infrastructure (start here if you have K8s background)
   kuberay.md            → distributed Python workloads on K8s
   model-serving.md      → expose models as APIs at scale
 
-Phase 2: MLOps (after Phase 1) — see devops/mlops/
+Phase 2: MLOps (after Phase 1) — see ../mlops/
   experiment-tracking   → MLflow / W&B
   training-pipelines    → Kubeflow Pipelines / Airflow
 

@@ -11,18 +11,21 @@ Core networking concepts for backend engineers and platform engineers — from p
 | [tls-encryption.md](./tls-encryption.md) | Symmetric vs asymmetric, SSL history, TLS 1.2 (2 RTT), TLS 1.3 (1 RTT), certificate chain, certificate validation, debugging with openssl |
 | [http-versions.md](./http-versions.md) | HTTP/1.0 → HTTP/3, HOL blocking, binary framing, status codes, methods, important headers, caching (ETag), CORS |
 | [grpc-graphql.md](./grpc-graphql.md) | gRPC architecture, Protobuf encoding, 4 streaming modes, connection flow, status codes; GraphQL SDL, query vs REST, N+1, DataLoader |
+| [linux-networking.md](./linux-networking.md) | Linux packet RX/TX path, netfilter hooks, conntrack, network namespaces, veth pairs, SO_REUSEPORT, debugging commands |
+| [load-balancers.md](./load-balancers.md) | L4 vs L7, algorithms, health checks, sticky sessions, TLS termination, AWS ALB/NLB, LCU/NLCU, GCP GLB, nginx, HAProxy, common issues |
+| [cdn.md](./cdn.md) | CDN internals, edge PoPs, cache hierarchy, Cache-Control headers, CloudFront, Cloudflare, GCP CDN, WAF, debugging |
+| [nslookup-vs-curl.md](./nslookup-vs-curl.md) | DNS resolution vs HTTP request path, when nslookup succeeds but curl fails, layered debugging |
 
 ## Read Order
 
 ```
-osi-model.md      → understand the full picture
-tcp-udp.md        → transport layer (TCP state machine, TIME_WAIT)
-tls-encryption.md → TLS 1.2 vs 1.3, certificate validation
-http-versions.md  → HTTP/2 multiplexing, status codes, headers
-grpc-graphql.md   → modern API protocols built on top
-load-balancers.md → L4/L7, algorithms, AWS ALB/NLB, GCP, nginx, HAProxy
-cdn.md            → edge PoPs, caching, CloudFront/Cloudflare/GCP CDN
+osi-model.md         → understand the full picture
+tcp-udp.md           → transport layer (TCP state machine, TIME_WAIT)
+tls-encryption.md    → TLS 1.2 vs 1.3, certificate validation
+http-versions.md     → HTTP/2 multiplexing, status codes, headers
+grpc-graphql.md      → modern API protocols built on top
+linux-networking.md  → kernel packet path, netfilter, conntrack, namespaces
+load-balancers.md    → L4/L7, algorithms, AWS ALB/NLB, GCP, nginx, HAProxy
+cdn.md               → edge PoPs, caching, CloudFront/Cloudflare/GCP CDN
+nslookup-vs-curl.md  → layered debugging when DNS works but HTTP fails
 ```
-| [linux-networking.md](./linux-networking.md) | Linux packet RX/TX path, netfilter hooks, conntrack, network namespaces, veth pairs, SO_REUSEPORT, debugging commands |
-| [load-balancers.md](./load-balancers.md) | L4 vs L7, algorithms, health checks, sticky sessions, TLS termination, AWS ALB/NLB, GCP GLB, nginx, HAProxy, common issues |
-| [cdn.md](./cdn.md) | CDN internals, edge PoPs, cache hierarchy, Cache-Control headers, CloudFront, Cloudflare, GCP CDN, WAF, debugging |

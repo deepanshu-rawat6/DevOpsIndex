@@ -3,17 +3,22 @@
 | File | Topics |
 |------|--------|
 | [README.md](./README.md) | Architecture, kubectl apply flow, scheduler, taints/affinity |
+| [kubectl-cheatsheet.md](./kubectl-cheatsheet.md) | Context switching, pod/deployment/debug operations, one-liners, jsonpath |
 | [networking.md](./networking.md) | Services, ClusterIP internals, DNS, Ingress, NetworkPolicy |
 | [workloads.md](./workloads.md) | Pod lifecycle, probes, QoS, rolling updates, StatefulSet, DaemonSet, Jobs |
 | [storage.md](./storage.md) | PV/PVC/StorageClass, dynamic provisioning, CSI, volume snapshots |
 | [autoscaling.md](./autoscaling.md) | HPA, VPA, KEDA, Cluster Autoscaler |
 | [rbac.md](./rbac.md) | ServiceAccount, Role/ClusterRole, RoleBinding, auth chain |
+| [helm.md](./helm.md) | Chart structure, templating, hooks, library charts, Helmfile, debugging |
 | [eks-architecture.md](./eks-architecture.md) | EKS managed control plane, VPC CNI, IRSA, node groups |
 | [resource-limits.md](./resource-limits.md) | Requests vs limits, CFS throttling, QoS classes, LimitRange, ResourceQuota, node allocatable chain |
 | [coredns.md](./coredns.md) | Corefile plugins, ndots:5 problem, forwarding, caching, debugging, NodeLocal DNSCache |
 | [pod-lifecycle.md](./pod-lifecycle.md) | Startup sequence (sandbox→CNI→image→probes), admission controller chain, server-side apply, termination race |
 | [kube-proxy-modes.md](./kube-proxy-modes.md) | iptables O(n) problem, IPVS O(1) + LB algorithms, Cilium/eBPF socket-level LB, comparison table |
 | [cross-node-networking.md](./cross-node-networking.md) | Same-node packet walk, VXLAN overlay, Calico BGP direct routing, AWS VPC CNI flat network, MTU |
+| [hpa-vpa-internals.md](./hpa-vpa-internals.md) | HPA control loop internals, VPA components, singleton VPA, HPA+VPA conflict |
+| [scheduler-internals.md](./scheduler-internals.md) | Filter + Score plugins, FailedScheduling events, full pod scheduling sequence |
+| [policy-security.md](./policy-security.md) | OPA/Gatekeeper, Kyverno, multi-tenancy, ResourceQuota, NetworkPolicy isolation, PSA, seccomp, AppArmor |
 | [node-shutdown.md](./node-shutdown.md) | Graceful shutdown (systemd inhibitor), pod eviction ordering, node drain, non-graceful shutdown, lifecycle taints |
 
 ---
