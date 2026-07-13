@@ -338,8 +338,9 @@ Running stateful databases on Kubernetes — system design, replication, failove
 | [sre/sre-concepts.md](./sre/sre-concepts.md) | SLOs, error budgets, MTTD/MTTR, toil, incident lifecycle, blameless postmortem template, on-call best practices, runbook structure, leader election (client-go Lease API) | SDE-2 |
 | [sre/self-healing-aiops.md](./sre/self-healing-aiops.md) | Argo Events + Argo Workflows remediation loop, top 5 auto-remediation scenarios, AIOps LLM agent (LangChain + Loki + RAG), human approval gate, remediation metrics | SDE-2 |
 | [sre/db-monitoring.md](./sre/db-monitoring.md) | Prometheus + Grafana for PostgreSQL, MySQL, Redis, MongoDB on-prem | SDE-2 |
+| [sre/scenarios-scheduling-scaling.md](./sre/scenarios-scheduling-scaling.md) | Pod Pending (label+CPU insufficient), rolling update maxSurge/maxUnavailable stuck-old-pod math, `/var/log` ENOSPC despite free space (inodes, deleted-open FDs, reserved blocks), ASG predictive scaling, warm pools, unpredictable burst scaling, ALB/NLB LCU pre-warming, HPA/rollout/Cluster Autoscaler ceiling-vs-floor math | SDE-1/2 |
 
-**Read order:** README → k8s-debugging → k8s-scenarios → linux-debugging → aws-scenarios → cicd-scenarios → iac-scenarios → sre-concepts → self-healing-aiops → db-monitoring
+**Read order:** README → k8s-debugging → k8s-scenarios → linux-debugging → aws-scenarios → cicd-scenarios → iac-scenarios → sre-concepts → self-healing-aiops → db-monitoring → scenarios-scheduling-scaling
 
 ---
 
