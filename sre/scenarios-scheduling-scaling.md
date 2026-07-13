@@ -139,6 +139,101 @@ kubectl get deployment <name> -o jsonpath='{.status.updatedReplicas}/{.status.re
 
 ---
 
+## 2b. Orphaned Pending Pod Survives After You Fix the Deployment (Second Edit, New ReplicaSet)
+
+**Symptom:** Deployment's pod is stuck `Pending` (bad `resources.requests.cpu`, as in Section 1/2). You edit the Deployment to fix the request — this creates a **second, new** ReplicaSet, and *its* pod comes up `Running`/`Ready` fine. But the **first** bad ReplicaSet's `Pending` pod is still sitting there, uncleared.
+
+This is not the same problem as Section 2 — that was one rollout stalled waiting for its own surge pod. This is a **second** rollout succeeding while debris from the **first, abandoned** rollout attempt lingers.
+
+**Why `maxSurge`/`maxUnavailable` cannot fix this — and why tuning them (`maxUnavailable: 0`, `maxSurge: 1`, or leaving them as percentages) has no effect on it:**
+
+`maxSurge`/`maxUnavailable` are an *availability budget* — they cap how many **Ready** pods the controller may add above/remove below desired **while a rollout is actively in progress**. A pod that never became Ready (Pending) is not counted as "available" capacity in that budget at all, so it was never inside the mechanism these two fields govern. Once you make a second edit, the Deployment controller's reconciliation loop shifts its attention to the newest ReplicaSet against the current desired state — the first bad ReplicaSet becomes historical bookkeeping (kept for rollback, per `revisionHistoryLimit`), not part of the active surge/unavailable calculation. Changing the percentages, or switching to fixed integers (`maxUnavailable: 0`, `maxSurge: 1` — the standard zero-downtime pattern), only changes the *pace and safety margin of future rollouts*. It does not retroactively clean up a Pending pod from an already-abandoned ReplicaSet.
+
+```mermaid
+flowchart TD
+    A["RS-v1: bad CPU request<br/>pod stuck Pending"] --> B["Edit Deployment<br/>(fix CPU request)"]
+    B --> C["Controller creates RS-v2<br/>(new revision)"]
+    C --> D["RS-v2 pod schedules,<br/>becomes Ready"]
+    D --> E["Controller scales RS-v1<br/>desired --> 0"]
+    E --> F{"Did RS-v1's Pending<br/>pod actually terminate?"}
+    F -- "Usually yes,<br/>on next resync" --> G["Clean — nothing to do"]
+    F -- "No — still shows<br/>DESIRED:1 or pod lingers" --> H["Real anomaly:<br/>check RS status directly,<br/>don't tune maxSurge/maxUnavailable"]
+```
+
+**Diagnosis — confirm whether it's actually stuck, or just cosmetic:**
+
+```bash
+# Which ReplicaSet does each pod really belong to?
+kubectl get rs -l app=<name> -o wide
+# NAME          DESIRED   CURRENT   READY   AGE
+# app-v1-abcde  0         0         0       10m   ← should already be 0/0 if reconciled
+# app-v2-fghij  3         3         3       2m    ← current, healthy
+
+# If RS-v1 shows DESIRED > 0, the controller hasn't reconciled it — real anomaly
+kubectl describe rs app-v1-abcde -n <ns>
+
+# Confirm no Pending pods remain from the old RS
+kubectl get pods -l app=<name> --field-selector=status.phase=Pending
+```
+
+If `RS-v1` already shows `DESIRED: 0` but a Pending pod object still exists, it's an orphaned pod object (rare, usually a stale API object) — delete it directly:
+
+```bash
+kubectl delete pod <old-pending-pod> -n <ns>
+```
+
+If `RS-v1` still shows `DESIRED: 1` (the controller genuinely never reconciled it down), force it explicitly instead of waiting:
+
+```bash
+kubectl scale rs app-v1-abcde --replicas=0 -n <ns>
+```
+
+**The actual fix so this doesn't need manual cleanup every time — `progressDeadlineSeconds`, not the surge/unavailable fields:**
+
+```yaml
+spec:
+  progressDeadlineSeconds: 120   # fail the rollout fast instead of leaving a bad RS's pod hanging indefinitely
+  revisionHistoryLimit: 10       # bounds how many old (scaled-to-0) RS objects are retained for rollback
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1          # fixed int — standard zero-downtime pattern, not a fix for this issue
+      maxUnavailable: 0    # fixed int — same; controls availability budget, not orphan cleanup
+```
+
+With `progressDeadlineSeconds` set, a rollout that can't get its pod Ready in time flips the Deployment's `Progressing` condition to `False` with `Reason: ProgressDeadlineExceeded` — a reliable, alertable signal instead of a silently lingering Pending pod:
+
+```bash
+kubectl get deployment <name> -o jsonpath='{.status.conditions[?(@.type=="Progressing")]}'
+```
+
+Hook automation on that condition (a CronJob, an Argo Events sensor, or a simple controller) to auto-run `kubectl rollout undo deployment/<name>` or scale the offending RS to 0 — this replaces "someone notices manually" with "system reacts automatically."
+
+**Prevent the bad rollout from ever happening, so there's nothing to clean up:**
+
+```bash
+# Catch bad resource requests before they reach the cluster
+kubectl apply --dry-run=server -f deployment.yaml
+```
+
+Pair with an OPA/Kyverno admission policy that rejects `resources.requests.cpu` outside a sane bound relative to node capacity — this stops the entire class of problem (bad request → Pending pod → orphaned RS) at admission time, before a Pending pod is ever created.
+
+**Optional — scheduled cleanup for any Pending pod that lingers past a threshold, regardless of cause:**
+
+```bash
+# Find Pending pods older than 10 minutes, across all RS generations
+kubectl get pods -l app=<name> --field-selector=status.phase=Pending -o json | \
+  jq -r --arg cutoff "$(date -u -v-10M +%Y-%m-%dT%H:%M:%SZ)" \
+  '.items[] | select(.metadata.creationTimestamp < $cutoff) | .metadata.name' | \
+  xargs -r kubectl delete pod -n <ns>
+```
+
+Run this as a CronJob (or use a maintained tool like `kube-janitor`) so orphaned Pending pods are swept up on a schedule instead of requiring someone to notice and act.
+
+**Prevention:** Set `progressDeadlineSeconds` on every Deployment — it's the correct lever for "stop a bad rollout automatically," not `maxSurge`/`maxUnavailable`. Validate resource requests at CI/admission time so bad rollouts are rejected before they create Pending pods. If orphaned Pending pods are a recurring nuisance, add a scheduled sweep rather than tuning rollout percentages, since the percentages were never the mechanism responsible for cleanup in the first place.
+
+---
+
 ## 3. `/var/log/app` — "No Space Left on Device" With Plenty of Free Space
 
 **Symptom:** `df -h` shows the filesystem holding `/var/log/app` at 40% used. The application still logs (or errors with) `ENOSPC` / "No space left on device" on write.
@@ -478,6 +573,7 @@ Again `ceil` — a fractional node requirement (e.g. 2.3 nodes' worth of pending
 |---|---|---|
 | Pod Pending, label+CPU both in event | `kubectl describe pod` → Events | Both filters failing on same/different nodes — fix label, then capacity |
 | Old pod survives after Deployment update | `kubectl get rs -l app=<name>` | New pod can't schedule → controller won't breach `maxUnavailable` |
+| Old Pending pod survives after a **second** fix/edit | `kubectl get rs -l app=<name> -o wide` | Orphaned RS from abandoned rollout — not a maxSurge/maxUnavailable issue; use `progressDeadlineSeconds` + scale RS to 0 |
 | `ENOSPC` but `df -h` shows free space | `df -i /var/log` | Inode exhaustion (many small files) |
 | `df -h` vs `du -sh` mismatch | `lsof +L1 <path>` | Deleted file still held open by a process |
 | ASG under-provisioned for known event | `describe-scaling-activities` | Missing predictive scaling / scheduled action / warm pool |

@@ -17,7 +17,7 @@ Runbooks, debugging scenarios, and SRE concepts for Kubernetes, Linux, and AWS.
 | [sre-concepts.md](./sre-concepts.md) | SLOs, SLAs, error budgets, MTTD/MTTR, incident management lifecycle, blameless postmortem template, on-call best practices |
 | [self-healing-aiops.md](./self-healing-aiops.md) | Argo Events + Argo Workflows remediation loop, top 5 auto-remediation scenarios, AIOps LLM agent (LangChain + Loki + runbook RAG), human approval gate |
 | [db-monitoring.md](./db-monitoring.md) | Prometheus + Grafana for PostgreSQL, MySQL, Redis, MongoDB on-prem |
-| [scenarios-scheduling-scaling.md](./scenarios-scheduling-scaling.md) | Pod Pending (label+CPU), rolling update surge/unavailable math, `/var/log` ENOSPC with free space (inodes/deleted-FDs/reserved blocks), ASG predictive scaling + warm pools, unpredictable burst scaling, ALB/NLB LCU pre-warming, HPA/rollout/CA ceiling-floor math |
+| [scenarios-scheduling-scaling.md](./scenarios-scheduling-scaling.md) | Pod Pending (label+CPU), rolling update surge/unavailable math, orphaned Pending pod after a 2nd fix (why maxSurge/maxUnavailable don't help + progressDeadlineSeconds fix), `/var/log` ENOSPC with free space (inodes/deleted-FDs/reserved blocks), ASG predictive scaling + warm pools, unpredictable burst scaling, ALB/NLB LCU pre-warming, HPA/rollout/CA ceiling-floor math |
 
 ---
 
