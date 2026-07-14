@@ -33,7 +33,7 @@ Kubernetes, Linux, Docker, AWS, GCP, CI/CD, IaC, Monitoring, Git, and SRE — or
 | File | Topics | Level |
 |------|--------|-------|
 | [linux/README.md](./linux/README.md) | Process model, memory, filesystem, signals, load average | SDE-1 |
-| [linux/commands.md](./linux/commands.md) | grep, awk, sed, find, ps, ss, curl, disk management | SDE-1 |
+| [linux/commands.md](./linux/commands.md) | grep, awk, sed, find, ps, ss, curl, disk management; top-N slow requests from logs (awk vs grep numeric field filtering) | SDE-1 |
 | [linux/boot.md](./linux/boot.md) | BIOS → GRUB → kernel → initramfs → systemd | SDE-1 |
 | [linux/systemd.md](./linux/systemd.md) | Unit files, service lifecycle, timers, journalctl, systemd-analyze | SDE-1 |
 | [linux/networking.md](./linux/networking.md) | TCP/IP stack, sockets, iptables, netfilter, TIME_WAIT | SDE-1 |
@@ -228,11 +228,12 @@ Kubernetes, Linux, Docker, AWS, GCP, CI/CD, IaC, Monitoring, Git, and SRE — or
 | [advanced/ebpf-observability.md](./advanced/ebpf-observability.md) | eBPF verifier, bpftrace, BCC tools, Cilium, Tetragon, Hubble | SDE-2 |
 | [advanced/chaos-engineering.md](./advanced/chaos-engineering.md) | Litmus Chaos, Chaos Mesh, game days, failure injection patterns | SDE-2 |
 | [advanced/backup-dr.md](./advanced/backup-dr.md) | RTO/RPO math, Velero, etcd backup, PITR, AWS DR patterns, 3-2-1 rule | SDE-2 |
+| [advanced/dr-zero-downtime.md](./advanced/dr-zero-downtime.md) | Zero-downtime deploys for mission-critical services: graceful shutdown/preStop race, canary vs blue-green, expand/contract DB migrations, active-active multi-region DR, sync/async/semi-sync replication RPO tradeoffs, write-blocked-on-failover mechanics + mitigation | SDE-2 |
 | [advanced/low-latency-networking.md](./advanced/low-latency-networking.md) | AWS Direct Connect, BGP tuning, Transit Gateway multicast (IGMP), DPDK kernel bypass, EFA/RDMA, CPU isolation for HFT | SDE-2 |
 | [advanced/fintech-security.md](./advanced/fintech-security.md) | SEBI CSCRF, CERT-In 6hr incident reporting, K8s audit policy for regulators, PAM/Teleport, zero-downtime secrets rotation with Vault dynamic secrets and AWS Secrets Manager | SDE-2 |
 | [advanced/trading-data-streaming.md](./advanced/trading-data-streaming.md) | Kafka latency-first config (linger.ms=0, acks=1), broker I/O tuning, KRaft Express mode, Redis order book (AOF always, min-replicas-to-write, CP vs AP partition choice) | SDE-2 |
 
-**Read order:** service-mesh → ebpf-observability → chaos-engineering → backup-dr → low-latency-networking → fintech-security → trading-data-streaming
+**Read order:** service-mesh → ebpf-observability → chaos-engineering → backup-dr → dr-zero-downtime → low-latency-networking → fintech-security → trading-data-streaming
 
 ---
 
@@ -385,7 +386,7 @@ gcp/serverless.md → gcp/messaging.md
 gcp/observability.md → gcp/cicd.md → gcp/gcp-vs-aws.md → gcp/scenarios.md
 git/git-internals.md
 advanced/service-mesh.md → advanced/ebpf-observability.md
-advanced/chaos-engineering.md → advanced/backup-dr.md
+advanced/chaos-engineering.md → advanced/backup-dr.md → advanced/dr-zero-downtime.md
 advanced/low-latency-networking.md → advanced/fintech-security.md → advanced/trading-data-streaming.md
 cicd/gitops-secrets.md → cicd/argo-rollouts.md
 sre/k8s-scenarios.md (advanced) → sre/linux-debugging.md
