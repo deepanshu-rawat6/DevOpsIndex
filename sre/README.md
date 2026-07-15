@@ -9,7 +9,7 @@ Runbooks, debugging scenarios, and SRE concepts for Kubernetes, Linux, and AWS.
 | File | Topics |
 |------|--------|
 | [k8s-debugging.md](./k8s-debugging.md) | 5XX debugging (K8s + EKS), OOM-Killed recovery, pod state quick reference |
-| [k8s-scenarios.md](./k8s-scenarios.md) | CrashLoopBackOff, Pending, ImagePullBackOff, Terminating, NotReady, High Latency, PVC, Quota, DNS, NetworkPolicy, HPA, rollout stuck, webhooks, disk pressure, etcd slow, RBAC 403 |
+| [k8s-scenarios.md](./k8s-scenarios.md) | CrashLoopBackOff, Pending, all-replicas-on-one-node outage, ImagePullBackOff, Terminating, NotReady, High Latency, PVC, Quota, DNS, NetworkPolicy, HPA, rollout stuck, webhooks, disk pressure, etcd slow, RBAC 403 |
 | [linux-debugging.md](./linux-debugging.md) | High CPU, I/O wait, zombies, FD exhaustion, TIME_WAIT, disk I/O, inodes, NFS, OOM killer, kernel panic |
 | [aws-scenarios.md](./aws-scenarios.md) | EC2 SSH timeout, Lambda timeout, ALB 502, S3 denied, RDS refused, ECS restart, CF stuck, API GW 429, EKS nodes not joining, high bill |
 | [cicd-scenarios.md](./cicd-scenarios.md) | GHA OIDC auth, job hangs, ArgoCD out-of-sync, ArgoCD ImagePull, Jenkins Docker, wrong env deploy, staging crash, flaky tests |

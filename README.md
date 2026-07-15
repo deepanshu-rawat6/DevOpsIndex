@@ -331,7 +331,7 @@ Running stateful databases on Kubernetes — system design, replication, failove
 |------|--------|-------|
 | [sre/README.md](./sre/README.md) | Index + quick triage cheatsheets | — |
 | [sre/k8s-debugging.md](./sre/k8s-debugging.md) | 5XX runbooks (K8s + EKS) with Prevention, OOMKilled recovery; debugging without SSH: ephemeral containers, netshoot, port-forward decision tree, CloudWatch Logs Insights, X-Ray | SDE-1/2 |
-| [sre/k8s-scenarios.md](./sre/k8s-scenarios.md) | 20 K8s scenarios with Prevention: CrashLoop, DNS, NetworkPolicy, HPA, rollout, webhooks, etcd, RBAC | SDE-1/2 |
+| [sre/k8s-scenarios.md](./sre/k8s-scenarios.md) | 21 K8s scenarios with Prevention: CrashLoop, Pending, all-replicas-on-one-node outage, DNS, NetworkPolicy, HPA, rollout, webhooks, etcd, RBAC | SDE-1/2 |
 | [sre/linux-debugging.md](./sre/linux-debugging.md) | 10 Linux scenarios with Prevention: high CPU, I/O wait, zombies, FD exhaustion, inodes, NFS, OOM, kernel panic | SDE-1/2 |
 | [sre/aws-scenarios.md](./sre/aws-scenarios.md) | 10 AWS scenarios with Prevention: EC2 SSH, Lambda timeout, ALB 502, S3 denied, RDS refused, ECS restart, CF stuck, API GW 429, EKS nodes, high bill | SDE-1/2 |
 | [sre/cicd-scenarios.md](./sre/cicd-scenarios.md) | 8 CI/CD scenarios with Prevention: GHA OIDC, job hangs, ArgoCD sync, Jenkins Docker, flaky tests | SDE-1/2 |

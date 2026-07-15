@@ -257,6 +257,8 @@ spec:
 
 `whenUnsatisfiable: DoNotSchedule` (hard) vs `ScheduleAnyway` (soft) is the key decision for mission-critical: hard guarantees the spread but can leave pods Pending if a zone lacks capacity (combine with Cluster Autoscaler multi-AZ node groups so this isn't a real tradeoff). The PDB ensures that a routine node drain or cluster upgrade never coincides with losing more replicas than the service can tolerate — this is what actually causes "we did routine maintenance and had an incident."
 
+> **Node-level concentration risk (all N replicas landed on one node, that node dies):** this is the same class of problem as the AZ-spread above, but scoped to a single node and worth diagnosing explicitly on its own — full runbook with cause tree, `kubectl`/`jq` detection, and the `topologySpreadConstraints`/pod-anti-affinity fix moved to [sre/k8s-scenarios.md — "All Replicas Scheduled on One Node — Node Dies — Full Outage"](../sre/k8s-scenarios.md#all-replicas-scheduled-on-one-node--node-dies--full-outage).
+
 ### 2.3 Automated failover, not manual runbooks, for mission-critical RTO
 
 A DR plan that requires a human to notice, decide, and manually execute a runbook has an RTO floor of "however fast your on-call can act" — typically minutes at best, often much worse at 3am. For true zero/near-zero downtime:
@@ -401,6 +403,7 @@ Deployment-time (planned change) zero downtime:
 
 Failure-time (unplanned outage) zero downtime:
 □ Multi-AZ pod spread with hard topologySpreadConstraints
+□ Node-level spread (topologyKey: kubernetes.io/hostname) so N replicas never land on 1 node — see [sre/k8s-scenarios.md](../sre/k8s-scenarios.md) for the full runbook; verify with `kubectl get pods -o wide`, don't assume
 □ Multi-region active-active for compute + reads (Route 53 health-check failover)
 □ Aurora Global Database / equivalent for the write path, automated failover trigger
 □ Failover is triggered by automation (health checks), not a human runbook

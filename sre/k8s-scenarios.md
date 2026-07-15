@@ -238,6 +238,112 @@ kubectl logs -n kube-system -l app=cluster-autoscaler | tail -50
 
 ---
 
+## All Replicas Scheduled on One Node — Node Dies — Full Outage
+
+**Symptom:** A Deployment with `replicas: 3` (or any N > 1) has all replicas running on the same node. That node dies (hardware fault, kernel panic, host-level EC2 issue). All N pods disappear simultaneously — a full outage, not a partial degradation.
+
+```bash
+kubectl get pods -l app=<name> -o wide
+# NAME            NODE
+# my-app-abc123   node-a   ← all 3 rows show node-a — this is the exposure, even before node-a dies
+# my-app-def456   node-a
+# my-app-ghi789   node-a
+```
+
+**Why this happens even though it "shouldn't":** the default Kubernetes scheduler has **no anti-affinity behavior by default**. Its Score plugins (`LeastAllocated`/`ImageLocality` — see [scheduler-internals.md](../kubernetes/scheduler-internals.md)) optimize for bin-packing and resource fit, not spread. Nothing in the default algorithm prevents multiple replicas of the *same* Deployment from landing on the same node — if that node scores highest each time (common right after a batch of pods is created together, or on a lightly-loaded cluster), the scheduler will legitimately place all of them there. This is not a bug; it's the absence of a rule you have to add explicitly.
+
+```mermaid
+flowchart TD
+    A["Deployment: 3 replicas,<br/>no anti-affinity/spread configured"] --> B["Scheduler places pod 1<br/>--> Node A (best score)"]
+    B --> C["Scheduler places pod 2<br/>--> Node A again<br/>(still best score, no rule against it)"]
+    C --> D["Scheduler places pod 3<br/>--> Node A again"]
+    D --> E["Node A dies<br/>(hardware fault / kernel panic / host issue)"]
+    E --> F["All 3/3 pods gone<br/>simultaneously = FULL OUTAGE"]
+    F --> G["vs. spread across 3 nodes:<br/>losing Node A only drops to 2/3 —<br/>degraded, not down"]
+```
+
+### Cause tree
+
+| Root cause | Fix |
+|---|---|
+| No `topologySpreadConstraints` or `podAntiAffinity` on the Deployment | Add hard spread constraint keyed on `kubernetes.io/hostname` |
+| Spread constraint set to `ScheduleAnyway` (soft) | Switch to `DoNotSchedule` (hard) for mission-critical services |
+| Not enough schedulable nodes to satisfy a hard spread | Add Cluster Autoscaler/Karpenter capacity, or the hard constraint just leaves pods `Pending` |
+| PodDisruptionBudget missing | A drain/eviction can re-collapse an already-spread set of pods back onto fewer nodes |
+| Replica count too low (e.g. `replicas: 2`) | Losing 1 of 2 is a 50% capacity loss even with perfect spread — use `>= 3` for mission-critical |
+
+### The fix — make single-node concentration structurally impossible
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: my-app
+spec:
+  replicas: 3
+  template:
+    spec:
+      topologySpreadConstraints:
+      # Spread across NODES — the direct fix for "3/3 on one node"
+      - maxSkew: 1
+        topologyKey: kubernetes.io/hostname
+        whenUnsatisfiable: DoNotSchedule    # hard — refuse to co-locate beyond skew 1
+        labelSelector:
+          matchLabels: {app: my-app}
+      # Spread across AZs too — protects against a whole-AZ failure, not just one node
+      - maxSkew: 1
+        topologyKey: topology.kubernetes.io/zone
+        whenUnsatisfiable: DoNotSchedule
+        labelSelector:
+          matchLabels: {app: my-app}
+```
+
+`maxSkew: 1` with `topologyKey: kubernetes.io/hostname` caps the difference in pod count between the most- and least-loaded **node** at 1. With 3 replicas and 3+ available nodes, this forces one pod per node — losing any single node now drops you to 2/3, not 0/3.
+
+**Older/equivalent mechanism — pod anti-affinity** (still common in existing manifests; `topologySpreadConstraints` is the modern preferred API):
+
+```yaml
+spec:
+  template:
+    spec:
+      affinity:
+        podAntiAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+          - labelSelector:
+              matchLabels: {app: my-app}
+            topologyKey: kubernetes.io/hostname   # hard: never co-locate two replicas on the same node
+```
+
+**Why `DoNotSchedule` (hard), not `ScheduleAnyway` (soft), for mission-critical services:** with the soft form, the scheduler *prefers* spreading but will still co-locate replicas if it has to — silently reintroducing the exact single-point-of-failure this is meant to prevent, with no warning at all. The hard form instead leaves a pod `Pending` if it truly can't satisfy the spread — which surfaces as a visible, alertable scheduling problem you can fix by adding capacity, instead of a silent landmine that only detonates when the node actually dies.
+
+**This must be paired with cluster capacity, or it just creates Pending pods instead:**
+
+```
+□ At least as many schedulable nodes as replicas (3 replicas needs >= 3 nodes with free capacity)
+□ Cluster Autoscaler / Karpenter can add nodes if the hard constraint currently can't be satisfied
+□ PodDisruptionBudget (minAvailable) so a voluntary drain doesn't undo the spread by
+  evicting 2 of 3 already-spread pods back onto the same remaining node
+□ replicas >= 3 for mission-critical services — with 2 replicas, losing 1 node is
+  already a 50% capacity loss even with perfect spread
+```
+
+### Detecting this before (or after) it bites you
+
+```bash
+# Where are a Deployment's replicas actually scheduled right now?
+kubectl get pods -l app=my-app -o wide
+
+# Fleet-wide audit: flag any app with >1 replica but only 1 distinct node in use
+kubectl get pods -A -o json | jq -r '
+  .items | group_by(.metadata.labels.app) |
+  map({app: .[0].metadata.labels.app, nodes: (map(.spec.nodeName) | unique)}) |
+  map(select((.nodes | length) == 1)) '
+```
+
+**Prevention:** Treat `topologySpreadConstraints` as a default, not opt-in, for every Deployment with more than 1 replica that matters for availability — enforce it fleet-wide via a Kyverno/OPA mutating policy so teams can't accidentally ship without it. Re-run the `jq` audit periodically (or wire it into a policy-as-code check), since a Deployment can drift into single-node concentration again after a later reschedule/drain even if it was correctly spread at initial rollout.
+
+---
+
 ## `ImagePullBackOff` / `ErrImagePull`
 
 Container image can't be pulled. `ErrImagePull` is the first attempt; `ImagePullBackOff` is repeated failure with backoff.
