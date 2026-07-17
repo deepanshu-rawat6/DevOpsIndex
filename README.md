@@ -11,19 +11,21 @@ Kubernetes, Linux, Docker, AWS, GCP, CI/CD, IaC, Monitoring, Git, and SRE — or
 2.  Networking               → TCP, TLS, HTTP, gRPC — how data moves
 3.  Docker                   → containers before orchestration
 4.  Kubernetes               → orchestration, networking, security
-5.  CI/CD                    → build and deploy pipelines
-6.  IaC                      → Terraform, Helm, CloudFormation
-7.  AWS                      → cloud infrastructure
-8.  GCP                      → GCP equivalents + BigQuery, Bigtable, GKE
-9.  Monitoring               → Prometheus, Grafana, OTel, Loki
-10. Git                      → internals, workflows, fixing mistakes
-11. Advanced                 → service mesh, eBPF, chaos, DR
-12. AI Infrastructure        → GPU scheduling, KubeRay, vLLM, LLMOps
-13. MLOps                    → experiment tracking, pipelines, drift detection
-14. Database Internals       → WAL, MVCC, indexes, replication internals
-15. Databases on K8s         → running Postgres, Kafka, Redis on GKE
-16. System Design            → scaling, CAP/PACELC, rate limiting, async patterns
-17. SRE & Debugging          → production incident runbooks
+5.  Go                       → concurrency/language fluency for infra tooling and coding rounds
+6.  CI/CD                    → build and deploy pipelines
+7.  IaC                      → Terraform, Pulumi, Helm, CloudFormation
+8.  AWS                      → cloud infrastructure
+9.  GCP                      → GCP equivalents + BigQuery, Bigtable, GKE
+10. Monitoring               → Prometheus, Grafana, OTel, Loki
+11. Git                      → internals, workflows, fixing mistakes
+12. Advanced                 → service mesh, eBPF, chaos, DR, trading systems, fintech compliance
+13. AI Infrastructure        → GPU scheduling, KubeRay, vLLM, LLMOps
+14. MLOps                    → experiment tracking, pipelines, drift detection
+15. Database Internals       → WAL, MVCC, indexes, replication internals
+16. Databases on K8s         → running Postgres, Kafka, Redis on GKE
+17. System Design            → scaling, CAP/PACELC, rate limiting, async patterns
+18. SRE & Debugging          → production incident runbooks, on-call tooling
+19. Coding Practice          → DSA implementations in Go (LRU cache, rate limiter, etc.)
 ```
 
 ---
@@ -64,11 +66,12 @@ Kubernetes, Linux, Docker, AWS, GCP, CI/CD, IaC, Monitoring, Git, and SRE — or
 | [networking/http-versions.md](./networking/http-versions.md) | HTTP/1.1 vs HTTP/2 vs HTTP/3, HOL blocking, binary framing, status codes, methods, caching (ETag), CORS | SDE-1 |
 | [networking/linux-networking.md](./networking/linux-networking.md) | Linux packet RX/TX path, netfilter hooks, conntrack, network namespaces, veth pairs, SO_REUSEPORT | SDE-2 |
 | [networking/grpc-graphql.md](./networking/grpc-graphql.md) | gRPC on HTTP/2, Protobuf encoding, 4 streaming modes, connection flow; GraphQL SDL, N+1 problem, DataLoader | SDE-1/2 |
+| [networking/grpc-deep-dive.md](./networking/grpc-deep-dive.md) | Protobuf wire format internals, all 4 streaming modes with full code, interceptors (auth/metrics), deadline propagation, health checking protocol, client-side load balancing, gRPC-Web, error code mapping | SDE-2 |
 | [networking/load-balancers.md](./networking/load-balancers.md) | L4 vs L7, algorithms, health checks, sticky sessions, connection draining, AWS ALB/NLB, LCU/NLCU capacity units + pricing, GCP GLB, nginx, HAProxy | SDE-1/2 |
 | [networking/cdn.md](./networking/cdn.md) | CDN internals, edge PoPs, cache hierarchy, CloudFront vs Cloudflare vs GCP CDN, cache invalidation, TLS at edge | SDE-1/2 |
 | [networking/nslookup-vs-curl.md](./networking/nslookup-vs-curl.md) | DNS resolution vs HTTP request path, when nslookup succeeds but curl fails, layered debugging | SDE-1 |
 
-**Read order:** osi-model → tcp-udp → tls-encryption → http-versions → grpc-graphql → load-balancers → cdn → nslookup-vs-curl
+**Read order:** osi-model → tcp-udp → tls-encryption → http-versions → grpc-graphql → grpc-deep-dive → load-balancers → cdn → nslookup-vs-curl
 
 ---
 
@@ -114,7 +117,22 @@ Kubernetes, Linux, Docker, AWS, GCP, CI/CD, IaC, Monitoring, Git, and SRE — or
 
 ---
 
-## 5. CI/CD
+## 5. Go
+
+Language and concurrency fluency for infra tooling, backend services, and coding-round interviews.
+
+| File | Topics | Level |
+|------|--------|-------|
+| [go/README.md](./go/README.md) | Why Go for infra tooling, goroutine/channel/select fundamentals, error handling idioms, read order | SDE-1 |
+| [go/concurrency.md](./go/concurrency.md) | Goroutine leaks + pprof detection, worker pool, fan-out/fan-in, pipeline pattern, done-channel cancellation, race detection (`-race`) | SDE-1/2 |
+| [go/context.md](./go/context.md) | context tree/propagation, WithCancel/WithTimeout/WithDeadline, errgroup fan-out with early cancellation, HTTP request cancellation, common mistakes | SDE-1/2 |
+| [go/sync-primitives.md](./go/sync-primitives.md) | Mutex vs RWMutex, sync.Once, sync.Pool, WaitGroup, errgroup, sync.Map, atomic package, Mutex vs Channel decision framework | SDE-1/2 |
+
+**Read order:** README → concurrency → context → sync-primitives
+
+---
+
+## 6. CI/CD
 
 | File | Topics | Level |
 |------|--------|-------|
@@ -122,32 +140,34 @@ Kubernetes, Linux, Docker, AWS, GCP, CI/CD, IaC, Monitoring, Git, and SRE — or
 | [cicd/github-actions/README.md](./cicd/github-actions/README.md) | Workflows, OIDC to AWS, matrix builds, caching, reusable workflows | SDE-1 |
 | [cicd/jenkins/README.md](./cicd/jenkins/README.md) | Declarative pipeline, shared libraries, master-agent architecture | SDE-1 |
 | [cicd/jenkins/ecs-agents.md](./cicd/jenkins/ecs-agents.md) | Dynamic Jenkins agents on ECS Fargate, cost optimization | SDE-2 |
+| [cicd/jenkins/plugin-development.md](./cicd/jenkins/plugin-development.md) | Extension points (@Extension, Builder/SimpleBuildStep/Publisher), Descriptor pattern, Stapler data-binding, credential handling, AsyncPeriodicWork, OSS security review findings (SSRF/XSS/CSRF), JenkinsRule testing, Update Center publishing | SDE-2 |
 | [cicd/argocd/README.md](./cicd/argocd/README.md) | GitOps, Application CRD, sync waves, multi-cluster with ApplicationSet, RBAC, Projects, SSO | SDE-1/2 |
 | [cicd/gitops-secrets.md](./cicd/gitops-secrets.md) | Sealed Secrets vs ESO, EKS/IRSA pattern, secret rotation, decision framework | SDE-2 |
 | [cicd/pipeline-design.md](./cicd/pipeline-design.md) | Java CI end-to-end, CD to 2 clusters, ArgoCD vs GHA deploy, Helm create/install/upgrade, SDE-1 vs SDE-2 classification | SDE-1/2 |
 | [cicd/argo-rollouts.md](./cicd/argo-rollouts.md) | Canary (steps + Prometheus analysis + ALB), blue-green, kubectl plugin, ArgoCD integration | SDE-2 |
 
-**Read order:** README → github-actions → jenkins → jenkins/ecs-agents → argocd → gitops-secrets → pipeline-design → argo-rollouts
+**Read order:** README → github-actions → jenkins → jenkins/ecs-agents → jenkins/plugin-development → argocd → gitops-secrets → pipeline-design → argo-rollouts
 
 ---
 
-## 6. Infrastructure as Code
+## 7. Infrastructure as Code
 
 | File | Topics | Level |
 |------|--------|-------|
 | [iac/README.md](./iac/README.md) | IaC overview, Terraform vs CloudFormation, state, drift | SDE-1 |
 | [iac/terraform/README.md](./iac/terraform/README.md) | HCL, state, modules, workspaces deep-dive, Terragrunt, remote backend (S3+DynamoDB), import, moved block, check block, terraform test framework | SDE-1/2 |
 | [iac/cloudformation/README.md](./iac/cloudformation/README.md) | Templates, stacks, change sets, nested stacks, StackSets, custom resources | SDE-1 |
+| [iac/pulumi/README.md](./iac/pulumi/README.md) | Pulumi vs Terraform architecture, Output<T> model, Pulumi Cloud vs self-managed state backend, component resources, secrets encryption, testing with mocks, decision framework | SDE-1/2 |
 | [iac/ansible/README.md](./iac/ansible/README.md) | Architecture, how Ansible works, SSH internals, agentless push model, ansible.cfg | SDE-1 |
 | [iac/ansible/core-concepts.md](./iac/ansible/core-concepts.md) | Inventory, playbooks, modules, tasks, handlers, variables (precedence), facts, Jinja2 templates | SDE-1 |
 | [iac/ansible/cloud-integration.md](./iac/ansible/cloud-integration.md) | AWS SSM (no port 22), GCP OS Login + IAP tunnel, dynamic inventory, cloud modules | SDE-1/2 |
 | [iac/ansible/advanced.md](./iac/ansible/advanced.md) | Roles, collections, Ansible Vault, AWX/Tower, performance (forks/pipelining), Molecule testing | SDE-2 |
 
-**Read order:** README → terraform → cloudformation → ansible → ansible/core-concepts → ansible/cloud-integration → ansible/advanced
+**Read order:** README → terraform → cloudformation → pulumi → ansible → ansible/core-concepts → ansible/cloud-integration → ansible/advanced
 
 ---
 
-## 7. AWS
+## 8. AWS
 
 | File | Topics | Level |
 |------|--------|-------|
@@ -163,7 +183,7 @@ Kubernetes, Linux, Docker, AWS, GCP, CI/CD, IaC, Monitoring, Git, and SRE — or
 
 ---
 
-## 8. GCP
+## 9. GCP
 
 | File | Topics | Level |
 |------|--------|-------|
@@ -187,7 +207,7 @@ Kubernetes, Linux, Docker, AWS, GCP, CI/CD, IaC, Monitoring, Git, and SRE — or
 
 ---
 
-## 9. Monitoring & Observability
+## 10. Monitoring & Observability
 
 | File | Topics | Level |
 |------|--------|-------|
@@ -208,7 +228,7 @@ Kubernetes, Linux, Docker, AWS, GCP, CI/CD, IaC, Monitoring, Git, and SRE — or
 
 ---
 
-## 10. Git
+## 11. Git
 
 | File | Topics | Level |
 |------|--------|-------|
@@ -220,24 +240,27 @@ Kubernetes, Linux, Docker, AWS, GCP, CI/CD, IaC, Monitoring, Git, and SRE — or
 
 ---
 
-## 11. Advanced
+## 12. Advanced
 
 | File | Topics | Level |
 |------|--------|-------|
 | [advanced/service-mesh.md](./advanced/service-mesh.md) | Istio control/data plane, VirtualService, mTLS, circuit breaking, Linkerd vs Istio | SDE-2 |
 | [advanced/ebpf-observability.md](./advanced/ebpf-observability.md) | eBPF verifier, bpftrace, BCC tools, Cilium, Tetragon, Hubble | SDE-2 |
 | [advanced/chaos-engineering.md](./advanced/chaos-engineering.md) | Litmus Chaos, Chaos Mesh, game days, failure injection patterns | SDE-2 |
+| [advanced/chaos-engineering-handson.md](./advanced/chaos-engineering-handson.md) | Runnable exercises: Litmus pod-delete, Chaos Mesh network partition + CPU stress vs HPA, manual EKS AZ-failure game day, chaos maturity checklist | SDE-2 |
 | [advanced/backup-dr.md](./advanced/backup-dr.md) | RTO/RPO math, Velero, etcd backup, PITR, AWS DR patterns, 3-2-1 rule | SDE-2 |
 | [advanced/dr-zero-downtime.md](./advanced/dr-zero-downtime.md) | Zero-downtime deploys for mission-critical services: graceful shutdown/preStop race, canary vs blue-green, expand/contract DB migrations, active-active multi-region DR, sync/async/semi-sync replication RPO tradeoffs, write-blocked-on-failover mechanics + mitigation | SDE-2 |
 | [advanced/low-latency-networking.md](./advanced/low-latency-networking.md) | AWS Direct Connect, BGP tuning, Transit Gateway multicast (IGMP), DPDK kernel bypass, EFA/RDMA, CPU isolation for HFT | SDE-2 |
 | [advanced/fintech-security.md](./advanced/fintech-security.md) | SEBI CSCRF, CERT-In 6hr incident reporting, K8s audit policy for regulators, PAM/Teleport, zero-downtime secrets rotation with Vault dynamic secrets and AWS Secrets Manager | SDE-2 |
+| [advanced/fintech-compliance.md](./advanced/fintech-compliance.md) | SEBI CSCRF 5 pillars, VAPT/SOC requirements, CERT-In 6hr reporting automation, PCI-DSS 12 requirements + tokenization vs encryption, RBI data localization/outsourcing guidelines, compliance-ready K8s audit policy | SDE-2 |
+| [advanced/trading-systems.md](./advanced/trading-systems.md) | OMS order lifecycle state machine, matching engine/order book fundamentals, market data feed handling (snapshot/incremental, gap detection), FIX protocol basics, exchange gateway failover, idempotent order submission, infra concerns for market-open spikes | SDE-2 |
 | [advanced/trading-data-streaming.md](./advanced/trading-data-streaming.md) | Kafka latency-first config (linger.ms=0, acks=1), broker I/O tuning, KRaft Express mode, Redis order book (AOF always, min-replicas-to-write, CP vs AP partition choice) | SDE-2 |
 
-**Read order:** service-mesh → ebpf-observability → chaos-engineering → backup-dr → dr-zero-downtime → low-latency-networking → fintech-security → trading-data-streaming
+**Read order:** service-mesh → ebpf-observability → chaos-engineering → chaos-engineering-handson → backup-dr → dr-zero-downtime → low-latency-networking → fintech-security → fintech-compliance → trading-systems → trading-data-streaming
 
 ---
 
-## 12. AI Infrastructure & LLMOps
+## 13. AI Infrastructure & LLMOps
 
 The natural extension of K8s/Linux expertise into AI/ML platform engineering.
 
@@ -254,7 +277,7 @@ The natural extension of K8s/Linux expertise into AI/ML platform engineering.
 
 ---
 
-## 13. MLOps
+## 14. MLOps
 
 CI/CD for data and models — experiment tracking, automated retraining pipelines, drift detection.
 
@@ -270,7 +293,7 @@ CI/CD for data and models — experiment tracking, automated retraining pipeline
 
 ---
 
-## 14. Database Internals
+## 15. Database Internals
 
 Storage engines, WAL, MVCC, replication internals, indexing, and query execution for each database.
 
@@ -291,7 +314,7 @@ Storage engines, WAL, MVCC, replication internals, indexing, and query execution
 
 ---
 
-## 15. Databases on Kubernetes (On-Prem / GKE)
+## 16. Databases on Kubernetes (On-Prem / GKE)
 
 Running stateful databases on Kubernetes — system design, replication, failover, snapshots, and operational runbooks.
 
@@ -309,7 +332,7 @@ Running stateful databases on Kubernetes — system design, replication, failove
 
 ---
 
-## 16. System Design
+## 17. System Design
 
 | File | Topics | Level |
 |------|--------|-------|
@@ -325,7 +348,7 @@ Running stateful databases on Kubernetes — system design, replication, failove
 
 ---
 
-## 17. SRE & Debugging
+## 18. SRE & Debugging
 
 | File | Topics | Level |
 |------|--------|-------|
@@ -340,8 +363,26 @@ Running stateful databases on Kubernetes — system design, replication, failove
 | [sre/self-healing-aiops.md](./sre/self-healing-aiops.md) | Argo Events + Argo Workflows remediation loop, top 5 auto-remediation scenarios, AIOps LLM agent (LangChain + Loki + RAG), human approval gate, remediation metrics | SDE-2 |
 | [sre/db-monitoring.md](./sre/db-monitoring.md) | Prometheus + Grafana for PostgreSQL, MySQL, Redis, MongoDB on-prem | SDE-2 |
 | [sre/scenarios-scheduling-scaling.md](./sre/scenarios-scheduling-scaling.md) | Pod Pending (label+CPU insufficient), rolling update maxSurge/maxUnavailable stuck-old-pod math, orphaned Pending pod after a second fix/edit (why maxSurge/maxUnavailable don't fix it, `progressDeadlineSeconds` + cleanup automation), `/var/log` ENOSPC despite free space (inodes, deleted-open FDs, reserved blocks), ASG predictive scaling, warm pools, unpredictable burst scaling, ALB/NLB LCU pre-warming, HPA/rollout/Cluster Autoscaler ceiling-vs-floor math | SDE-1/2 |
+| [sre/oncall-tooling.md](./sre/oncall-tooling.md) | PagerDuty Services/Escalation Policies/Schedules/Event Orchestration, Alertmanager severity-based routing, PagerDuty vs Opsgenie, alert fatigue metrics (MTTA, actionable %), on-call schedule patterns, ChatOps/incident command integration, post-incident review automation | SDE-1/2 |
 
-**Read order:** README → k8s-debugging → k8s-scenarios → linux-debugging → aws-scenarios → cicd-scenarios → iac-scenarios → sre-concepts → self-healing-aiops → db-monitoring → scenarios-scheduling-scaling
+**Read order:** README → k8s-debugging → k8s-scenarios → linux-debugging → aws-scenarios → cicd-scenarios → iac-scenarios → sre-concepts → self-healing-aiops → db-monitoring → scenarios-scheduling-scaling → oncall-tooling
+
+---
+
+## 19. Coding Practice
+
+DSA implementations in Go, relevant to backend/infra engineering interviews — LRU cache, rate limiting, consistent hashing, bloom filters, and common concurrency patterns.
+
+| File | Topics | Level |
+|------|--------|-------|
+| [coding-practice/README.md](./coding-practice/README.md) | Index and interview relevance of each topic | — |
+| [coding-practice/lru-cache.md](./coding-practice/lru-cache.md) | Doubly linked list + hashmap from scratch, thread-safe variant, LFU comparison, TTL-eviction variant | SDE-1/2 |
+| [coding-practice/rate-limiter-implementations.md](./coding-practice/rate-limiter-implementations.md) | Token bucket, leaky bucket, fixed window, sliding window log — full Go code + HTTP middleware wrapper | SDE-1/2 |
+| [coding-practice/consistent-hashing.md](./coding-practice/consistent-hashing.md) | Hash ring with virtual nodes, rebalancing on node add/remove, full Go implementation | SDE-2 |
+| [coding-practice/bloom-filter.md](./coding-practice/bloom-filter.md) | False-positive rate math, double hashing, infra use cases (DB lookup pre-check, stream dedup) | SDE-2 |
+| [coding-practice/concurrent-patterns.md](./coding-practice/concurrent-patterns.md) | Mutex vs atomic counter, bounded worker pool, channel pub/sub, debounce/throttle, goroutine leak detection + fix | SDE-1/2 |
+
+**Read order:** README → lru-cache → rate-limiter-implementations → consistent-hashing → bloom-filter → concurrent-patterns
 
 ---
 
@@ -357,6 +398,7 @@ kubernetes/kubectl-cheatsheet.md → kubernetes/README.md
 kubernetes/workloads.md → kubernetes/resource-limits.md
 kubernetes/networking.md → kubernetes/coredns.md → kubernetes/storage.md → kubernetes/rbac.md
 kubernetes/helm.md
+go/README.md → go/concurrency.md
 cicd/README.md → cicd/github-actions → cicd/argocd
 iac/terraform → iac/cloudformation
 aws/README.md → aws/services-overview.md → aws/storage-databases.md
@@ -366,6 +408,7 @@ monitoring/alerting-philosophy.md → monitoring/loki.md
 git/git-workflows.md → git/git-fixes.md
 sre/k8s-debugging.md → sre/k8s-scenarios.md (first half)
 sre/aws-scenarios.md
+coding-practice/README.md → coding-practice/lru-cache.md → coding-practice/rate-limiter-implementations.md
 
 ── SDE-2 ──────────────────────────────────────────────────
 linux/io-models.md → linux/scheduler.md → linux/security.md
@@ -375,6 +418,7 @@ docker/buildkit.md → docker/docker-security.md
 kubernetes/autoscaling.md → kubernetes/eks-architecture.md
 kubernetes/pod-lifecycle.md → kubernetes/kube-proxy-modes.md
 kubernetes/cross-node-networking.md → kubernetes/node-shutdown.md
+go/context.md → go/sync-primitives.md
 aws/databases-deep-dive.md
 monitoring/opentelemetry.md → monitoring/performance-debugging.md
 monitoring/slo-sli.md → monitoring/thanos-mimir.md
@@ -386,10 +430,12 @@ gcp/serverless.md → gcp/messaging.md
 gcp/observability.md → gcp/cicd.md → gcp/gcp-vs-aws.md → gcp/scenarios.md
 git/git-internals.md
 advanced/service-mesh.md → advanced/ebpf-observability.md
-advanced/chaos-engineering.md → advanced/backup-dr.md → advanced/dr-zero-downtime.md
-advanced/low-latency-networking.md → advanced/fintech-security.md → advanced/trading-data-streaming.md
-cicd/gitops-secrets.md → cicd/argo-rollouts.md
+advanced/chaos-engineering.md → advanced/chaos-engineering-handson.md → advanced/backup-dr.md → advanced/dr-zero-downtime.md
+advanced/low-latency-networking.md → advanced/fintech-security.md → advanced/fintech-compliance.md → advanced/trading-systems.md → advanced/trading-data-streaming.md
+iac/pulumi → networking/grpc-deep-dive.md
+cicd/jenkins/plugin-development.md → cicd/gitops-secrets.md → cicd/argo-rollouts.md
 sre/k8s-scenarios.md (advanced) → sre/linux-debugging.md
 sre/cicd-scenarios.md → sre/iac-scenarios.md
-sre/sre-concepts.md
+sre/sre-concepts.md → sre/oncall-tooling.md
+coding-practice/consistent-hashing.md → coding-practice/bloom-filter.md → coding-practice/concurrent-patterns.md
 ```
