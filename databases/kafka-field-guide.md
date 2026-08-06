@@ -172,12 +172,38 @@ A produced record has three parts: an optional **key**, a **value** (the payload
 
 The Produce dialog's **Partition** selector maps directly onto this: leave it on `Auto` and Kafka decides using the rule above; pick an explicit number and you're overriding it, landing the record in that exact partition regardless of its key.
 
+```mermaid
+graph LR
+    R1["record<br/>key=user-42"] -->|hash(key) % partitions<br/>always the same result| P1["Partition 1"]
+    R2["record<br/>key=user-42"] --> P1
+    R3["record<br/>key=user-42"] --> P1
+    R4["record<br/>no key"] -->|round robin| P0["Partition 0"]
+    R5["record<br/>no key"] -->|round robin| P2["Partition 2"]
+```
+
 **acks / min.insync.replicas** — How sure a producer wants to be before considering a write "done." `acks=all` plus `min.insync.replicas=2` means: don't tell the producer it succeeded until at least 2 replicas have the record. This is the other half of the durability story — replication factor says how many copies *can* exist; `min.insync.replicas` says how many *must* confirm before a write counts.
 
 ```
 acks=0   -> fire and forget, no confirmation, fastest, data loss possible
 acks=1   -> leader confirmed, replica lag can lose data if leader crashes
 acks=all -> all ISR replicas confirmed, zero data loss
+```
+
+```mermaid
+sequenceDiagram
+    participant P as Producer
+    participant L as Leader (broker)
+    participant F1 as Follower (ISR)
+    participant F2 as Follower (ISR)
+
+    P->>L: ProduceRequest (acks=all)
+    L->>L: append to local log segment
+    L->>F1: replicate
+    L->>F2: replicate
+    F1-->>L: fetch offset acknowledged
+    F2-->>L: fetch offset acknowledged
+    Note over L: min.insync.replicas satisfied
+    L-->>P: ProduceResponse (offset committed)
 ```
 
 ---
@@ -192,6 +218,27 @@ Reading is where Kafka stops looking like a queue and starts looking like a shar
 
 This is the mechanism that makes Kafka double as both a broadcast system and a work-queue. Two *different* groups reading the same topic each get their own full, independent copy of every record — that's the pub/sub side. Multiple consumers inside the *same* group split the work between them — that's the queue side. Same topic, same data, both patterns at once, just by choosing group membership.
 
+```mermaid
+graph TD
+    T["Topic: orders (3 partitions)"]
+
+    subgraph G1["Group: checkout-service"]
+        C1["Consumer A"]
+        C2["Consumer B"]
+        C3["Consumer C"]
+    end
+    subgraph G2["Group: analytics-pipeline"]
+        C4["Consumer X<br/>(reads all 3 alone)"]
+    end
+
+    T --> P0["Partition 0"] --> C1
+    T --> P1["Partition 1"] --> C2
+    T --> P2["Partition 2"] --> C3
+    T -.->|independent full copy| C4
+```
+
+Same topic feeding two groups: `checkout-service` splits the work three ways (queue behavior), `analytics-pipeline` gets every record on its own (pub/sub behavior) — simultaneously, with no coordination between the groups.
+
 **Rebalance** — Whenever a member joins or leaves a group, the group's partitions get reassigned among whoever's left. A group with zero members (its consumer process exited) shows `Empty`: nothing currently holds any partition, but the group's identity and its progress (committed offsets) both persist.
 
 > **Why it matters:** The state badge on the Consumer Groups page is this exact lifecycle: `Stable` has settled members actively reading; `PreparingRebalance` / `CompletingRebalance` is mid-reshuffle; `Empty` has no members but keeps its recorded progress; `Dead` means the group's record has been cleaned up entirely.
@@ -199,6 +246,25 @@ This is the mechanism that makes Kafka double as both a broadcast system and a w
 ### What actually happens during a rebalance
 
 One specific broker acts as that group's **coordinator**. The instant membership changes — a new consumer connects, one disconnects, or one goes quiet past its session timeout — the coordinator kicks *every* member back into `PreparingRebalance` and waits for all of them to send a fresh `JoinGroup` request. Once everyone's checked in, one member (the "leader" for that round) runs the **partition assignor** — the algorithm deciding who gets which partitions — and every member picks up its new assignment via `SyncGroup`. The group only reads a `PreparingRebalance` heartbeat error as "rejoin," not as a failure.
+
+```mermaid
+sequenceDiagram
+    participant C1 as Consumer A (existing)
+    participant C2 as Consumer B (joining)
+    participant Coord as Group Coordinator
+
+    Note over C1,Coord: Stable — C1 holds all 3 partitions
+    C2->>Coord: JoinGroup (new member)
+    Coord->>C1: heartbeat response: rejoin (PreparingRebalance)
+    C1->>Coord: JoinGroup
+    C2->>Coord: JoinGroup
+    Coord->>C1: you're round leader — run the assignor
+    Note over C1: RoundRobinAssigner computes new mapping
+    C1->>Coord: SyncGroup (assignment: A=[0,1], B=[2])
+    Coord->>C1: SyncGroup response — partitions 0,1
+    Coord->>C2: SyncGroup response — partition 2
+    Note over C1,C2: Stable again — resume consuming
+```
 
 **Partition assignor** — The algorithm that decides the actual partition-to-member mapping each rebalance — `RoundRobinAssigner`, `StickyAssignor`, and `CooperativeStickyAssigner` are the common ones.
 
@@ -217,6 +283,19 @@ How a group remembers where it got to, and how far behind it is.
 **High watermark (end offset)** — The offset one past the newest record in a partition — "how far the log currently goes." The gap between it and the committed offset is the group's backlog.
 
 **Lag** — `high_watermark − committed_offset`, per partition, summed across every partition for the group's total. Zero lag means fully caught up. Growing lag means the group is falling behind — either it's slow, or it's stopped.
+
+```mermaid
+graph LR
+    subgraph "Partition 0 log"
+        direction LR
+        A["offsets 0..41<br/>already read"] --> B(("committed offset<br/>= 42<br/>group's bookmark"))
+        B --> C["offsets 42..49<br/>lag = 8, unread"]
+        C --> D(("high watermark<br/>= 50<br/>end of log"))
+    end
+
+    style B fill:#4f8fcf,stroke:#274b6e,color:#fff
+    style D fill:#95a5a6,stroke:#555,color:#fff
+```
 
 ### Resetting offsets
 
@@ -239,6 +318,19 @@ An append-only log still needs a way to drop old data, or disks fill up.
 
 **Compaction — `cleanup.policy=compact`** — Instead of deleting by age, Kafka keeps only the *latest* record for each key and throws away every earlier record with that same key. Perfect for "current state per entity" data — think a topic of user-profile updates, where you only ever care about someone's latest profile, not their whole edit history.
 
+```mermaid
+graph TD
+    subgraph Delete["cleanup.policy=delete"]
+        D1["segment: offsets 0-999<br/>older than retention.ms"] -->|whole segment dropped| D2(("gone"))
+        D3["segment: offsets 1000-1999<br/>within retention.ms"] --> D4(("kept"))
+    end
+    subgraph Compact["cleanup.policy=compact"]
+        K1["key=user1 → v1 (older)"] -->|superseded by newer key=user1| K3(("discarded"))
+        K2["key=user1 → v2 (latest)"] --> K4(("kept"))
+        K5["key=user2 → v1 (only version)"] --> K6(("kept"))
+    end
+```
+
 `cleanup.policy`, `retention.ms`, and friends are just topic configuration, editable per topic, with a badge distinguishing a value explicitly overridden from one still sitting at the broker's default.
 
 ---
@@ -254,6 +346,23 @@ Kafka itself never looks inside a message — a value is an opaque blob as far a
 **Avro / Protobuf / JSON Schema** — Three different serialization formats a schema can describe. All three get decoded the same way from a UI's perspective — a badge on a decoded message just names which one was used.
 
 **Compatibility level** — A rule the registry enforces when a schema changes — e.g. `BACKWARD` means new schema versions must still be readable by code written against the old one. It's what stops a schema change from silently breaking every consumer that hasn't been redeployed yet.
+
+```mermaid
+sequenceDiagram
+    participant P as Producer
+    participant SR as Schema Registry
+    participant B as Broker (topic)
+    participant C as Consumer
+
+    P->>SR: register/lookup schema for this topic
+    SR-->>P: schema ID (e.g. 7)
+    P->>B: message = [0x00][schema ID=7][Avro/Protobuf-encoded payload]
+    C->>B: fetch message
+    B-->>C: raw bytes
+    C->>SR: lookup schema ID=7
+    SR-->>C: schema definition
+    C->>C: decode payload using schema 7
+```
 
 A topic with no registered schema simply shows its messages decoded as plain `json` or `utf8` text — that's a perfectly normal way to use Kafka; Schema Registry is opt-in, topic by topic.
 
@@ -277,6 +386,19 @@ Kafka Connect is a separate service from the brokers — its own worker process,
 
 **Task** — A connector splits its actual work into one or more tasks that run in parallel — typically one per partition, or one per table being watched. Each task has its own state and its own worker.
 
+```mermaid
+graph LR
+    PG["Postgres table"] -->|Source connector<br/>change-data-capture| Topic["Kafka topic"]
+    Topic -->|Sink connector| ES["Elasticsearch / S3 /<br/>data warehouse"]
+    Topic -->|MirrorSourceConnector| Topic2["Same topic name,<br/>another cluster"]
+
+    subgraph Connect["Kafka Connect worker (REST API, port 8083)"]
+        SC["Source connector<br/>Task 1, Task 2, ..."]
+        SK["Sink connector<br/>Task 1, Task 2, ..."]
+        MC["MirrorSourceConnector<br/>Task 1"]
+    end
+```
+
 Because Connect is a wholly separate REST service, resetting a connector's state, checking whether it's healthy, or telling it to pause has nothing to do with the Kafka Admin API — the backend talks to it over plain HTTP, the same way it talks to a Schema Registry.
 
 `MirrorSourceConnector` ships with Kafka itself and replicates topics from one cluster into another — pointed at two genuinely different clusters, this exact mechanism is what powers cross-cluster and disaster-recovery replication in real deployments.
@@ -298,6 +420,19 @@ An **ACL** (access control list) entry is a single rule answering one narrow que
 **Resource type, name & pattern** — What the rule applies to — a `TOPIC`, `GROUP`, `CLUSTER`, or `TRANSACTIONAL_ID` — by exact name (`LITERAL`) or by prefix (`PREFIXED`, e.g. every topic starting with `orders-`, useful for a team that owns a whole namespace of topics rather than one).
 
 **Authorizer** — The broker-side plugin that actually enforces ACLs (e.g. `StandardAuthorizer` on a KRaft cluster). Without one configured, Kafka has no concept of "denied" at all — every authenticated principal can do everything, ACLs or not. Turning one on flips the default: nothing is allowed until an ACL explicitly grants it.
+
+```mermaid
+graph TD
+    Req["Request: principal + operation + resource<br/>e.g. User:alice, WRITE, TOPIC:orders-*"] --> Auth{"Authorizer<br/>configured?"}
+    Auth -->|No| Allow1(("Allowed<br/>no gate at all"))
+    Auth -->|Yes| Check{"Matching ACL<br/>grants this?"}
+    Check -->|Yes| Allow2(("Allowed"))
+    Check -->|No| Deny(("Denied"))
+
+    style Allow1 fill:#27ae60,color:#fff
+    style Allow2 fill:#27ae60,color:#fff
+    style Deny fill:#c0392b,color:#fff
+```
 
 > **Why it matters:** "No ACL authorizer configured" isn't an error — it's an accurate description of a cluster with no gate at all, which is the default for a freshly stood-up Kafka cluster. In a real production setup where an authorizer *is* enabled, ACLs are how you'd let one service account produce to its own topics without also handing it access to everyone else's.
 
