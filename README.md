@@ -305,12 +305,13 @@ Storage engines, WAL, MVCC, replication internals, indexing, and query execution
 | [databases/mongodb-internals.md](./databases/mongodb-internals.md) | WiredTiger cache, journal, oplog internals, aggregation pipeline, index types, write/read concern | SDE-2 |
 | [databases/redis-internals.md](./databases/redis-internals.md) | Data structure encodings, RDB vs AOF, eviction policies, replication, cluster hash slots | SDE-1/2 |
 | [databases/kafka-internals.md](./databases/kafka-internals.md) | Log segments, ISR/HW/LEO, producer acks, consumer group offsets, exactly-once, log compaction | SDE-2 |
+| [databases/kafka-field-guide.md](./databases/kafka-field-guide.md) | Narrative field guide: brokers/controller, topics/partitions, ISR & under-replicated vs. offline, producers, consumer group rebalances, offsets/lag, retention, Schema Registry, Connect, ACLs, UI cheat sheet & glossary | SDE-1/2 |
 | [databases/clickhouse-internals.md](./databases/clickhouse-internals.md) | MergeTree family, columnar storage, granules, vectorized execution, materialized views | SDE-2 |
 | [databases/elasticsearch-internals.md](./databases/elasticsearch-internals.md) | Inverted index, segments, sharding, replication, mappings, Query DSL, aggregations, ILM, performance | SDE-2 |
 | [databases/replication.md](./databases/replication.md) | Sync/async/semi-sync, WAL shipping, logical vs physical, PostgreSQL/MySQL/MongoDB/Redis/Kafka replication, Raft/Paxos, cross-region | SDE-2 |
 | [databases/caching.md](./databases/caching.md) | Cache tiers, eviction policies, cache-aside/write-through/write-behind, Redis vs Memcached, stampede, warming, consistency | SDE-1/2 |
 
-**Read order:** README → postgres-internals → mysql-internals → mongodb-internals → redis-internals → kafka-internals → clickhouse-internals → elasticsearch-internals → replication → caching
+**Read order:** README → postgres-internals → mysql-internals → mongodb-internals → redis-internals → kafka-internals → kafka-field-guide → clickhouse-internals → elasticsearch-internals → replication → caching
 
 ---
 
