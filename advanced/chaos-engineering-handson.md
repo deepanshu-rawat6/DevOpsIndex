@@ -2,6 +2,13 @@
 
 Runnable exercises that build on [chaos-engineering.md](./chaos-engineering.md). Requires a working K8s cluster (kind/minikube/EKS) with `kubectl` and `helm` configured. Each exercise is self-contained: prerequisites → commands → expected output → pass/fail bar → cleanup.
 
+Each exercise closes with a **❓ knowledge check** on the one detail in it that's easiest to get wrong. Track how many you've cleared as you go:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## Exercise 1 — Litmus Chaos: Pod Delete on nginx Deployment
@@ -127,6 +134,40 @@ kubectl delete service nginx -n chaos-target
 kubectl delete namespace chaos-target litmus
 ```
 
+What the ChaosEngine actually put the Deployment through, conceptually, over the 30-second run:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Steady state.</strong> 3/3 nginx pods <code>Running</code>, Service routing traffic to all of them, loadgen seeing 100% success.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Pod killed.</strong> Every <code>CHAOS_INTERVAL</code> (10s), Litmus graceful-deletes (<code>FORCE: "false"</code>, not SIGKILL) roughly <code>PODS_AFFECTED_PERC</code> (33%) of pods &mdash; about 1 of 3 per cycle.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Deployment controller notices.</strong> Replica count drops below the desired 3, so the controller immediately schedules a replacement pod &mdash; this reaction is exactly what the experiment is testing.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Back to steady state.</strong> New pod reaches <code>Running</code>, Service adds it back to rotation. If this happens faster than loadgen's poll interval, zero dropped requests get logged.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Repeat.</strong> Steps 2&ndash;4 repeat every <code>CHAOS_INTERVAL</code> until <code>TOTAL_CHAOS_DURATION</code> (30s) elapses, then Litmus writes the final <code>ChaosResult</code>.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">The ChaosResult comes back with <code>verdict: Pass</code>, but Terminal 3's loadgen loop logged several failed requests during the run. Did the experiment actually pass?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No, not from a user's perspective. <code>verdict: Pass</code> only reflects Litmus's own internal probe success criteria &mdash; it doesn't automatically account for what the separate loadgen loop observed. The Pass vs Fail table treats "0% dropped requests in the loadgen loop" as its own independent signal precisely because the two can disagree: a technically-passing ChaosResult next to real dropped traffic means something (replica recovery time, readiness probe timing) is still worth fixing.</div>
+</div>
+
 ---
 
 ## Exercise 2 — Chaos Mesh: Network Partition (Service → Database)
@@ -226,6 +267,40 @@ kubectl delete namespace demo
 # Optional full removal of Chaos Mesh itself:
 curl -sSL https://mirrors.chaos-mesh.org/v2.6.3/install.sh | bash -s -- --template | kubectl delete -f -
 ```
+
+The partition's full lifecycle, from healthy to healthy again:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Baseline.</strong> <code>app</code> reaches <code>db-svc</code> fine &mdash; <code>200</code> on every request.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. NetworkChaos applied.</strong> The controller injects the partition rule at the network layer between the two label selectors; <code>duration: "60s"</code> starts counting down.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Partitioned.</strong> Requests from <code>app</code> to <code>db-svc</code> time out (<code>curl</code> exit code 28). A well-behaved client shows bounded retries with backoff or a circuit-breaker error here &mdash; not an unbounded retry storm or a hang.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Duration expires.</strong> Chaos Mesh automatically lifts the partition once the 60s window is up &mdash; no manual cleanup step needed for the fault itself.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Restored.</strong> <code>app → db-svc</code> returns <code>200</code> again, ideally within one poll/retry interval and with no manual restart of the app pod.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">During the partition, curl exits with code 28 (timeout) instead of printing an HTTP status. Is that a sign the experiment failed?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No &mdash; it's the expected, correct outcome while the partition is active. Exit code <code>28</code> confirms the NetworkChaos rule is actually blocking traffic between the two selectors. The real failure signal would be the opposite: curl exiting <code>0</code> with a <code>200</code> during the partition window, which would mean the selectors didn't match and the chaos never actually applied.</div>
+</div>
 
 ---
 
@@ -343,6 +418,43 @@ kubectl delete hpa stress-app -n hpa-demo
 kubectl delete deployment stress-app -n hpa-demo
 kubectl delete namespace hpa-demo
 ```
+
+The same progression, one step at a time:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Baseline.</strong> <code>3%/50%</code> target, 1 replica &mdash; well under threshold, HPA idle.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Stress starts.</strong> <code>StressChaos</code> spins up 2 workers at 100% load each; CPU% spikes to <code>94%/50%</code> almost immediately, still 1 replica.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. HPA reacts.</strong> Within ~15&ndash;30s (default HPA sync period), the controller scales to 2 replicas, then keeps climbing &mdash; 4, then 5 &mdash; as long as CPU% stays over target.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Max reached.</strong> Replicas hold at <code>--max=5</code>; CPU% per pod eases slightly as load spreads across more pods, but stays above 50% for the rest of the 180s stress window.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Stress ends, replicas held.</strong> CPU% drops to <code>22%/50%</code> immediately, but replica count stays at 5 &mdash; the default 5-minute scale-down stabilization window is deliberately conservative about giving capacity back.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Scale-down.</strong> After the stabilization window elapses, HPA scales back toward <code>min=1</code>.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">The <code>cpu-stress.yaml</code> shown first uses <code>kind: PodChaos</code> with <code>action: pod-kill</code>. Does that actually inject CPU load?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No &mdash; that's the placeholder the guide explicitly flags as wrong. <code>PodChaos</code>/<code>pod-kill</code> only kills/restarts pods; it does nothing to CPU. Actual CPU load injection needs <code>kind: StressChaos</code> with a <code>stressors.cpu</code> block (workers + load%). Easy mistake to copy-paste past without noticing the kind is wrong.</div>
+</div>
 
 ---
 
@@ -510,11 +622,67 @@ kubectl delete namespace gameday
 
 **Rollback if something goes wrong mid-drain:** `kubectl uncordon` immediately re-enables scheduling on the target nodes; already-evicted pods will not automatically move back, but new pods can land there again. If nodes were terminated (real AZ failure test on EKS via ASG desired-count changes rather than drain), scale the ASG back to its original desired count instead.
 
+The full failure/recovery sequence this game day walks through:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Steady state.</strong> 6/6 <code>web</code> pods <code>Running</code>, spread across 3 AZs by anti-affinity, loadgen probing every 500ms with zero failures.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Target AZ cordoned.</strong> <code>kubectl cordon</code> marks that AZ's nodes <code>SchedulingDisabled</code> &mdash; this only blocks <em>new</em> scheduling. The pods already running there are untouched and keep serving traffic.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Target AZ drained.</strong> <code>kubectl drain</code> actively evicts the pods still on those nodes. The PDB (<code>minAvailable: 4</code>) throttles this &mdash; it pauses/retries any eviction that would drop available replicas below 4, instead of forcing all evictions through at once.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Rescheduling.</strong> Evicted pods land on the 2 remaining healthy AZs (the cordoned nodes are ineligible). loadgen should show zero or near-zero failed requests throughout, since anti-affinity + PDB + surplus replicas absorb the loss.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Recovered.</strong> All 6 replicas <code>Running</code>/<code>Ready</code>, now redistributed across only the 2 remaining AZs. Drained nodes sit <code>Ready,SchedulingDisabled</code> with zero non-DaemonSet pods left.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Rollback.</strong> <code>kubectl uncordon</code> re-enables scheduling on the target AZ's nodes immediately &mdash; but already-evicted pods don't move back on their own. A <code>rollout restart</code> is what actually rebalances pods across all 3 AZs again.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Right after Step 2 (cordoning the target AZ's nodes), are the pods already running there evicted?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Cordon only stops <em>new</em> pods from being scheduled onto those nodes &mdash; it does nothing to pods already running there. Nothing actually moves until Step 3's <code>kubectl drain</code>, which is the step that evicts the existing pods (subject to the PDB). Cordon alone is non-disruptive by design; drain is the disruptive step.</div>
+</div>
+
 ---
 
 ## Chaos Engineering Maturity Checklist (Crawl / Walk / Run)
 
-Use this to assess where a team actually is — most teams overestimate their stage.
+Use this to assess where a team actually is — most teams overestimate their stage. At a glance, before the full checklists below:
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="crawl" class="active">Crawl</button>
+    <button data-tab="walk">Walk</button>
+    <button data-tab="run">Run</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="crawl">
+      <strong>Getting started.</strong> Staging/dev only, never prod. Single blast radius (one pod, one deployment). Everything triggered manually, business hours, a human watching. Tooling installed (Litmus/Chaos Mesh) but no automation yet.
+    </div>
+    <div class="tab-panel" data-tab-panel="walk">
+      <strong>Building confidence.</strong> Now in production, but only for services with a defined owner and on-call. Blast radius is a full deployment/service, still one namespace. Runs on a schedule, steady-state checks automated as probes, findings tracked as tickets, cross-team game days.
+    </div>
+    <div class="tab-panel" data-tab-panel="run">
+      <strong>Mature practice.</strong> Triggered automatically in CI/CD before promoting a release. Continuous low-grade chaos runs in prod in the background. Multi-fault and AZ/region-level tests on a regular cadence. Results feed SLO error budgets directly, and a "chaos gate" blocks new services from going production-ready without passing it.
+    </div>
+  </div>
+</div>
 
 ### Crawl (getting started)
 
@@ -549,3 +717,9 @@ Use this to assess where a team actually is — most teams overestimate their st
 - [ ] Game days simulate realistic multi-service cascading failures, not single-component faults
 
 **Rule of thumb progression:** don't move to the next stage until every unchecked box in the current one is checked and stable for at least a full quarter. Skipping straight to "Run" without Crawl/Walk discipline is how chaos engineering causes the outage it was meant to prevent.
+
+<div class="quiz-card">
+  <p class="quiz-q">A team has just checked off the last box in the Crawl list for the first time this week. Are they ready to call themselves "Walk"?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Not yet. The rule of thumb is every box checked <em>and stable for at least a full quarter</em> before moving on &mdash; a single week of all-green boxes isn't the same as sustained discipline. Skipping that stability window (or skipping straight to "Run") is called out explicitly as how chaos engineering ends up causing the outage it was meant to prevent.</div>
+</div>

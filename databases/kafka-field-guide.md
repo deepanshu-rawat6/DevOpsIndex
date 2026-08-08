@@ -22,6 +22,13 @@ This guide builds up from nothing. If a term shows up before it's been explained
 12. [UI cheat sheet](#12-kafka-ui-decoded)
 13. [Glossary](#13-glossary)
 
+Every chapter ends with a **❓ knowledge check** — try to answer before revealing. Track how many you've cleared as you go:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## 01. The core idea: Kafka is a log
@@ -51,6 +58,12 @@ graph LR
 Why is this useful? Because "append-only, numbered, never mutated" gives you three things almost for free: multiple independent readers can each track their own position without stepping on each other; a reader that crashes can pick up exactly where it left off, by offset; and a slow reader never blocks a fast one, because reading doesn't remove anything.
 
 > **Why it matters:** Every time you see an **offset** anywhere in the Kafka UI — in the message browser, in a consumer group's lag table, in the offset-reset dialog — it's a position in exactly this kind of log. Nothing more exotic than "which line number are we on."
+
+<div class="quiz-card">
+  <p class="quiz-q">Why can two independent consumers read the same log without stepping on each other?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Reading never removes or changes anything — each consumer just tracks its own offset (position) independently. There's no shared read pointer to contend over.</div>
+</div>
 
 ---
 
@@ -86,6 +99,12 @@ One row, because a single-broker cluster's one broker has no choice but to be th
 
 > **Why it matters:** A cluster in Kafka UI is just a name plus a list of brokers to connect to (`clusters.yml`). Everything else — topics, partitions, consumer groups — lives *inside* that cluster and is completely invisible from any other one. That's the whole basis for the app supporting several clusters side by side.
 
+<div class="quiz-card">
+  <p class="quiz-q">A 3-node cluster's controller broker crashes. What happens to the cluster?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The remaining two brokers elect a new controller among themselves. The controller role moves to a different broker — the cluster itself doesn't stop serving data, since the other brokers were only ever doing data work, not depending on the old controller to stay up.</div>
+</div>
+
 ---
 
 ## 03. Topics & partitions
@@ -114,6 +133,12 @@ graph TD
 One topic, three unrelated logs spread across the cluster — ordering is guaranteed only inside each partition, never across them.
 
 > **Why it matters:** The Topics page's Partitions column is partition count. The message browser's **Partition** filter lets you look at one log at a time instead of the interleaved view of all of them — useful because "all partitions merged" has no single meaningful order.
+
+<div class="quiz-card">
+  <p class="quiz-q">A topic has 3 partitions and replication factor 1. How many independent logs exist, and how many total copies of the data?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>3 independent logs (one per partition), 1 copy of each &mdash; so 3 total copies of data across the cluster, zero redundancy per partition. Partition count and replication factor are separate dials: partition count is about spreading load/parallelism, replication factor is about survivability.</div>
+</div>
 
 ---
 
@@ -154,6 +179,31 @@ graph LR
     Offline -->|any replica comes back<br/>and is elected leader| Under
 ```
 
+That's the abstract state machine. Here's what each state actually looks like from inside the cluster — flip through them:
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="healthy" class="active state-ok">Healthy</button>
+    <button data-toggle-opt="under" class="state-warn">Under-replicated</button>
+    <button data-toggle-opt="offline" class="state-bad">Offline</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="healthy">
+    <strong>ISR = replicas.</strong> Every copy of the partition is caught up with the leader right now. Kafka UI shows this partition as healthy, no badges. Losing any one broker here just demotes the state to under-replicated &mdash; the leader keeps serving traffic while the remaining followers catch the new one up.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="under">
+    <strong>ISR &lt; replicas, leader still alive.</strong> At least one follower fell behind (slow disk, network blip, crashed process) or is straight-up down. Reads and writes are unaffected &mdash; the leader is fine. What you've lost is redundancy: one more failure and this partition can go offline. This is the state that should page someone during business hours, not at 3am.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="offline">
+    <strong>No leader at all.</strong> Every replica for this partition is down or unreachable. Zero reads, zero writes served for this partition until something comes back. If `min.insync.replicas` was set to more than 1, this is also the state a producer with `acks=all` starts seeing failed produce requests in.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A partition is under-replicated but not offline. Is any data lost right now?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. The leader is still up and serving reads/writes with no data loss. Under-replicated only means you have fewer working copies than configured &mdash; less of a safety margin, not an actual outage. Data loss risk only materializes if the leader <em>also</em> fails before the missing replica(s) catch back up.</div>
+</div>
+
 Both metrics read `0` on a single-broker cluster for an unavoidable reason: with one broker, replication factor can only ever be 1 — there's nothing to lose sync with, and nowhere for the one copy to go offline *to* while the broker's up. You'd only ever see non-zero numbers there if the single broker itself were down, at which point the whole cluster would show as unreachable in the switcher anyway.
 
 A 3-node cluster is where this becomes visible. With replication factor 3 and `min.insync.replicas` set to 2 — meaning a write is only acknowledged once 2 of the 3 replicas have it — stopping one of the three brokers pushes under-replicated partitions above zero for anything that broker held a replica of, while the cluster keeps serving traffic on the remaining two. Stop two at once and, depending on which two, you can push a partition to fully offline.
@@ -183,11 +233,30 @@ graph LR
 
 **acks / min.insync.replicas** — How sure a producer wants to be before considering a write "done." `acks=all` plus `min.insync.replicas=2` means: don't tell the producer it succeeded until at least 2 replicas have the record. This is the other half of the durability story — replication factor says how many copies *can* exist; `min.insync.replicas` says how many *must* confirm before a write counts.
 
-```
-acks=0   -> fire and forget, no confirmation, fastest, data loss possible
-acks=1   -> leader confirmed, replica lag can lose data if leader crashes
-acks=all -> all ISR replicas confirmed, zero data loss
-```
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="acks0" class="active">acks=0</button>
+    <button data-tab="acks1">acks=1</button>
+    <button data-tab="acksall">acks=all</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="acks0">
+      <strong>Fire and forget.</strong> The producer doesn't wait for any confirmation at all &mdash; it sends and immediately considers the write done. Fastest possible throughput, but if the leader never actually got the record (network drop, leader down), the producer has no way to know. Data loss is possible with zero visibility that it happened.
+    </div>
+    <div class="tab-panel" data-tab-panel="acks1">
+      <strong>Leader-confirmed.</strong> The producer waits for the leader to append the record to its own log, then gets an ack &mdash; before any follower has replicated it. If the leader crashes in that window, before followers catch up, the record can be lost even though the producer was told it succeeded.
+    </div>
+    <div class="tab-panel" data-tab-panel="acksall">
+      <strong>All ISR replicas confirmed.</strong> The producer only gets its ack once every in-sync replica &mdash; not just the leader &mdash; has the record. Combined with <code>min.insync.replicas</code>, this is the zero-data-loss configuration: the tradeoff is waiting on the slowest ISR member instead of just the leader, so it's higher latency by design.
+    </div>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">With acks=1, the leader crashes one second after acking a produce request, before any follower replicated it. Is the record safe?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. acks=1 only confirms the leader wrote it locally &mdash; not that any follower has it. If the leader dies before replicating, the record is gone even though the producer was already told the write succeeded. This is exactly the gap acks=all closes.</div>
+</div>
 
 ```mermaid
 sequenceDiagram
@@ -270,6 +339,40 @@ sequenceDiagram
 
 A concrete example: a group started with one consumer holding all three partitions of a topic. A second consumer joined — coordinator-triggered rebalance — and `RoundRobinAssigner` split it two-and-one. A third joined, another rebalance, now one partition each. Then, one at a time, the second and third disconnected, each departure triggering its own rebalance, until the first consumer was back to holding all three alone. Six membership changes, six rebalances, each one a real reshuffle of who reads what — not a metaphor.
 
+Step through it:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. One consumer, one group.</strong> Consumer A holds all 3 partitions of the topic alone. No rebalance needed &mdash; there's nobody to share with.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Consumer B joins.</strong> Coordinator-triggered rebalance #1. <code>RoundRobinAssigner</code> splits the assignment two-and-one: A keeps 2 partitions, B gets 1.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Consumer C joins.</strong> Rebalance #2. Now three members, three partitions &mdash; one each. Maximum parallelism for this topic.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Consumer B disconnects.</strong> Rebalance #3. Its partition gets reassigned to one of the two remaining members.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Consumer C disconnects.</strong> Rebalance #4. Consumer A is back to holding all 3 partitions alone &mdash; same end state as step 1, but the group's coordinator has now handled four full reassignments to get here.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Why does a consumer joining an existing group briefly interrupt every consumer in that group, not just the new one?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Membership changes require recomputing the whole partition-to-member mapping from scratch &mdash; the coordinator can't know which partitions should move without first collecting a fresh JoinGroup from every current member. So it kicks everyone into PreparingRebalance, waits for all of them to check back in, then reassigns.</div>
+</div>
+
 > **Why it matters:** A "Rebalance activity" panel built from polling is *not* a complete event log — a rebalance that happens between two checks, with nobody watching, leaves no trace. There's also deliberately no "force a rebalance" button for a group with live members — Kafka's own client libraries have no safe way to kick a connected consumer. A "Force rejoin" action only works on a group that's already `Empty`: it clears the group so whoever reconnects next starts a fresh rebalance from zero, rather than reaching into a live one.
 
 ---
@@ -299,12 +402,34 @@ graph LR
 
 ### Resetting offsets
 
-Moving that bookmark on purpose — to reprocess history, or to skip a bad batch — is an offset reset:
+Moving that bookmark on purpose — to reprocess history, or to skip a bad batch — is an offset reset. Four ways to do it:
 
-- **Earliest** — bookmark goes to the very start of the log. The group will re-read everything still retained.
-- **Latest** — bookmark jumps to the current end. Everything already written is skipped; only new records from now on will be seen.
-- **Specific offset** — jump to an exact numbered position you provide.
-- **Timestamp** — Kafka finds the offset of the first record written at or after a given time and jumps there, which is usually more useful than guessing a raw offset number.
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="earliest" class="active">Earliest</button>
+    <button data-toggle-opt="latest">Latest</button>
+    <button data-toggle-opt="specific">Specific offset</button>
+    <button data-toggle-opt="timestamp">Timestamp</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="earliest">
+    Bookmark goes to the very start of the log. The group will re-read everything still retained &mdash; use this to reprocess a topic's whole history from scratch.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="latest">
+    Bookmark jumps to the current end. Everything already written is skipped; only new records from now on will be seen &mdash; use this to deliberately drop a backlog you don't want processed.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="specific">
+    Jump to an exact numbered position you provide. Use this when you know precisely which offset a bad batch started at and want to skip just that.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="timestamp">
+    Kafka finds the offset of the first record written at or after a given time and jumps there &mdash; usually more useful than guessing a raw offset number, e.g. "replay everything since the deploy at 14:32."
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">You try to reset a consumer group's offsets while its consumers are still running and actively reading. What happens?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Kafka rejects the reset outright. A reset only works while the group has no active members &mdash; it has to be sure nobody's mid-read against the offsets that are about to move.</div>
+</div>
 
 The one hard rule: a reset only works while the group has **no active members**. Kafka has to be sure nobody's mid-read against the offsets you're about to move — so a group actively being read from a live process rejects the reset outright.
 
@@ -332,6 +457,25 @@ graph TD
 ```
 
 `cleanup.policy`, `retention.ms`, and friends are just topic configuration, editable per topic, with a badge distinguishing a value explicitly overridden from one still sitting at the broker's default.
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="delete" class="active">delete</button>
+    <button data-toggle-opt="compact">compact</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="delete">
+    Drops whole segments once every record in them is older than <code>retention.ms</code>, or the partition exceeds a size limit. Right for event streams, logs, metrics &mdash; anything where old data genuinely stops mattering. A segment is dropped as a unit; individual records inside it are never picked out.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="compact">
+    Keeps only the latest record per key, discards every earlier record with that same key, ignores age entirely. Right for "current state per entity" topics &mdash; a user-profile-updates topic where only the latest profile per user ID matters, not the edit history.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A topic with cleanup.policy=compact has received 500 updates for key="user-42" over its lifetime. How many of those records does Kafka keep?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>One &mdash; the most recent write for that key. Compaction discards every earlier record sharing the same key, regardless of how old (or recent) it is; age plays no role, only "is there a newer record with this same key."</div>
+</div>
 
 ---
 
@@ -368,6 +512,12 @@ A topic with no registered schema simply shows its messages decoded as plain `js
 
 > **Why it matters:** A cluster only gets a Schema Registry item in a Kafka UI's sidebar if one's configured for it in `clusters.yml`.
 
+<div class="quiz-card">
+  <p class="quiz-q">A message browser shows a topic's messages decoded as plain JSON text, with no schema badge. Does that mean something's misconfigured?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Schema Registry is opt-in per topic. A topic with no registered schema is a perfectly normal way to use Kafka &mdash; its messages just get shown as plain json/utf8 text instead of being decoded against a schema.</div>
+</div>
+
 ---
 
 ## 10. Kafka Connect: moving data in and out
@@ -378,9 +528,20 @@ Everything so far assumes something is producing and consuming records itself. C
 
 Kafka Connect is a separate service from the brokers — its own worker process, its own REST API (conventionally on port 8083), with no direct equivalent of a topic or partition.
 
-**Source connector** — Pulls data *into* Kafka from somewhere else. The canonical example is change-data-capture: watch a Postgres table row by row and produce a Kafka record for every insert/update/delete.
-
-**Sink connector** — Pushes data *out of* Kafka into somewhere else — take everything landing on a topic and write it into Elasticsearch, S3, a data warehouse, or another Kafka cluster entirely.
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="source" class="active">Source connector</button>
+    <button data-tab="sink">Sink connector</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="source">
+      <strong>Pulls data into Kafka</strong> from somewhere else. The canonical example is change-data-capture: watch a Postgres table row by row and produce a Kafka record for every insert/update/delete. Data flow: <code>external system → Kafka topic</code>.
+    </div>
+    <div class="tab-panel" data-tab-panel="sink">
+      <strong>Pushes data out of Kafka</strong> into somewhere else &mdash; take everything landing on a topic and write it into Elasticsearch, S3, a data warehouse, or another Kafka cluster entirely. Data flow: <code>Kafka topic → external system</code>.
+    </div>
+  </div>
+</div>
 
 **Connector** — One configured instance of a connector class — a Java class implementing the source or sink logic — plus the JSON config telling it which topic(s), which external system, and what credentials to use.
 
@@ -404,6 +565,12 @@ Because Connect is a wholly separate REST service, resetting a connector's state
 `MirrorSourceConnector` ships with Kafka itself and replicates topics from one cluster into another — pointed at two genuinely different clusters, this exact mechanism is what powers cross-cluster and disaster-recovery replication in real deployments.
 
 > **Why it matters:** A state of `RUNNING` means healthy and actively moving data, `PAUSED` means deliberately stopped (resume to continue where it left off), `FAILED` means a task threw an exception — check the trace — and `UNASSIGNED` is transient, the few seconds right after creation before a worker picks the task up.
+
+<div class="quiz-card">
+  <p class="quiz-q">MirrorSourceConnector replicates a topic from cluster A to cluster B. Is that a source connector or a sink connector, from cluster B's point of view?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Source &mdash; it's pulling data <em>into</em> Kafka (cluster B) from somewhere else (cluster A). The "somewhere else" being another Kafka cluster instead of a database doesn't change which side of the source/sink split it's on.</div>
+</div>
 
 ---
 
@@ -435,6 +602,12 @@ graph TD
 ```
 
 > **Why it matters:** "No ACL authorizer configured" isn't an error — it's an accurate description of a cluster with no gate at all, which is the default for a freshly stood-up Kafka cluster. In a real production setup where an authorizer *is* enabled, ACLs are how you'd let one service account produce to its own topics without also handing it access to everyone else's.
+
+<div class="quiz-card">
+  <p class="quiz-q">A cluster has an authorizer enabled but zero ACLs have been added yet. Can any authenticated principal read or write anything?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Enabling an authorizer flips the default from "everything allowed" to "nothing allowed until an ACL explicitly grants it." Zero ACLs plus an authorizer means zero access for everyone &mdash; the opposite of having no authorizer at all.</div>
+</div>
 
 ---
 

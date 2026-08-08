@@ -2,6 +2,13 @@
 
 LLMOps extends standard DevOps/MLOps to cover the specific challenges of LLM-based systems: RAG pipelines, observability beyond metrics, cost control, and guardrails.
 
+Each major section below ends with a quick knowledge check — track how many you've cleared as you go:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## RAG Architecture
@@ -17,6 +24,40 @@ graph LR
     PROMPT --> LLM["LLM<br>GPT-4 / Llama-3<br>generates grounded answer"]
     LLM --> ANSWER["Answer grounded<br>in actual docs"]
 ```
+
+Step through what happens for one query, in order:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. User asks a question.</strong> E.g. "What caused the production outage?" — plain text, nothing retrieved yet.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Embed the query.</strong> <code>text-embedding-3-small</code> turns the question text into a <code>float32[1536]</code> vector.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Vector DB search.</strong> Cosine similarity search against the vector DB returns the top-5 most similar chunks.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Retrieved context.</strong> Those 5 runbook/log chunks become the grounding material for this specific question.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Augmented prompt.</strong> The retrieved chunks are stitched together with the original question: <code>Context: [chunks]</code> / <code>Question: [query]</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. LLM generates.</strong> GPT-4 / Llama-3 reasons over the augmented prompt — not just its own memorized knowledge.
+    </div>
+    <div class="stepper-panel">
+      <strong>7. Grounded answer.</strong> The response is grounded in the actual retrieved docs, which is what keeps it from hallucinating an answer the docs don't support.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ### Indexing Pipeline (offline)
 

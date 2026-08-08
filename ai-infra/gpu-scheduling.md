@@ -2,6 +2,11 @@
 
 GPUs are exposed to Kubernetes as **extended resources** — not built-in like CPU/memory. A chain of components bridges the hardware to the pod spec.
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## How GPUs Become K8s Resources
@@ -27,6 +32,40 @@ sequenceDiagram
 ```
 
 The Device Plugin API is a gRPC socket at `/var/lib/kubelet/device-plugins/`. Any hardware can be exposed via this interface — GPUs, FPGAs, InfiniBand NICs.
+
+Step through the same handshake one stage at a time:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Driver ready.</strong> The NVIDIA driver on the host makes <code>/dev/nvidia0</code>, <code>/dev/nvidia1</code>, etc. visible on the node.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Device plugin registers.</strong> The Device Plugin DaemonSet registers itself with kubelet over a gRPC socket at <code>/var/lib/kubelet/device-plugins/</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. kubelet advertises capacity.</strong> kubelet tells the API server the node's allocatable resources now include <code>nvidia.com/gpu: 2</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Pod requests a GPU.</strong> A pod spec sets <code>resources.limits: nvidia.com/gpu: 1</code>. The API server schedules it onto a node with enough allocatable capacity.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Allocation.</strong> kubelet calls <code>Allocate()</code> on the device plugin, which hands back the env var (<code>CUDA_VISIBLE_DEVICES=0</code>) and device mount for the specific GPU — then the container starts with that GPU visible.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Should you manually set <code>CUDA_VISIBLE_DEVICES</code> in a pod spec that requests <code>nvidia.com/gpu</code>?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. The device plugin sets it automatically during <code>Allocate()</code>, pointing the container at whichever specific GPU device ID the kubelet actually assigned it. Setting it yourself risks pointing the container at a device it wasn't allocated.</div>
+</div>
 
 ---
 
@@ -74,6 +113,12 @@ spec:
 
 **GPU resources are not overcommittable.** `requests` must equal `limits` for `nvidia.com/gpu`. The scheduler guarantees one pod per GPU slot.
 
+<div class="quiz-card">
+  <p class="quiz-q">Can a container set <code>requests: nvidia.com/gpu: 1</code> and <code>limits: nvidia.com/gpu: 2</code>?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. GPU resources aren't overcommittable — requests must equal limits for <code>nvidia.com/gpu</code>, unlike CPU/memory where limits can exceed requests. The scheduler guarantees exactly one pod per GPU slot.</div>
+</div>
+
 ---
 
 ## Node Taints for GPU Nodes
@@ -99,6 +144,12 @@ nodeSelector:
   accelerator: "nvidia-tesla-v100"
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">A pod has no toleration for <code>nvidia.com/gpu=present:NoSchedule</code>. Can it land on a tainted GPU node?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Without the matching toleration, the scheduler won't place it there at all — that's the entire point of the taint: keep non-GPU workloads off the expensive GPU nodes.</div>
+</div>
+
 ---
 
 ## MIG — Multi-Instance GPU
@@ -119,6 +170,19 @@ graph TD
 ```
 
 **vs. `CUDA_VISIBLE_DEVICES` (soft isolation):** Using env vars to restrict a container to one GPU still allows the process to see the full GPU memory — another process on the same GPU can interfere. MIG provides **hardware-enforced** isolation.
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="soft" class="active state-warn">CUDA_VISIBLE_DEVICES (soft)</button>
+    <button data-toggle-opt="hard" class="state-ok">MIG (hardware)</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="soft">
+    Restricting a container to one GPU via this env var still lets the process see the <strong>full GPU's memory</strong> — another process sharing the same physical GPU can still interfere. It's a convention respected by whichever software reads the env var, not something the hardware enforces.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="hard">
+    MIG partitions a single A100/H100 into up to 7 <strong>hardware-isolated</strong> instances, each with its own CUDA engines, L2 cache partition, and memory bandwidth slice — plus true memory isolation, so other instances cannot see this instance's memory at all.
+  </div>
+</div>
 
 ### MIG profiles on A100
 
@@ -155,6 +219,12 @@ resources:
     nvidia.com/mig-1g.10gb: 1   # one 10GB MIG slice
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">Two containers are each confined to "GPU 0" — one via <code>CUDA_VISIBLE_DEVICES</code>, one via a MIG <code>1g.10gb</code> slice. Can either one see the other's data in GPU memory?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Only the <code>CUDA_VISIBLE_DEVICES</code> one is at risk — that's soft isolation, the process can still see the full GPU's memory. A MIG instance has hardware-enforced memory isolation, so a process confined to one MIG slice literally cannot see another slice's memory.</div>
+</div>
+
 ---
 
 ## GPU Operator
@@ -178,11 +248,32 @@ helm install gpu-operator nvidia/gpu-operator \
   --set mig.strategy=mixed   # 'single' = all GPUs same profile, 'mixed' = different per GPU
 ```
 
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="single" class="active">mig.strategy=single</button>
+    <button data-tab="mixed">mig.strategy=mixed</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="single">
+      Every MIG-capable GPU in the cluster is carved into the <strong>same</strong> profile. Simple, predictable capacity — every <code>nvidia.com/mig-*</code> resource name means the same thing cluster-wide.
+    </div>
+    <div class="tab-panel" data-tab-panel="mixed">
+      Different GPUs can run <strong>different</strong> MIG profiles — e.g. one A100 sliced into seven <code>1g.10gb</code> instances for small inference jobs, another left as <code>7g.80gb</code> (full GPU) for a training job. More flexible, but the scheduler has to reason about more distinct resource types at once.
+    </div>
+  </div>
+</div>
+
 **Why GPU Operator over manual installation?**
 - No GPU driver installed on the host required — operator manages driver as a container
 - Automatic node labeling (`nvidia.com/gpu.product=A100-SXM4-80GB`)
 - DCGM exporter automatically deployed for GPU metrics
 - MIG configuration managed declaratively
+
+<div class="quiz-card">
+  <p class="quiz-q">With the GPU Operator installed, do you still need to manually install the NVIDIA driver on each GPU host?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — that's the main point of the operator: it manages the driver as a container/DaemonSet itself, so no host-level driver install is required.</div>
+</div>
 
 ---
 
@@ -222,6 +313,12 @@ DCGM_FI_DEV_GPU_UTIL < 5
 | Temperature | > 80°C | > 87°C (throttling starts) |
 | Power | > 90% TDP | — |
 
+<div class="quiz-card">
+  <p class="quiz-q"><code>DCGM_FI_DEV_GPU_UTIL</code> stays under 5% for an hour on a pod that's still <code>Running</code>. Does that mean the GPU hardware is broken?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Not necessarily — it usually flags wasted spend, not a hardware fault. The pod is holding an exclusive, non-overcommittable GPU slot without actually using it (stuck waiting on data, an idle notebook, etc.). That's exactly the case the "GPU idle > 5 min" alert exists to catch.</div>
+</div>
+
 ---
 
 ## Gang Scheduling — All-or-Nothing Pod Groups
@@ -254,3 +351,37 @@ spec:
 ```
 
 Without gang scheduling: 3/4 pods start, 4th can't schedule → deadlock (3 GPUs held hostage, 4th waiting forever).
+
+Step through why that deadlock happens, and how a `PodGroup` avoids it:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Job submitted.</strong> A distributed training job needs 4 pods, each requesting 1 GPU, scheduled with the default scheduler — no <code>PodGroup</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Pods scheduled independently.</strong> As GPU slots free up, 3 of the 4 pods find a home and start running.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. 4th pod stuck Pending.</strong> No free GPU slot is left for it, and nothing guarantees one opens up soon.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Deadlock.</strong> Distributed training needs all 4 ranks up before any of them can make progress — the 3 running pods sit idle holding their GPUs, waiting on a 4th that may never get scheduled.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. With gang scheduling (<code>minMember: 4</code>).</strong> Volcano/Coscheduler holds all 4 placements until all 4 GPU slots are simultaneously available, then starts them atomically — either all 4 run, or none reserve a GPU at all.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Without gang scheduling, why can 3 already-running pods end up stuck forever waiting on a 4th that never schedules?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Distributed training requires all pods (ranks) to start together — the 3 that did schedule can't make progress alone, while the 4th has no guarantee it'll ever find a free GPU slot. That's the deadlock: GPUs held hostage by pods that can't proceed without a peer that isn't coming.</div>
+</div>

@@ -2,24 +2,35 @@
 
 Security compliance for regulated financial entities in India — SEBI-registered brokers, exchanges, depository participants, and Asset Management Companies (AMCs).
 
+Test yourself as you go — a knowledge check follows most sections below:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## The Regulatory Landscape
 
-```
-SEBI (Securities and Exchange Board of India)
-  └── Issues: CSCRF (Cybersecurity and Cyber Resilience Framework)
-        └── Mandates: risk management, incident response, audits
+```mermaid
+graph TD
+    SEBI["SEBI<br/>Securities and Exchange Board of India"] -->|issues| CSCRF["CSCRF<br/>Cybersecurity and Cyber Resilience Framework"]
+    CSCRF -->|mandates| SEBIM["risk management,<br/>incident response, audits"]
 
-CERT-In (Indian Computer Emergency Response Team, under MeitY)
-  └── Empanels: security audit firms
-  └── Mandates: 6-hour incident reporting, log retention, VAPT audits
+    CERTIN["CERT-In<br/>(under MeitY)"] -->|empanels| AUD["security audit firms"]
+    CERTIN -->|mandates| CERTINM["6-hour incident reporting,<br/>log retention, VAPT audits"]
 
-RBI (Reserve Bank of India)
-  └── Issues: guidelines for payment systems, NBFC cybersecurity
+    RBI["RBI<br/>Reserve Bank of India"] -->|issues| RBIM["guidelines for payment systems,<br/>NBFC cybersecurity"]
 ```
 
 SEBI CSCRF (2023, updated 2024) is the primary framework for capital market entities. Non-compliance can result in suspension of trading licenses.
+
+<div class="quiz-card">
+  <p class="quiz-q">Which regulator's mandate specifically requires reporting a cybersecurity incident within 6 hours — SEBI or CERT-In?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>CERT-In. SEBI issues the CSCRF framework (risk management, incident response processes, audits), but the hard 6-hour reporting clock comes from CERT-In's own directive.</div>
+</div>
 
 ---
 
@@ -39,23 +50,28 @@ SEBI classifies entities into three categories based on trading volume and syste
 
 **1. Network Segmentation**
 
-```
 Production trading systems must be isolated:
 
-  Internet Zone
-      │
-      ▼ DMZ (WAF, reverse proxy)
-      │
-      ▼ Application Zone (OMS, RMS)
-      │
-      ▼ Database Zone (trade DB, position DB)
-      │
-      ▼ Exchange Connectivity Zone (FIX gateway, co-lo)
+```mermaid
+graph TD
+    Internet["Internet Zone"] --> DMZ["DMZ<br/>(WAF, reverse proxy)"]
+    DMZ --> App["Application Zone<br/>(OMS, RMS)"]
+    App --> DB["Database Zone<br/>(trade DB, position DB)"]
+    DB --> Exch["Exchange Connectivity Zone<br/>(FIX gateway, co-lo)"]
 
-No direct path from Internet Zone to Database Zone.
-Each crossing requires firewall with explicit allow rules.
-Rules documented and reviewed quarterly.
+    Internet -.->|"✕ no direct path — forbidden"| DB
+
+    style DB stroke:#c0392b,stroke-width:2px
+    linkStyle 4 stroke:#c0392b,stroke-dasharray: 4 4
 ```
+
+No direct path from Internet Zone to Database Zone. Each crossing requires firewall with explicit allow rules. Rules documented and reviewed quarterly.
+
+<div class="quiz-card">
+  <p class="quiz-q">In the mandated zone architecture, can a request reach the Database Zone straight from the Internet Zone as long as a firewall rule permits it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. There must be no direct path from the Internet Zone to the Database Zone at all &mdash; traffic has to cross DMZ and the Application Zone first. Every zone crossing needs its own firewall with explicit allow rules, reviewed quarterly.</div>
+</div>
 
 **2. Privileged Access Management (PAM)**
 
@@ -98,6 +114,12 @@ All access to trading systems, admin consoles, and cloud portals must require MF
   ]
 }
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">The MFA IAM policy above uses <code>"Effect": "Deny"</code> keyed on <code>MultiFactorAuthPresent: false</code>, rather than an Allow rule. What does it actually do?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It denies every action on every resource (<code>Action: "*"</code>, <code>Resource: "*"</code>) whenever MFA wasn't presented on the request &mdash; overriding whatever else is allowed. That's what makes MFA effectively mandatory everywhere instead of only on the specific actions an Allow statement would have to enumerate.</div>
+</div>
 
 **4. Data Localisation**
 
@@ -222,28 +244,61 @@ if ! echo "$COMMIT_MSG" | grep -qE "CHG-[0-9]+|HOTFIX-[0-9]+"; then
 fi
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">A team has RBAC configured correctly (a ClusterRole with <code>verbs: [get, list]</code>) and calls it done. What does a CERT-In auditor say is still missing?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>RBAC config alone isn't evidence a control operated. Auditors want documented, timestamped proof: immutable API audit logs, monthly access-review reports, and change tickets linked to every RBAC/firewall modification &mdash; not just the policy file itself.</div>
+</div>
+
 ### 6-Hour Incident Reporting to CERT-In
 
 CERT-In's 2022 directive requires reporting cybersecurity incidents within **6 hours** of detection. This means your alerting and escalation pipeline must be fast:
 
+```mermaid
+graph TD
+    A["Alert fires<br/>(CloudWatch / Prometheus)"] -->|"< 5 minutes"| B["On-call engineer notified<br/>(PagerDuty)"]
+    B -->|"< 30 minutes"| C["Incident declared,<br/>IR team assembled"]
+    C -->|"< 2 hours"| D["Initial assessment:<br/>is it a reportable incident?"]
+    D -->|"< 4 hours"| E["Report filed with CERT-In portal<br/>(cert-in.org.in)"]
+    E -->|"within 6 hours of detection"| F["Internal post-incident report<br/>(within 14 days)"]
 ```
-Alert fires (CloudWatch / Prometheus)
-    │ < 5 minutes
-    ▼
-On-call engineer notified (PagerDuty)
-    │ < 30 minutes
-    ▼
-Incident declared, IR team assembled
-    │ < 2 hours
-    ▼
-Initial assessment: is it a reportable incident?
-    │ < 4 hours
-    ▼
-Report filed with CERT-In portal (https://www.cert-in.org.in)
-    │ within 6 hours of detection
-    ▼
-Internal post-incident report: within 14 days
-```
+
+Step through the same pipeline:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Alert fires.</strong> CloudWatch or Prometheus detects the anomaly. This is the moment CERT-In's 6-hour reporting clock starts.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. On-call engineer notified.</strong> PagerDuty pages whoever's on call &mdash; within 5 minutes of the alert.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Incident declared.</strong> The IR team is assembled &mdash; within 30 minutes.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Initial assessment.</strong> Is this actually a CERT-In reportable incident? &mdash; within 2 hours.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Report filed with CERT-In.</strong> Submitted via the CERT-In portal &mdash; within 4 hours of assessment, and within 6 hours of detection overall.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Internal post-incident report.</strong> Written up separately &mdash; within 14 days.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Per CERT-In's directive, from what point does the 6-hour reporting clock start counting?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>From detection &mdash; the moment the alert fires (e.g. CloudWatch/Prometheus) &mdash; not from when the incident is confirmed or declared. The report to CERT-In's portal must be filed within 6 hours of that detection; the internal post-incident report has a separate, longer 14-day window.</div>
+</div>
 
 ```bash
 # Automate CERT-In reportable incident detection via CloudTrail + Lambda
@@ -272,29 +327,52 @@ aws events put-rule \
 
 A trading system is stateful. The order management system has live TCP connections to the database. If you rotate the DB password:
 
-```
-Naive rotation:
-  1. Change DB password in RDS
-  2. Update secret in Secrets Manager
-  3. Restart pods to pick up new secret
-  → 10–30 second outage
-  → Live orders in-flight are lost
-  → Exchange may penalize for erratic order flow
+```mermaid
+graph TD
+    S1["1. Change DB password in RDS"] --> S2["2. Update secret in Secrets Manager"]
+    S2 --> S3["3. Restart pods to pick up new secret"]
+    S3 --> Outage["10–30 second outage<br/>live orders in-flight lost<br/>exchange may penalize erratic order flow"]
+
+    style Outage fill:#c0392b,stroke:#c0392b,color:#fff
 ```
 
 For a system handling thousands of orders per second, a 10-second outage means open positions exposed to market risk. Zero-downtime rotation requires the DB to accept **both old and new passwords simultaneously** during the transition window.
 
+<div class="quiz-card">
+  <p class="quiz-q">Why does simply changing the DB password and restarting pods ("naive rotation") cause an outage on a live trading system?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Restarting the pods to pick up the new password drops their live DB connections while they reconnect &mdash; a 10&ndash;30 second gap where in-flight orders are lost. Zero-downtime rotation instead requires the DB to accept both the old and new passwords simultaneously, so existing connections keep working until they reconnect on their own schedule.</div>
+</div>
+
 ### Zero-Downtime Rotation: AWS Secrets Manager
 
-AWS Secrets Manager supports a rotation strategy where the DB accepts both credentials during rotation:
+AWS Secrets Manager supports a rotation strategy where the DB accepts both credentials during rotation. Step through the phases:
 
-```
-Phase 1: Create new secret version (AWSPENDING)
-Phase 2: Update DB to accept BOTH old and new passwords
-Phase 3: Verify new password works
-Phase 4: Mark new version as AWSCURRENT
-Phase 5: Delete old password from DB
-```
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>Phase 1: Create new secret version.</strong> A new password is generated and stored as <code>AWSPENDING</code> &mdash; the current <code>AWSCURRENT</code> version keeps serving unchanged. Lambda step: <code>createSecret</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>Phase 2: Update DB to accept BOTH old and new passwords.</strong> The database is told about the new password while the old one still works. This dual-auth window is what makes the rotation zero-downtime. Lambda step: <code>setSecret</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>Phase 3: Verify the new password works.</strong> A test connection using the <code>AWSPENDING</code> credentials confirms they're valid before anything gets promoted. Lambda step: <code>testSecret</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>Phase 4: Mark new version as AWSCURRENT.</strong> <code>AWSPENDING</code> is promoted to <code>AWSCURRENT</code>. Existing connections using the old password keep working until they reconnect; new connections pick up the new password. Lambda step: <code>finishSecret</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>Phase 5: Delete the old password from the DB.</strong> Only now is the old credential actually removed &mdash; after every step above confirmed the new one works and is live.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ```python
 # Lambda rotation function (Python)
@@ -352,6 +430,12 @@ def lambda_handler(event, context):
         # Existing connections using old password still work until they reconnect
         # New connections use the new password from Secrets Manager
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">In AWS Secrets Manager's rotation, at which phase does the database first accept the NEW password while the OLD one still works?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Phase 2 (<code>setSecret</code>) &mdash; the DB is updated to accept both passwords before the new one is even verified (Phase 3) or promoted to AWSCURRENT (Phase 4). That overlap window is what makes the rotation zero-downtime.</div>
+</div>
 
 ### Zero-Downtime Rotation: HashiCorp Vault Dynamic Secrets
 
@@ -433,6 +517,29 @@ spec:
         # App reads /vault/secrets/db-creds, Vault agent updates it before TTL expiry
         # No restart needed — app re-reads file on next connection attempt
 ```
+
+Two genuinely different approaches to rotation, side by side:
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="secretsmanager" class="active">AWS Secrets Manager</button>
+    <button data-tab="vault">Vault Dynamic Secrets</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="secretsmanager">
+      <strong>Static credential, rotated on a schedule.</strong> One shared password per role, changed periodically through a real "rotation event" (Phases 1&ndash;5). Zero-downtime requires the DB to accept the old and new password simultaneously during the AWSPENDING &rarr; AWSCURRENT transition.
+    </div>
+    <div class="tab-panel" data-tab-panel="vault">
+      <strong>Unique credential per service instance, with a TTL.</strong> Vault generates a new username/password for every app instance that authenticates, valid for a limited time (e.g. 1h), renewed automatically at 50% of TTL. No "rotation event" exists &mdash; credentials just expire naturally, or get revoked the moment the app shuts down.
+    </div>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Does HashiCorp Vault's dynamic secrets approach have a "rotation event" the way AWS Secrets Manager does?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Vault issues a unique credential per service instance with a TTL, renewing it automatically at 50% of that TTL and revoking it when the app shuts down. Credentials just expire naturally instead of going through a discrete before/after rotation event.</div>
+</div>
 
 ### Application-Side: Connection Pool Rotation Without Restart
 

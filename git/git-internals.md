@@ -1,5 +1,14 @@
 # Git Internals
 
+A working map of what's actually happening under `.git/` — objects, refs, the index, pack files, and the merge/rebase machinery built on top of them. Most sections below end with a quick knowledge check; track your progress as you go:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
+---
+
 ## 1. Object Model
 
 Git stores everything as **content-addressed objects** in `.git/objects/`. Four types:

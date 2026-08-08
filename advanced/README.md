@@ -1,6 +1,6 @@
 # Advanced
 
-Beyond the fundamentals — service mesh, eBPF, chaos engineering, disaster recovery, and specialized low-latency / FinTech infrastructure.
+Beyond the fundamentals — service mesh, eBPF, chaos engineering, disaster recovery, and specialized low-latency / FinTech infrastructure. Each file below is self-contained; the read order is a suggestion, not a dependency chain.
 
 ## Files
 
@@ -17,13 +17,13 @@ Beyond the fundamentals — service mesh, eBPF, chaos engineering, disaster reco
 
 ## Read Order
 
-```
-service-mesh           → Istio/Linkerd control & data plane
-ebpf-observability     → kernel-level observability
-chaos-engineering      → failure injection, game days
-backup-dr              → RTO/RPO, Velero, etcd, DR patterns
-dr-zero-downtime       → zero-downtime deploys + multi-region DR + replication failover
-low-latency-networking → HFT/exchange connectivity, DPDK, multicast
-fintech-security       → SEBI/CERT-In compliance, secrets rotation
-trading-data-streaming → broker + Redis tuning for market data
+```mermaid
+graph LR
+    A["service-mesh<br/>Istio/Linkerd control & data plane"] --> B["ebpf-observability<br/>kernel-level observability"]
+    B --> C["chaos-engineering<br/>failure injection, game days"]
+    C --> D["backup-dr<br/>RTO/RPO, Velero, etcd, DR patterns"]
+    D --> E["dr-zero-downtime<br/>zero-downtime deploys + multi-region DR + replication failover"]
+    E --> F["low-latency-networking<br/>HFT/exchange connectivity, DPDK, multicast"]
+    F --> G["fintech-security<br/>SEBI/CERT-In compliance, secrets rotation"]
+    G --> H["trading-data-streaming<br/>broker + Redis tuning for market data"]
 ```

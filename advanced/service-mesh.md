@@ -1,5 +1,12 @@
 # Service Mesh (Istio / Linkerd)
 
+Sidecar-proxied traffic management, mTLS, and observability for a fleet of microservices — without touching application code. Track how many knowledge checks you clear as you go:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ## 1. The Problem
 
 With N microservices, cross-cutting concerns appear in every service:
@@ -11,6 +18,12 @@ With N microservices, cross-cutting concerns appear in every service:
 | Circuit breaking | Hystrix/Resilience4j | DestinationRule |
 | Distributed traces | Instrumentation code | Envoy auto-injects |
 | Access logs | Custom logging | Envoy access log |
+
+<div class="quiz-card">
+  <p class="quiz-q">Without a service mesh, where does retry/circuit-breaking logic typically live? Where does it move to with a mesh?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Without a mesh: written into application code, often via a library like Hystrix/Resilience4j, duplicated per service. With a mesh: declared once as a <code>DestinationRule</code> and enforced by the sidecar &mdash; no app code changes, no per-language library to maintain.</div>
+</div>
 
 ---
 
@@ -45,6 +58,12 @@ graph TD
 - **istiod** combines Pilot (service discovery, xDS), Citadel (cert authority), Galley (config validation)
 - **Envoy** sidecars intercept all inbound/outbound traffic via iptables rules injected by the init container
 - xDS APIs (LDS, RDS, CDS, EDS) push config to proxies without restart
+
+<div class="quiz-card">
+  <p class="quiz-q">How does an Envoy sidecar end up seeing all of a pod's inbound and outbound traffic, when the application itself was never reconfigured to route through it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>An init container injects iptables rules into the pod at startup that transparently redirect traffic through the Envoy sidecar. The app just talks to <code>localhost</code> as normal &mdash; it has no idea the sidecar is intercepting everything.</div>
+</div>
 
 ---
 
@@ -114,6 +133,12 @@ sequenceDiagram
     S2-->>C: response
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">What's the difference in job between a VirtualService and a DestinationRule?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>VirtualService decides <em>where a request goes</em> &mdash; the routing rules (header matches, weighted splits). DestinationRule defines <em>what the destinations actually are</em> &mdash; the named subsets (e.g. v1, v2) that a VirtualService's routes point at. A VirtualService route is meaningless without the subset it references being defined in a DestinationRule.</div>
+</div>
+
 ---
 
 ## 4. Security
@@ -131,6 +156,19 @@ spec:
   mtls:
     mode: STRICT   # or PERMISSIVE (plain+mTLS)
 ```
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="strict" class="active state-ok">STRICT</button>
+    <button data-toggle-opt="permissive" class="state-warn">PERMISSIVE</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="strict">
+    Only mTLS is accepted. Any plaintext connection to a workload in this mode is rejected outright.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="permissive">
+    Both plaintext and mTLS are accepted on the same port &mdash; the workload will serve either.
+  </div>
+</div>
 
 ### AuthorizationPolicy
 
@@ -174,6 +212,40 @@ sequenceDiagram
 
 SPIFFE ID format: `spiffe://cluster.local/ns/<namespace>/sa/<serviceaccount>`
 
+Step through what that sequence diagram is actually doing, one exchange at a time:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Both sidecars get certs.</strong> Envoy A and Envoy B each send a CSR carrying their SPIFFE SVID identity to istiod's CA, and each gets back a signed certificate.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Handshake begins.</strong> Envoy A (the client sidecar) sends a TLS <code>ClientHello</code> to Envoy B.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Server responds.</strong> Envoy B replies with <code>ServerHello</code> plus its signed certificate.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Mutual verification.</strong> Envoy A verifies Envoy B's certificate against its SPIFFE ID. Once both sides have verified each other, mutual verification is done &mdash; this is the "mutual" in mTLS: both ends prove identity, not just the server.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Encrypted traffic flows.</strong> App traffic between the two sidecars now travels over the verified, encrypted mTLS connection &mdash; invisible to both application containers.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">During the mTLS handshake, what identity do the two Envoy sidecars actually check against each other's certificate?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The SPIFFE ID embedded in the cert (<code>spiffe://cluster.local/ns/&lt;namespace&gt;/sa/&lt;serviceaccount&gt;</code>) &mdash; not a hostname or IP. Both sidecars got that cert signed by istiod's CA during their own CSR step, so verifying it means trusting the same CA the other side trusts.</div>
+</div>
+
 ---
 
 ## 5. Observability
@@ -188,6 +260,12 @@ istio_tcp_connections_opened_total
 ```
 
 Access logs, distributed traces (Jaeger/Zipkin via B3 headers), and Kiali topology graph come out of the box.
+
+<div class="quiz-card">
+  <p class="quiz-q">Do you need to add any tracing or metrics instrumentation code to your application to get these numbers?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Envoy emits metrics automatically, and access logs, distributed traces, and the Kiali topology graph all come out of the box &mdash; none of it requires touching application code.</div>
+</div>
 
 ---
 
@@ -236,6 +314,12 @@ spec:
 
 **Rule of thumb**: start with Linkerd if you just need mTLS + basic observability. Use Istio when you need fine-grained traffic policies, canary deployments, or complex AuthorizationPolicies.
 
+<div class="quiz-card">
+  <p class="quiz-q">A team just wants automatic mTLS between services and basic observability, with the lowest possible install complexity. Per the rule of thumb, which should they reach for?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Linkerd &mdash; automatic zero-config mTLS, low install complexity, lower resource usage per proxy. Istio is the better call once they need fine-grained traffic policies, canary deployments, or complex AuthorizationPolicies, not before.</div>
+</div>
+
 ---
 
 ## 8. Fault Injection — Chaos Testing via Istio
@@ -280,6 +364,27 @@ spec:
         subset: v1
 ```
 
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="abort" class="active">Abort</button>
+    <button data-tab="delay">Delay</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="abort">
+      Returns an HTTP error status (e.g. <code>503</code>) for a percentage of requests instead of routing them &mdash; simulates the destination actually failing, to test how callers handle errors.
+    </div>
+    <div class="tab-panel" data-tab-panel="delay">
+      Holds a percentage of requests for a fixed extra duration before routing them on &mdash; simulates a slow destination, to test timeout handling. Nothing errors, it's just late.
+    </div>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A delay fault of 5s is injected on 10% of requests to ratings. Does that 10% of requests fail, or does it just succeed slower?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It succeeds, just later. A delay fault adds latency &mdash; it's not an error condition. That's exactly what makes it useful for testing timeout handling specifically, as opposed to an abort fault, which does return a real error status.</div>
+</div>
+
 ---
 
 ## 9. Timeouts and Retries
@@ -315,6 +420,12 @@ spec:
 
 **Important:** Only retry **idempotent** operations (GET, PUT). Never auto-retry POST without idempotency keys.
 
+<div class="quiz-card">
+  <p class="quiz-q">With <code>timeout: 3s</code> and <code>retries.attempts: 3</code> / <code>perTryTimeout: 1s</code>, does each of the 3 attempts get its own fresh 3-second window?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. <code>perTryTimeout</code> budgets each individual attempt (1s each), but the outer <code>timeout</code> caps the whole request across all attempts &mdash; 3 attempts &times; 1s = 3s total, exactly matching the 3s overall timeout. The attempts share one clock, they don't each reset it.</div>
+</div>
+
 ---
 
 ## 10. Traffic Shifting — Canary Deployment
@@ -334,6 +445,29 @@ sequenceDiagram
     Note over ISTIO: If error rate high: shift back to 0%
 ```
 
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Canary starts.</strong> 90% of traffic goes to <code>reviews-v1</code> (stable), 10% to <code>reviews-v2</code> (canary).
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Monitor.</strong> Watch the error rate on v2 specifically &mdash; not the aggregate across both versions.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Healthy → ramp up.</strong> If v2's error rate looks fine, shift more traffic its way: 25%, then 50%, then 100%.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Unhealthy → roll back.</strong> If v2's error rate goes high at any point, shift its traffic back to 0% immediately &mdash; don't wait for it to get worse.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 ```bash
 # Gradually shift traffic using kubectl patch
 kubectl patch virtualservice reviews --type=json \
@@ -345,3 +479,9 @@ kubectl patch virtualservice reviews --type=json \
 # / istio_requests_total{destination_service="reviews",destination_version="v2"}
 # Alert if error rate > 1% on v2 → shift back to 0%
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">The canary's Prometheus alert threshold is "error rate > 1% on v2." That threshold gets crossed mid-rollout. What's the correct response?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Shift v2's traffic weight back to 0% &mdash; roll back, don't keep ramping up. The whole point of watching v2's error rate in isolation during a canary is to catch this before it's serving 100% of traffic.</div>
+</div>

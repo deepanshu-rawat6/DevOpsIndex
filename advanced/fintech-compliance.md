@@ -4,26 +4,47 @@ Deeper regulatory-technical reference for India-focused financial infrastructure
 
 Companion: [trading-systems.md](./trading-systems.md) (trading infra architecture), [trading-data-streaming.md](./trading-data-streaming.md) (broker/cache tuning for trading workloads).
 
+Most sections below end with a quick knowledge check — track how many you clear as you go:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## The Frameworks at a Glance
 
-```
-SEBI CSCRF            → who: stock exchanges, brokers, depositories, AMCs, RTAs, KRAs
-                         (SEBI-registered market infrastructure institutions / intermediaries)
-
-CERT-In directive      → who: ALL entities in India with a computer resource — this is
-(6-hour reporting)       horizontal, not sector-specific. Applies on top of SEBI/RBI rules.
-
-RBI guidelines         → who: banks, NBFCs, payment system operators, payment aggregators,
-                         and any regulated entity RBI licenses/supervises
-
-PCI-DSS                → who: ANY entity (anywhere in the world) that stores, processes,
-                         or transmits cardholder data — contractual, not statutory, but
-                         enforced by card networks (Visa/Mastercard/RuPay) via acquirer banks
-```
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="sebi" class="active">SEBI CSCRF</button>
+    <button data-tab="certin">CERT-In</button>
+    <button data-tab="rbi">RBI</button>
+    <button data-tab="pci">PCI-DSS</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="sebi">
+      <strong>Who it applies to:</strong> stock exchanges, brokers, depositories, AMCs, RTAs, KRAs &mdash; SEBI-registered market infrastructure institutions / intermediaries.
+    </div>
+    <div class="tab-panel" data-tab-panel="certin">
+      <strong>Who it applies to (6-hour reporting directive):</strong> ALL entities in India with a computer resource &mdash; this is horizontal, not sector-specific. Applies on top of SEBI/RBI rules, not instead of them.
+    </div>
+    <div class="tab-panel" data-tab-panel="rbi">
+      <strong>Who it applies to:</strong> banks, NBFCs, payment system operators, payment aggregators, and any regulated entity RBI licenses/supervises.
+    </div>
+    <div class="tab-panel" data-tab-panel="pci">
+      <strong>Who it applies to:</strong> ANY entity, anywhere in the world, that stores, processes, or transmits cardholder data &mdash; contractual, not statutory, but enforced by card networks (Visa/Mastercard/RuPay) via acquirer banks.
+    </div>
+  </div>
+</div>
 
 A single fintech company can be in scope for more than one of these simultaneously — e.g., a stockbroker that also issues a co-branded payment card is subject to SEBI CSCRF *and* RBI card/payment guidelines *and* PCI-DSS *and* CERT-In's horizontal mandate. Building a compliance-ready platform means designing controls that satisfy the *strictest* overlapping requirement once, rather than bolting on separate control sets per regulator.
+
+<div class="quiz-card">
+  <p class="quiz-q">A stockbroker also issues a co-branded payment card. Does it only need to satisfy PCI-DSS for the card side of the business?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No &mdash; it's in scope for all of them at once: SEBI CSCRF (as a broker), RBI card/payment guidelines, PCI-DSS (cardholder data), and CERT-In's horizontal 6-hour reporting mandate. The right approach is designing controls that satisfy the strictest overlapping requirement once, not bolting on a separate control set per regulator.</div>
+</div>
 
 ---
 
@@ -77,24 +98,26 @@ Category I and II entities must run (or contract) a Security Operations Center w
 
 CSCRF requires trading data, investor personal data, and audit/log data to reside on infrastructure **physically located in India**. For cloud deployments this means:
 
-```
-Acceptable:
-  AWS ap-south-1 (Mumbai), ap-south-2 (Hyderabad)
-  GCP asia-south1 (Mumbai), asia-south2 (Delhi)
-  On-prem/colocation within India
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="ok" class="active state-ok">Acceptable</button>
+    <button data-toggle-opt="review" class="state-warn">Requires approval / masking</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="ok">
+    <code>AWS ap-south-1</code> (Mumbai), <code>ap-south-2</code> (Hyderabad); <code>GCP asia-south1</code> (Mumbai), <code>asia-south2</code> (Delhi); or on-prem/colocation within India.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="review">
+    Cross-region replication of raw production data to any non-India region. DR replicas outside India (even for resilience purposes) typically must either stay India-only (multi-AZ within ap-south-1, or India-region-to-India-region) or use masked/anonymized data if a non-India analytics/DR copy is unavoidable.
+  </div>
+</div>
 
-Requires explicit approval / masking before allowed:
-  Cross-region replication of raw production data to any non-India region
-  DR replicas outside India (even for resilience purposes) — typically must
-  either stay India-only (multi-AZ within ap-south-1, or India-region-to-India-region)
-  or use masked/anonymized data if a non-India analytics/DR copy is unavoidable
+> **Common mistake caught in audits:** a managed SaaS tool (APM, error tracking, support ticketing) that silently ships log payloads containing customer PII to a US-region SaaS backend. Data localization scope covers third-party SaaS dependencies too, not just your own infra — audit your outbound data flows to every SaaS vendor.
 
-Common mistake caught in audits:
-  A managed SaaS tool (APM, error tracking, support ticketing) that silently
-  ships log payloads containing customer PII to a US-region SaaS backend.
-  Data localization scope covers third-party SaaS dependencies too, not just
-  your own infra — audit your outbound data flows to every SaaS vendor.
-```
+<div class="quiz-card">
+  <p class="quiz-q">Your firm hires a highly skilled, well-reviewed security firm to run VAPT — but the firm isn't CERT-In empaneled. Does this satisfy SEBI CSCRF's VAPT requirement?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. VAPT must be performed by a CERT-In empaneled auditor specifically &mdash; using a non-empaneled firm doesn't satisfy the requirement even if the technical work itself is equivalent in quality.</div>
+</div>
 
 ---
 
@@ -153,6 +176,43 @@ The failure mode isn't malicious non-compliance — it's that "file the CERT-In
 report" is step 8 in a mental checklist under incident pressure, and by the
 time the team gets there, hours are already gone from detection lag alone.
 ```
+
+Step through where the time actually goes:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>T+0.</strong> Security event occurs.
+    </div>
+    <div class="stepper-panel">
+      <strong>T+?</strong> Detection. This gap itself can be hours without good monitoring — and it's usually the largest single delay in the whole chain.
+    </div>
+    <div class="stepper-panel">
+      <strong>T+detect.</strong> Alert fires, on-call paged.
+    </div>
+    <div class="stepper-panel">
+      <strong>T+30min.</strong> On-call acknowledges, starts triage.
+    </div>
+    <div class="stepper-panel">
+      <strong>T+1-2hr.</strong> Incident confirmed as security-relevant, not just a normal outage.
+    </div>
+    <div class="stepper-panel">
+      <strong>T+2-3hr.</strong> IR team assembled, initial scoping done.
+    </div>
+    <div class="stepper-panel">
+      <strong>T+3-5hr.</strong> Someone realizes/remembers this needs CERT-In reporting.
+    </div>
+    <div class="stepper-panel">
+      <strong>T+5-6hr.</strong> Report drafted, reviewed, filed — right at the wire, or missed entirely.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ### 2.4 What Automation Is Needed to Meet It
 
@@ -214,6 +274,12 @@ aws events put-targets \
 #   4. Page the IR on-call with the pre-filled draft attached, not a blank alert
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">An infra outage has an unclear root cause — it might be a routine failure or might be security-related. What's the correct default posture for the CERT-In 6-hour clock?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Assume reportable until ruled out, not "wait for full root cause before deciding." Waiting for certainty before triggering the reporting clock is the most common way teams blow the 6-hour window &mdash; and the initial report is explicitly allowed to be preliminary, so there's no need to wait anyway.</div>
+</div>
+
 ---
 
 ## 3. PCI-DSS for Payment-Adjacent Fintech
@@ -239,23 +305,32 @@ Relevant when your platform stores, processes, or transmits cardholder data (PAN
 
 ### 3.2 Tokenization vs Encryption for Card Data
 
-```
-Encryption:
-  PAN stored as ciphertext, decryptable with a key.
-  4111111111111111  --[AES-256 + key K]-->  8f3a9c2e...
-  → The encrypted value is still "cardholder data" under PCI scope —
-    anywhere it's stored, transmitted, or processed is IN SCOPE for PCI-DSS,
-    because decryption is possible with the right key.
-
-Tokenization:
-  PAN replaced with a surrogate token that has no mathematical relationship
-  to the original PAN (via a tokenization vault/service, not reversible math).
-  4111111111111111  --[tokenization vault lookup]-->  tok_9f8e7d6c5b4a
-  → The token itself is NOT cardholder data. Systems that only ever handle
-    the token (not the real PAN) are OUT OF PCI-DSS SCOPE for that data flow.
-```
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="encryption" class="active state-warn">Encryption</button>
+    <button data-toggle-opt="tokenization" class="state-ok">Tokenization</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="encryption">
+    <strong>PAN stored as ciphertext, decryptable with a key.</strong>
+    <pre><code class="language-mermaid">graph LR
+    PAN["4111111111111111"] -->|"AES-256 + key K"| CT["8f3a9c2e..."]</code></pre>
+    The encrypted value is still "cardholder data" under PCI scope &mdash; anywhere it's stored, transmitted, or processed is IN SCOPE for PCI-DSS, because decryption is possible with the right key.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="tokenization">
+    <strong>PAN replaced with a surrogate token that has no mathematical relationship to the original.</strong>
+    <pre><code class="language-mermaid">graph LR
+    PAN["4111111111111111"] -->|"tokenization vault lookup"| TOK["tok_9f8e7d6c5b4a"]</code></pre>
+    The token itself is NOT cardholder data (via a tokenization vault/service, not reversible math). Systems that only ever handle the token &mdash; not the real PAN &mdash; are OUT OF PCI-DSS SCOPE for that data flow.
+  </div>
+</div>
 
 This distinction is the single biggest lever for reducing audit scope (section 3.3): encryption protects the data but keeps every system touching it in-scope; tokenization can remove entire systems from scope if they never see the real PAN, only the token.
+
+<div class="quiz-card">
+  <p class="quiz-q">A system only ever touches a tokenized value (e.g. <code>tok_9f8e7d6c5b4a</code>), never the real PAN. Is that system in scope for PCI-DSS for that data flow?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No &mdash; the token itself is not cardholder data, so a system that only ever handles the token is out of PCI-DSS scope for that flow. Contrast with encryption: an encrypted PAN is still cardholder data (decryption is possible with the right key), so every system touching the ciphertext stays in scope.</div>
+</div>
 
 ### 3.3 Scope Reduction Strategies
 
@@ -327,6 +402,12 @@ Key obligations when using cloud infra as an RBI-regulated entity:
     providers — increasingly a board-level reporting item, not just an IT one
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">Your payment pipeline stores a full copy of transaction data in India, but also replicates it to a non-India region for a BI dashboard. Does storing "a copy" in India satisfy RBI's 2018 data localization directive?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Not necessarily. RBI's directive is stricter than "store a copy in India" &mdash; in-scope payment data should have no requirement to also be processed outside India as part of normal flow. An analytics pipeline replicating raw payment data outside India needs to either stay in India too, or the data must be sufficiently anonymized/aggregated before it leaves.</div>
+</div>
+
 ---
 
 ## 5. Audit Logging Requirements — Common Across Frameworks
@@ -379,6 +460,12 @@ Common technical approaches:
 | PCI-DSS | Minimum 1 year, with at least 3 months immediately available/hot for analysis | Shortest of the four — but if you're also SEBI/RBI/CERT-In scoped, the longer requirement governs for any log that's also in scope there |
 
 **Practical design point:** since retention floors differ per framework and per data type, tag log streams at ingestion time with the regulatory regime(s) they satisfy, and set lifecycle policies per tag rather than one blanket retention setting for all logs — a blanket "keep everything 180 days" setting under-retains SEBI/RBI-scoped transaction logs.
+
+<div class="quiz-card">
+  <p class="quiz-q">A log type is subject to both CERT-In's 180-day floor and SEBI's 5+ year trade-record retention. You set one blanket policy of 180 days for all logs, to keep things simple. What's wrong with that?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It under-retains the SEBI/RBI-scoped logs. Retention floors differ per framework and per data type, and where they overlap, the longer requirement governs &mdash; not an average, not the shortest. The right design is to tag log streams at ingestion time with the regulatory regime(s) they satisfy and set lifecycle policies per tag.</div>
+</div>
 
 ---
 
@@ -511,6 +598,12 @@ aws s3 cp exec-activity-report-$(date +%Y-%m).txt \
   s3://audit-evidence-bucket/k8s-exec-activity/$(date +%Y-%m)/
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">Why does the example audit policy log Secret reads at the Metadata level instead of RequestResponse, even though RequestResponse is used for other privileged actions?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>RequestResponse level captures the full request/response body. For a Secret object, that body IS the secret's actual value &mdash; logging it at RequestResponse would write the secret into the audit log store itself, creating a brand new exposure surface. Metadata level still records who read which secret and when, without ever capturing the value.</div>
+</div>
+
 ---
 
 ## 7. Comparison Table — SEBI CSCRF vs PCI-DSS vs RBI Guidelines
@@ -532,20 +625,21 @@ aws s3 cp exec-activity-report-$(date +%Y-%m).txt \
 
 ## Summary — Building Once, Satisfying All Four
 
-```
 Design a single control plane that satisfies the strictest requirement per dimension:
 
-  Data localization  -> India-only regions, always (satisfies SEBI + RBI simultaneously,
-                         doesn't hurt PCI which has no localization requirement)
-  Log retention      -> tag by data type, apply the longest applicable retention per tag
-                         (don't average retention across frameworks — take the max per log type)
-  Incident reporting -> CERT-In 6hr clock as the baseline automation target; it's the
-                         tightest timeline and satisfies the horizontal mandate that sits
-                         under both SEBI and RBI reporting obligations
-  Audit evidence     -> immutable, centralized logging (WORM) with metadata-vs-full-body
-                         tiering as shown in section 6 — satisfies PCI Req 10, SEBI Detection
-                         pillar, and RBI IT audit expectations from one pipeline
-  Scope reduction     -> apply PCI-style tokenization thinking even outside PCI scope —
-                         minimizing where sensitive data physically lives reduces blast
-                         radius and audit surface for SEBI/RBI-scoped data too
+```mermaid
+graph TD
+    Core(("Single control plane<br/>strictest requirement<br/>per dimension"))
+
+    Core --> Loc["Data localization<br/>India-only regions, always"]
+    Core --> Ret["Log retention<br/>tag by data type,<br/>apply longest applicable<br/>retention per tag"]
+    Core --> Inc["Incident reporting<br/>CERT-In 6hr clock as<br/>baseline automation target"]
+    Core --> Aud["Audit evidence<br/>immutable, centralized logging (WORM)<br/>metadata vs full-body tiering"]
+    Core --> Scope["Scope reduction<br/>PCI-style tokenization thinking<br/>applied even outside PCI scope"]
+
+    Loc -.->|satisfies simultaneously| SEBI1["SEBI + RBI<br/>(doesn't hurt PCI, which has<br/>no localization requirement)"]
+    Ret -.->|"max per log type, never averaged"| AllFW["all four frameworks"]
+    Inc -.->|satisfies horizontal mandate under| SEBIRBI["SEBI + RBI reporting obligations"]
+    Aud -.->|satisfies| PCISEBIRBI["PCI Req 10 + SEBI Detection<br/>pillar + RBI IT audit"]
+    Scope -.->|reduces blast radius/audit surface for| SEBIRBIData["SEBI/RBI-scoped data too"]
 ```

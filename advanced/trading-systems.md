@@ -4,20 +4,51 @@ This is a reference for infrastructure and SRE engineers who **support** trading
 
 Companion files: [trading-data-streaming.md](./trading-data-streaming.md) (Kafka/Redis tuning for market data), [fintech-security.md](./fintech-security.md) (SEBI/CERT-In compliance), [fintech-compliance.md](./fintech-compliance.md) (regulatory deep-dive), [low-latency-networking.md](./low-latency-networking.md) (DPDK, EFA, kernel bypass).
 
+Most sections below end with a **knowledge check** — try to answer before revealing:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## Why Trading Infra Is Different
 
-```
-Normal web service:                     Trading system:
-  Retry on failure = safe                 Retry on failure = can double-execute an order
-  Stale cache = minor inconvenience       Stale market data = trading on wrong price
-  5s failover = acceptable                5s failover = missed the entire price move
-  Horizontal autoscaling = fine           Autoscaling = too slow for the burst window
-  Idempotency = nice-to-have              Idempotency = mandatory, regulator-checked
-```
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="normal" class="active">Normal web service</button>
+    <button data-tab="trading">Trading system</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="normal">
+      <ul>
+        <li>Retry on failure = safe</li>
+        <li>Stale cache = minor inconvenience</li>
+        <li>5s failover = acceptable</li>
+        <li>Horizontal autoscaling = fine</li>
+        <li>Idempotency = nice-to-have</li>
+      </ul>
+    </div>
+    <div class="tab-panel" data-tab-panel="trading">
+      <ul>
+        <li>Retry on failure = can double-execute an order</li>
+        <li>Stale market data = trading on wrong price</li>
+        <li>5s failover = missed the entire price move</li>
+        <li>Autoscaling = too slow for the burst window</li>
+        <li>Idempotency = mandatory, regulator-checked</li>
+      </ul>
+    </div>
+  </div>
+</div>
 
 Every design decision below traces back to one constraint: **an order, once sent to an exchange, is a real financial commitment.** Infra failure modes that are merely annoying elsewhere (dupe requests, brief staleness, slow scale-out) are money-losing or compliance-breaking here.
+
+<div class="quiz-card">
+  <p class="quiz-q">Why is "just retry on failure" — a safe default for a normal web service — actively dangerous for order submission?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Because an order, once sent to an exchange, is a real financial commitment. A retry that looks like a harmless dupe request elsewhere can double-execute an order here &mdash; the failure mode isn't "annoying," it's money-losing or compliance-breaking.</div>
+</div>
 
 ---
 
@@ -101,6 +132,31 @@ stateDiagram-v2
 | `Cancelled` | Order removed from book before full fill | Exchange (on cancel ack) | Yes |
 | `Rejected` | Exchange refused the order | Exchange | Yes |
 
+Same lifecycle, walked one step at a time along the happy path:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. PendingNew.</strong> OMS persists the order and forwards it to the exchange gateway. This is an <em>optimistic</em>, OMS-local state &mdash; there's no confirmed exchange state yet, and no way to know if the exchange has received it.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. New.</strong> The exchange sends back an <code>ExecutionReport</code> (<code>39=0</code>) acknowledging the order is live in the book. The ambiguity from step 1 is resolved &mdash; the order definitely exists on the exchange side now.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. PartiallyFilled (optional).</strong> The exchange matches some but not all of the quantity. The remainder stays live in the book, still earning its original time priority at that price.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Terminal state.</strong> The order reaches <code>Filled</code> (all quantity matched), <code>Cancelled</code> (remaining quantity pulled before it filled), or <code>Rejected</code> (exchange refused it, either immediately or, rarely, after being live). No further transitions happen from here.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 ### 1.2 Full Order Lifecycle Sequence — Client to Exchange Ack
 
 ```mermaid
@@ -141,6 +197,12 @@ sequenceDiagram
 ```
 
 The critical infra takeaway: everything left of the exchange boundary (client → OMS → risk → gateway) is under your control and can be made reliable with retries/idempotency. Everything at and past the FIX session to the exchange is a **single TCP connection with sequence numbers** — a completely different reliability model (see section 4).
+
+<div class="quiz-card">
+  <p class="quiz-q">Your gateway crashes while an order sits in <code>PendingNew</code>. Why is this the single most dangerous window in the whole order lifecycle?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Because <code>PendingNew</code> is an OMS-local, optimistic state &mdash; the order was sent, but you have no confirmation the exchange actually received it. If the gateway or TCP connection dies right then, you can't tell whether the order reached the exchange, was accepted, or never arrived at all. Resending blindly risks a duplicate order; not resending risks silently dropping a real one. This ambiguity is exactly what idempotency keys (section 5) are designed to resolve.</div>
+</div>
 
 ---
 
@@ -238,6 +300,12 @@ function match_incoming_order(order, book):
 
 **Infra relevance:** this loop runs single-threaded per symbol inside the exchange (matching engines are almost universally single-threaded per instrument to guarantee deterministic ordering — concurrency would break price-time priority guarantees). That single-threaded-per-symbol design is *why* exchanges publish sequence numbers per symbol/channel — it maps directly onto how you reason about market data gap detection in section 3.
 
+<div class="quiz-card">
+  <p class="quiz-q">Why are matching engines almost universally single-threaded per instrument, rather than parallelized for throughput?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Because price-time priority requires deterministic ordering &mdash; matches must happen in a single, well-defined sequence per symbol. Concurrency would break that guarantee (two threads could race on which order "arrived first"). This same single-threaded-per-symbol design is why exchanges publish sequence numbers per symbol/channel for market data.</div>
+</div>
+
 ---
 
 ## 3. Market Data Feed Handling
@@ -246,25 +314,45 @@ Market data is a **one-way broadcast** from the exchange — very different reli
 
 ### 3.1 Snapshot vs Incremental (Delta) Feeds
 
-```
-Snapshot feed:                          Incremental/delta feed:
-  Full order book state,                  Only the change since last message
-  periodic (e.g. every 1-60s)             (add/modify/delete a price level)
-  Large message size                      Small message size
-  Self-healing (always complete)          Requires perfect sequence continuity
-  Used to: recover after gap detected     Used to: continuous low-latency updates
-```
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="snapshot" class="active">Snapshot feed</button>
+    <button data-tab="incremental">Incremental/delta feed</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="snapshot">
+      Full order book state, sent periodically (e.g. every 1-60s). Large message size, but self-healing &mdash; it's always complete on its own. Used to recover after a gap is detected.
+    </div>
+    <div class="tab-panel" data-tab-panel="incremental">
+      Only the change since the last message (add/modify/delete a price level). Small message size, but requires perfect sequence continuity. Used for continuous low-latency updates.
+    </div>
+  </div>
+</div>
 
 Real feeds combine both: continuous incremental updates for low latency, with periodic snapshots (or on-demand snapshot requests) as the recovery mechanism when gaps are detected.
 
-```
-Feed handler startup / recovery sequence:
-
-  1. Request snapshot (full book state) — establishes baseline, tagged with seq_no=N
-  2. Subscribe to incremental feed starting from seq_no=N+1
-  3. Apply incremental messages in sequence order on top of the snapshot
-  4. If a gap is detected in the incremental stream -> go back to step 1
-```
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Request snapshot.</strong> Pull full book state, establishing a baseline tagged with <code>seq_no=N</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Subscribe to incrementals.</strong> Join the incremental feed starting from <code>seq_no=N+1</code>, right where the snapshot left off.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Apply in sequence.</strong> Apply incremental messages in sequence order on top of the snapshot to keep the local book current.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Gap detected? Restart.</strong> If a gap shows up in the incremental stream, go back to step 1 &mdash; request a fresh snapshot rather than trying to patch around the missing messages.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ### 3.2 Sequence Number Gap Detection and Recovery
 
@@ -305,26 +393,45 @@ class GapDetector:
 
 **Why this matters operationally:** a gap that isn't detected and recovered means your local order book silently diverges from the real exchange book — every downstream consumer (OMS, risk engine, strategy) is now trading on a wrong picture of the market. This is a top-tier severity incident class for trading infra, and it is silent unless you instrument sequence continuity explicitly (see section 6 monitoring signals).
 
+<div class="quiz-card">
+  <p class="quiz-q">A market data gap goes undetected. What actually happens — does the feed handler just miss a few updates and move on?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Worse than that: the local order book silently diverges from the real exchange book, and stays diverged. Every downstream consumer &mdash; OMS, risk engine, strategy &mdash; is now trading on a wrong picture of the market, with no error or crash to signal it. It's a top-tier severity incident class precisely because it's silent unless sequence continuity is instrumented explicitly.</div>
+</div>
+
 ### 3.3 Multicast vs Unicast Market Data Distribution
 
-```
-Unicast (TCP, one connection per consumer):
-  Exchange ---- TCP ----> Consumer A
-  Exchange ---- TCP ----> Consumer B
-  Exchange ---- TCP ----> Consumer C
-  → Exchange bandwidth/CPU scales with number of consumers
-  → Simpler to reason about (ordered, reliable transport)
-  → Used for: order entry sessions, low-volume reference data
-
-Multicast (UDP, one send fans out to many receivers):
-  Exchange ---- UDP multicast ----> [switch replicates to all subscribers]
-                                      ├── Consumer A
-                                      ├── Consumer B
-                                      └── Consumer C
-  → Exchange sends once regardless of consumer count
-  → No delivery/order guarantee -> sequence numbers + gap-fill are mandatory
-  → Used for: market data (NSE NNF/multicast, CME MDP 3.0, Nasdaq ITCH/multicast)
-```
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="unicast" class="active">Unicast (TCP)</button>
+    <button data-tab="multicast">Multicast (UDP)</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="unicast">
+      <pre><code class="language-mermaid">graph LR
+    EX["Exchange"] -->|"TCP"| A["Consumer A"]
+    EX -->|"TCP"| B["Consumer B"]
+    EX -->|"TCP"| C["Consumer C"]</code></pre>
+      <ul>
+        <li>One connection per consumer &mdash; exchange bandwidth/CPU scales with number of consumers.</li>
+        <li>Simpler to reason about: ordered, reliable transport.</li>
+        <li>Used for: order entry sessions, low-volume reference data.</li>
+      </ul>
+    </div>
+    <div class="tab-panel" data-tab-panel="multicast">
+      <pre><code class="language-mermaid">graph LR
+    EX["Exchange"] -->|"UDP multicast"| SW["Switch<br/>replicates to all subscribers"]
+    SW --> A["Consumer A"]
+    SW --> B["Consumer B"]
+    SW --> C["Consumer C"]</code></pre>
+      <ul>
+        <li>Exchange sends once, regardless of consumer count.</li>
+        <li>No delivery/order guarantee &mdash; sequence numbers + gap-fill become mandatory.</li>
+        <li>Used for: market data (NSE NNF/multicast, CME MDP 3.0, Nasdaq ITCH/multicast).</li>
+      </ul>
+    </div>
+  </div>
+</div>
 
 Multicast is used for market data specifically because exchanges have thousands of consumers and per-consumer TCP fan-out doesn't scale at microsecond latencies — but it pushes the reliability burden onto every consumer's feed handler (hence gap detection is not optional, it's the core job of a feed handler).
 
@@ -367,6 +474,12 @@ graph TD
 
 **Line arbitration ("A/B feed"):** most exchanges publish the *same* multicast data on two independent network paths (line A and line B) specifically so a feed handler can take whichever packet arrives first per sequence number and ignore the slower/lost one. This is a redundancy technique that trades bandwidth (2x) for resilience against a single switch/NIC/path failure — it is not the same as gap recovery, which handles the case where *both* lines lose a packet.
 
+<div class="quiz-card">
+  <p class="quiz-q">Line A and line B both carry the same multicast market data. If a single packet is dropped on line A but arrives fine on line B, does the feed handler still need gap recovery?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No &mdash; that's exactly what line arbitration is for. The feed handler takes whichever packet (A or B) arrives first per sequence number and ignores the slower/lost one, so a single-line drop is invisible to it. Gap recovery (snapshot resync) only kicks in when <em>both</em> lines lose the same packet &mdash; the two mechanisms solve different failure scenarios.</div>
+</div>
+
 ---
 
 ## 4. Exchange Connectivity Patterns
@@ -375,17 +488,20 @@ graph TD
 
 FIX (Financial Information eXchange) separates transport-level session management from business-level messages:
 
-```
-Session layer (keeps the connection alive and in sync):
-  Logon (35=A), Logout (35=5), Heartbeat (35=0),
-  TestRequest (35=1), ResendRequest (35=2), SequenceReset (35=4)
-  → concerned with: is the TCP connection healthy, are both sides in sequence sync
-
-Application layer (the actual business messages):
-  NewOrderSingle (35=D), OrderCancelRequest (35=F),
-  ExecutionReport (35=8), OrderCancelReject (35=9)
-  → concerned with: order lifecycle, fills, rejects
-```
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="session" class="active">Session layer</button>
+    <button data-tab="application">Application layer</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="session">
+      Keeps the connection alive and in sync: <code>Logon</code> (35=A), <code>Logout</code> (35=5), <code>Heartbeat</code> (35=0), <code>TestRequest</code> (35=1), <code>ResendRequest</code> (35=2), <code>SequenceReset</code> (35=4). Concerned with: is the TCP connection healthy, are both sides in sequence sync.
+    </div>
+    <div class="tab-panel" data-tab-panel="application">
+      The actual business messages: <code>NewOrderSingle</code> (35=D), <code>OrderCancelRequest</code> (35=F), <code>ExecutionReport</code> (35=8), <code>OrderCancelReject</code> (35=9). Concerned with: order lifecycle, fills, rejects.
+    </div>
+  </div>
+</div>
 
 A FIX message is tag=value pairs delimited by SOH (`\x01`):
 ```
@@ -398,13 +514,32 @@ Key tags: `34`=MsgSeqNum, `35`=MsgType, `11`=ClOrdID (your idempotency key), `55
 
 Every FIX message carries an incrementing `MsgSeqNum` (tag 34), per session, in **both directions**. This is the application-level equivalent of the market-data sequence numbers in section 3, but over a reliable TCP session so gaps mean something different: a gap means a message was sent but not yet processed/received, not that it was lost on the wire.
 
-```
-Heartbeat mechanics:
-  HeartBtInt negotiated at Logon (e.g. 30 seconds)
-  If no message sent in HeartBtInt -> send Heartbeat (35=0)
-  If no message received in HeartBtInt + delta -> send TestRequest (35=1)
-  If no response to TestRequest -> session considered dead, disconnect
+Heartbeat mechanics, as an escalating sequence:
 
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Negotiate.</strong> <code>HeartBtInt</code> is negotiated at Logon (e.g. 30 seconds) &mdash; both sides now agree on the idle threshold.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Idle timeout on send.</strong> If no message has been sent in <code>HeartBtInt</code>, send a <code>Heartbeat</code> (35=0) to prove this side is still alive.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Idle timeout on receive.</strong> If no message has been received in <code>HeartBtInt</code> + delta, send a <code>TestRequest</code> (35=1) to force the other side to respond.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. No response — disconnect.</strong> If there's no response to the <code>TestRequest</code>, the session is considered dead and torn down.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+```
 Sequence number recovery on reconnect:
   ResendRequest (35=2): "I'm missing seqnums 5820-5825, please resend"
   SequenceReset (35=4): administrative reset (GapFill or hard reset)
@@ -414,15 +549,26 @@ Sequence number recovery on reconnect:
 
 **Why this matters for infra:** if your gateway crashes and restarts, the FIX session must resume from the correct sequence number, not start fresh — starting fresh either causes the exchange to reject your session (seqnum too low) or, worse, silently causes you to miss messages (seqnum reset without proper reconciliation). Gateway restart runbooks must persist the last sent/received sequence number to durable storage *before* acking, not just in memory.
 
+<div class="quiz-card">
+  <p class="quiz-q">Your FIX gateway crashes and restarts. Is it safe to just start a fresh session with sequence numbers reset to 1?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. The session must resume from the correct sequence number, not start fresh &mdash; starting fresh either gets your session rejected by the exchange (seqnum too low) or, worse, silently causes you to miss messages. That's why gateway restart runbooks must persist the last sent/received sequence number to durable storage <em>before</em> acking, not just keep it in memory.</div>
+</div>
+
 ### 4.3 Colocation and Proximity to Exchange
 
-```
-Client servers in own datacenter          Client servers in exchange colocation facility
-        │                                              │
-        │ ~2-5ms round trip                             │ ~50-200μs round trip
-        │ (routers, ISP hops, distance)                 │ (same building, cross-connect)
-        ▼                                              ▼
-    Exchange matching engine                       Exchange matching engine
+```mermaid
+graph TD
+    classDef client fill:#3498db,stroke:#2980b9,color:#fff
+    classDef ex fill:#2c3e50,stroke:#1a252f,color:#fff
+
+    C1["Client servers<br/>own datacenter"]:::client
+    C2["Client servers<br/>exchange colocation facility"]:::client
+    EX1["Exchange matching engine"]:::ex
+    EX2["Exchange matching engine"]:::ex
+
+    C1 -->|"~2-5ms round trip<br/>routers, ISP hops, distance"| EX1
+    C2 -->|"~50-200μs round trip<br/>same building, cross-connect"| EX2
 ```
 
 Colocation means physically placing your servers in the same datacenter as the exchange's matching engine, connected via a direct cross-connect rather than the public internet or even a private WAN. The latency difference (milliseconds vs microseconds) is the entire reason colocation exists — for strategies where being first to react to a price change matters, a 2ms disadvantage means you are structurally always late. For most infra-supporting-a-trading-desk (not pure HFT) contexts, colocation still matters for **fairness of fills and order-to-ack latency consistency**, even if you're not competing on pure speed.
@@ -453,6 +599,37 @@ Key operational points:
 - Failover must reconcile in-flight orders: any order sent via the primary but not yet acknowledged is in an ambiguous state (see `PendingNew` above) — the backup path cannot just "resend" it without risking a duplicate, hence idempotency keys (section 5) rather than gateway-level retries.
 - Many exchanges allow only **one active session per member ID** at a time — failing over means explicitly logging out the primary (or having the exchange detect the TCP death) before the backup can log on as active, which takes real wall-clock time (seconds, not milliseconds). This is a hard constraint infra teams often don't discover until a live failover drill.
 
+Same failover, as a timeline:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Steady state.</strong> Primary gateway is active and sending orders. Backup gateway is logged in on its own FIX session, standing by, but sends nothing &mdash; it already paid the Logon cost so it doesn't have to during an incident.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Primary fails.</strong> Any order already sent via the primary but not yet acknowledged is now in an ambiguous state (<code>PendingNew</code>) &mdash; the backup can't just resend it without risking a duplicate.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Primary logged out.</strong> Because most exchanges allow only one active session per member ID, the primary must be explicitly logged out (or its TCP death detected by the exchange) before the backup can become active. This step takes real wall-clock time &mdash; seconds, not milliseconds.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Backup goes active.</strong> The backup logs on as the active session and starts sending new orders. The ambiguous in-flight orders from step 2 are resolved via idempotency keys/order status queries (section 5), never via a blind resend.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">During failover, why can't the backup gateway just resend every order that was in-flight on the primary?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Because an in-flight order that hadn't been acknowledged yet is in an ambiguous state &mdash; you don't know if the exchange already received and accepted it. Blindly resending risks creating a duplicate live order. Instead, this gets resolved the same way as any ambiguous timeout: idempotency keys and an explicit order status query, never a gateway-level retry.</div>
+</div>
+
 ---
 
 ## 5. Order Routing Reliability
@@ -461,16 +638,32 @@ Key operational points:
 
 Smart order routing decides *which* venue/exchange to send an order to when a security trades on multiple venues (common in US equities, less common but growing in India with NSE/BSE). From an infra perspective, SOR means:
 
-```
-SOR = order-splitting + venue health awareness + latency-aware routing
+SOR = order-splitting + venue health awareness + latency-aware routing:
 
-  1. Split a large order into child orders across venues based on displayed liquidity
-  2. Route each child order to the venue's gateway
-  3. If a venue's gateway is degraded/down, route around it (venue health check)
-  4. Track fills per child order, aggregate back to the parent order for the client
-```
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Split.</strong> A large order is split into child orders across venues based on displayed liquidity.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Route.</strong> Each child order is routed to its venue's gateway.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Health check.</strong> If a venue's gateway is degraded/down, route around it instead.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Aggregate.</strong> Fills per child order are tracked and aggregated back into the parent order for the client.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
-The infra concern is #3: SOR needs live venue health signals (gateway connectivity, FIX session state, recent reject rates) to make correct routing decisions — this is a monitoring/observability integration point, not just a trading-logic concern.
+The infra concern is step 3: SOR needs live venue health signals (gateway connectivity, FIX session state, recent reject rates) to make correct routing decisions — this is a monitoring/observability integration point, not just a trading-logic concern.
 
 ### 5.2 Why Blind Retry Is Dangerous for Financial Orders
 
@@ -490,6 +683,12 @@ Order submission retry (dangerous):
 Case (b) is the dangerous one: you now have two live orders in the market when you intended one. For a large order, this can mean double the intended position, double the capital at risk, and a real financial loss if the market moves against you before you notice and cancel the duplicate.
 
 **The rule:** you cannot tell from a timeout alone whether it's safe to retry an order submission. Never retry blindly on timeout for order-entry FIX messages.
+
+<div class="quiz-card">
+  <p class="quiz-q">A NewOrderSingle times out with no ack. Why can't you just retry it the way you'd retry a normal API call?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Because a timeout is ambiguous: it could mean the order never reached the exchange (safe to resend), or it reached the exchange and was accepted but the ack was lost on the way back (retry = a real duplicate order in the market). You cannot distinguish these cases from the timeout alone, so blind retry risks double the intended position and real financial loss if the market moves before you notice.</div>
+</div>
 
 ### 5.3 Idempotency Keys for Order Submission
 
@@ -549,6 +748,12 @@ Two layers of protection are in play here, and both matter:
 
 Never generate a fresh idempotency key on retry — that defeats the entire mechanism.
 
+<div class="quiz-card">
+  <p class="quiz-q">On an ambiguous order-submission timeout, what's the correct recovery move: query status with the same ClOrdID, or resend with a brand-new ClOrdID?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Query order status using the SAME ClOrdID first, asking the exchange what state the order is actually in. Only resend &mdash; and only with that same ClOrdID, never a fresh one &mdash; if the exchange confirms it never received the original order. Generating a fresh idempotency key on retry defeats the entire dedupe mechanism, both your own and the exchange's.</div>
+</div>
+
 ---
 
 ## 6. Infra-Specific Concerns for SRE/DevOps Supporting Trading Systems
@@ -561,25 +766,49 @@ Market open volume profile (NSE, 9:15 AM IST):
   09:15:00  MARKET OPENS — order/quote volume jumps 10-20x within seconds
   09:15:00 - 09:20:00  sustained high volume
   09:20:00+  tapers toward normal intraday levels
-
-Standard HPA reaction loop:
-  1. Metrics-server scrapes pod CPU/memory       -> ~15-30s lag
-  2. HPA controller evaluates against threshold   -> ~15s poll interval
-  3. HPA decides to scale, updates Deployment      -> immediate
-  4. New pod scheduled, image pull, container start -> 10-60s+ depending on image size
-  5. Readiness probe passes, added to Service      -> +probe interval
-
-Total reaction time: often 60-120+ seconds
-Spike duration needing capacity: sometimes under 60 seconds
-→ By the time HPA has scaled out, the worst of the spike may already be over,
-  and the service degraded (dropped orders, queued market data, missed acks) during the gap.
 ```
+
+The standard HPA reaction loop, walked step by step:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Scrape.</strong> Metrics-server scrapes pod CPU/memory &mdash; roughly a 15-30s lag before the number is even available.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Evaluate.</strong> HPA controller evaluates the scraped metric against its threshold, on a ~15s poll interval.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Decide.</strong> HPA decides to scale and updates the Deployment &mdash; this step itself is immediate.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Schedule and start.</strong> A new pod is scheduled, its image pulled, and the container started &mdash; 10-60s+ depending on image size.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Ready.</strong> The readiness probe passes and the pod is added to the Service, plus the probe interval itself.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+Total reaction time: often 60-120+ seconds. Spike duration needing capacity: sometimes under 60 seconds. By the time HPA has scaled out, the worst of the spike may already be over, and the service degraded (dropped orders, queued market data, missed acks) during the gap.
 
 Practical mitigations used in trading infra instead of relying on reactive HPA alone:
 - **Pre-scale on schedule**: a CronJob or scheduled `kubectl scale` / scheduled HPA min-replica bump a few minutes before known volume events (market open, market close, expiry days, known macro announcement times). This is a known, calendar-driven load pattern — treat it like one.
 - **Over-provision baseline capacity** for the order-entry and market-data-handling tiers specifically, rather than running them lean and relying on autoscaling — the cost of idle capacity for 15 minutes a day is far cheaper than the cost of dropped/delayed orders.
 - **KEDA with custom metrics** (queue depth, FIX session message rate) reacts faster than CPU-based HPA for I/O-bound trading services, but still has the same fundamental scale-out latency floor (new pod = tens of seconds minimum) — it narrows the gap, it doesn't remove it.
 - **Predictive/scheduled scaling patterns** are covered in more depth in [sre/scenarios-scheduling-scaling.md](../sre/scenarios-scheduling-scaling.md) (ASG predictive scaling, warm pools).
+
+<div class="quiz-card">
+  <p class="quiz-q">Does switching from CPU-based HPA to KEDA with custom metrics (queue depth, message rate) solve the market-open scaling problem?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Not entirely. KEDA reacts faster than CPU-based HPA for I/O-bound trading services and narrows the gap, but it still has the same fundamental scale-out latency floor &mdash; a new pod still takes tens of seconds minimum to schedule, pull, and become ready. It reduces the problem, it doesn't remove it; pre-scaling on a known schedule is what actually covers a known, calendar-driven spike like market open.</div>
+</div>
 
 ### 6.2 Why TCP Retransmission Timers Are Tuned Differently for Exchange Connections
 
@@ -629,6 +858,12 @@ Standard RED/USE metrics are necessary but not sufficient. Trading infra needs d
 | Order reject rate by reason code | Rejects bucketed by exchange reject reason (risk limit, bad tick size, session issue) | A flat "error rate" hides whether rejects are a client bug, a risk config issue, or an exchange-side problem |
 | End-of-day reconciliation delta | Position/quantity mismatch between OMS records and exchange-provided end-of-day statement | Only surfaces once a day — needs its own explicit alerting, won't show up in real-time dashboards |
 
+<div class="quiz-card">
+  <p class="quiz-q">Your feed handler process is running and its liveness probe is green. Does that mean market data is flowing correctly?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Not necessarily. A service can be "up" &mdash; process running, healthy liveness probe &mdash; while the market data feed itself is silently stalled. That's exactly why market data feed staleness (time since last message vs expected cadence) needs its own dedicated signal, separate from generic process health checks.</div>
+</div>
+
 ```yaml
 # Example Prometheus alerting rules for trading-specific signals
 groups:
@@ -672,18 +907,44 @@ groups:
 
 At end of day, the OMS's internal record of positions and fills must match the exchange's/clearing corporation's official statement exactly. This is both an operational integrity check and, for regulated entities, a compliance requirement (see [fintech-compliance.md](./fintech-compliance.md)).
 
-```
-Reconciliation pipeline (typical):
+The typical reconciliation pipeline, step by step:
 
-  1. Exchange publishes end-of-day trade/position file (via SFTP or API)
-  2. Reconciliation job pulls the file, parses it
-  3. Compare exchange-reported fills vs OMS-recorded fills, order by order
-  4. Compare exchange-reported net position vs OMS-computed net position, per symbol
-  5. Any delta -> P1 alert, block next-day trading for the affected account until resolved
-  6. Clean reconciliation -> signed-off report archived (audit evidence)
-```
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Publish.</strong> Exchange publishes the end-of-day trade/position file (via SFTP or API).
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Pull.</strong> Reconciliation job pulls the file and parses it.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Compare fills.</strong> Exchange-reported fills are compared against OMS-recorded fills, order by order.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Compare positions.</strong> Exchange-reported net position is compared against OMS-computed net position, per symbol.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Delta found.</strong> Any mismatch triggers a P1 alert and blocks next-day trading for the affected account until resolved.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Clean reconciliation.</strong> A signed-off report is archived as audit evidence.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 From an infra standpoint this is a batch job with unusually strict correctness requirements: it must run reliably every trading day, alert loudly on any mismatch (not just log it), and its output is itself an auditable artifact — treat the reconciliation job's own execution history as something that needs monitoring (did it run today? did it complete? did it produce output?), not just the business result it computes.
+
+<div class="quiz-card">
+  <p class="quiz-q">Is it enough to monitor the business result of end-of-day reconciliation (did it find a mismatch or not)?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. The reconciliation job's own execution history needs monitoring too &mdash; did it run today, did it complete, did it actually produce output. It's a batch job with unusually strict correctness requirements: a job that silently failed to run looks identical to "clean reconciliation, no mismatch" if you're only watching the business result.</div>
+</div>
 
 ---
 

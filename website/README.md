@@ -17,6 +17,14 @@ npm run build    # syncs content + builds static site to dist/
 npm run preview  # preview the built site
 ```
 
+## Interactive content
+
+Topic markdown can embed click-to-reveal quizzes, tabs, step-through
+walkthroughs, and compare toggles — no per-page script needed, they're wired
+up once site-wide. See [COMPONENTS.md](./COMPONENTS.md) for the HTML syntax
+and where to reach for which component. `databases/kafka-field-guide.md` is
+the reference example.
+
 ## How content works
 
 `scripts/sync-content.js` runs before every dev/build. It:

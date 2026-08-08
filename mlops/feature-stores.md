@@ -2,6 +2,13 @@
 
 A feature store solves one problem: **training-serving skew** — the model trains on one version of a feature and serves predictions using a different version, silently degrading accuracy.
 
+Each major section below ends with a quick knowledge check — track your progress:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## The Problem Without a Feature Store
@@ -16,6 +23,12 @@ graph TD
 ```
 
 The training feature `avg_order_value_30d` is computed over a 30-day window from the data warehouse. The serving feature is computed over the last 100 records from Postgres. These are different — model gets different inputs at training vs serving time → accuracy degrades silently.
+
+<div class="quiz-card">
+  <p class="quiz-q">Training computes <code>avg_order_value_30d</code> from a 30-day warehouse window; serving computes it from the last 100 Postgres records. Why is this a problem even though both are "the same feature"?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>They're two different computations of what's supposed to be the same feature &mdash; different time windows, different logic, different data sources. The model was trained on one distribution of values and now serves predictions on a different one, so accuracy degrades silently with no error or crash pointing to the cause. That gap is training-serving skew.</div>
+</div>
 
 ---
 
@@ -39,6 +52,12 @@ graph TD
 
 Both training and serving read from the same feature definitions → identical features guaranteed.
 
+<div class="quiz-card">
+  <p class="quiz-q">What actually guarantees that training and serving see identical features in this architecture — not just "best practice," but the mechanism?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Both paths read from the same feature definitions in the registry, and both are fed by the same transformation logic. Training goes through the offline store via a point-in-time join; serving goes through the online store via a low-latency lookup &mdash; but neither side independently recomputes the feature its own way, which is exactly what caused the skew in the previous section.</div>
+</div>
+
 ---
 
 ## Online vs Offline Store
@@ -53,9 +72,43 @@ Both training and serving read from the same feature definitions → identical f
 
 The **online store contains only the latest feature values**. If you need `user_123`'s `avg_order_value_30d` at inference time, the online store has the pre-computed current value — no need to query the data warehouse.
 
+<div class="quiz-card">
+  <p class="quiz-q">At inference time, does the online store recompute <code>avg_order_value_30d</code> from scratch by querying the data warehouse?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. The online store only holds the latest pre-computed feature values and does a point lookup by entity ID in under 10ms &mdash; the expensive computation already happened earlier during the batch/streaming transformation and materialization step, not at request time.</div>
+</div>
+
 ---
 
 ## Feast — Open-Source Feature Store
+
+Feast implements the architecture above end to end. The same pipeline recurs across every feature store product — install it, define what a feature is, keep the online store fresh, then read from either side for training or serving:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Install.</strong> <code>pip install feast[redis,aws]</code> and <code>feast init</code> scaffold a feature repo &mdash; a directory of Python files that will declare entities, sources, and feature views.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Define features.</strong> Declare an <code>Entity</code> (the primary key, e.g. <code>user_id</code>), a <code>FileSource</code> pointing at raw feature data with a timestamp field, and a <code>FeatureView</code> grouping related fields with a TTL.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Materialize.</strong> <code>feast apply</code> registers the definitions in the registry; <code>feast materialize-incremental</code> &mdash; typically a CronJob running hourly &mdash; copies the latest feature values from the offline store into the online store (Redis).
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Train.</strong> <code>get_historical_features()</code> takes an entity dataframe with timestamps and returns features as they existed at each timestamp &mdash; a point-in-time join against the offline store, preventing leakage.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Serve.</strong> <code>get_online_features()</code> looks up the same feature names for a live entity ID against the online store in under 10ms &mdash; same definitions, different store, no train/serve gap.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ### Install on K8s
 

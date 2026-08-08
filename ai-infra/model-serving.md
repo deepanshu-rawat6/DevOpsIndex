@@ -2,6 +2,11 @@
 
 Exposing ML models as production APIs. Two layers: KServe for the K8s-native orchestration layer, vLLM for the high-throughput LLM inference engine underneath.
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## KServe — InferenceService CRD
@@ -84,6 +89,12 @@ spec:
       mountPath: /mnt/models
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">In the InferenceService diagram, which pod is required to serve a model, and which two are optional?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The Predictor pod is required — it's the one actually running the model (vLLM/TorchServe/Triton) and answering inference requests. The Transformer (pre/post-processing) and Explainer (SHAP/LIME) pods are both optional add-ons the InferenceService can wire in front of or alongside the predictor.</div>
+</div>
+
 ---
 
 ## vLLM — High-Throughput LLM Inference Engine
@@ -95,6 +106,26 @@ vLLM achieves 20–100× throughput vs naive inference through three innovations
 Naive: wait for a full batch, run, return, repeat (GPU idle between batches).
 
 vLLM: new requests join the batch **mid-generation**. The batch is always full.
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="naive" class="active state-warn">Naive batching</button>
+    <button data-toggle-opt="continuous" class="state-ok">Continuous batching</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="naive">
+    Wait for a full batch to be assembled, run it, return all results, then start
+    assembling the next batch. Any request that finishes early still has to wait
+    for the slowest request in its batch before the GPU picks up new work &mdash;
+    the GPU sits idle between batches. This is why naive serving tops out around
+    <strong>~40% GPU utilization</strong>.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="continuous">
+    New requests join the running batch <strong>mid-generation</strong>, slotting
+    into whatever capacity just freed up as other requests finish their tokens.
+    The batch is never left partially empty waiting for stragglers. This is why
+    vLLM reaches <strong>~95% GPU utilization</strong> on the same hardware.
+  </div>
+</div>
 
 ```mermaid
 gantt
@@ -124,12 +155,18 @@ PagedAttention borrows from OS virtual memory paging:
 - Pages shared across parallel sequences (for beam search, speculative decoding)
 - No memory fragmentation
 
-```
-Standard KV cache: [seq0: 2048 tokens allocated][seq1: 2048 tokens allocated] ...
-  → seq0 uses 50 tokens, 1998 slots wasted
+```mermaid
+graph TD
+    subgraph Standard["Standard KV cache — pre-allocated"]
+        S0["seq0: 2048 tokens allocated<br/>only 50 used"] --> SW(("1998 slots<br/>wasted"))
+        S1["seq1: 2048 tokens allocated"]
+    end
+    subgraph Paged["Paged KV cache — on demand"]
+        P0["page0: seq0 t0-15"] --> P1["page1: seq0 t16-31"] --> P2["page2: seq1 t0-15"]
+        P2 -.->|next page allocated only when needed| P3["page3: ..."]
+    end
 
-Paged KV cache: [page0: seq0 t0-15][page1: seq0 t16-31][page2: seq1 t0-15] ...
-  → pages allocated as needed, no waste
+    style SW fill:#c0392b,color:#fff
 ```
 
 Result: 2–4× more concurrent sequences fit in the same GPU memory.
@@ -146,6 +183,12 @@ vllm serve meta-llama/Meta-Llama-3-70B \
 ```
 
 Tensor parallel: each GPU holds a **column slice** of weight matrices. Each forward pass requires an AllReduce across GPUs. Needs high-bandwidth NVLink (not PCIe).
+
+<div class="quiz-card">
+  <p class="quiz-q">With --tensor-parallel-size 2, are the model's layers split across the two GPUs?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Tensor parallelism splits each weight matrix into column slices held across GPUs, not the layers themselves — every GPU participates in every layer's computation, with an AllReduce needed after each forward pass. Splitting layers across GPUs instead is pipeline parallelism, a different (and separate) dial — which is why the vLLM flags keep <code>--pipeline-parallel-size</code> distinct from <code>--tensor-parallel-size</code>.</div>
+</div>
 
 ---
 
@@ -171,6 +214,12 @@ curl http://vllm:8000/metrics | grep kv_cache
 # vllm:num_requests_running 12
 # vllm:gpu_cache_usage_perc 0.73   ← 73% of KV cache used
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">You bump --max-model-len from 8192 to 32768 without changing the GPU. What happens to the number of concurrent requests the server can handle?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It drops sharply — from ~100 concurrent requests down to ~25 in the file's own numbers. Longer context means more KV cache reserved per sequence, and the pool of memory left over after model weights is fixed, so more room per request means fewer requests fit at once. This is why --max-model-len should be set to the 95th percentile of actual request length, not the model's maximum.</div>
+</div>
 
 ---
 
@@ -201,6 +250,45 @@ kubectl patch isvc llama-3-8b \
   -p '{"spec":{"predictor":{"canaryTrafficPercent":0}}}'
 ```
 
+The rollout unfolds in stages — step through it:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Stable only.</strong> <code>llama-3-8b-v1</code> is the only
+      version deployed, serving 100% of traffic through the predictor.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Canary deployed.</strong> A new revision is deployed and
+      <code>canaryTrafficPercent: 10</code> is set — 10% of requests now route
+      to the new version, 90% still go to the stable one.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Validate.</strong> Watch the canary's metrics (latency,
+      error rate, <code>vllm:*</code> stats) against the stable version's
+      before deciding whether to proceed.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Promote.</strong> <code>kubectl patch</code> sets
+      <code>canaryTrafficPercent</code> back to <code>0</code> — which, once
+      the canary revision is the active one, means the canary now takes 100%
+      of traffic and the old stable revision takes none.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">To promote a validated canary to 100% of traffic, the patch command sets canaryTrafficPercent to 0, not 100. Why doesn't that turn traffic off?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>canaryTrafficPercent is the split away from the currently-active revision. Once the canary is validated and promotion runs, the canary revision becomes the new baseline — so "0% split off to a canary" means the new version is now serving all the traffic, not that traffic stopped. Reading it as "0% traffic to the new version" is the easy mistake.</div>
+</div>
+
 ---
 
 ## Autoscaling with KEDA (GPU-aware)
@@ -228,6 +316,12 @@ spec:
         sum(vllm:num_requests_waiting{model_name="llama-3-8b"})
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">Why does GPU inference autoscaling trigger on request queue depth (vllm_requests_waiting) instead of CPU utilization the way a standard HPA does?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Because the bottleneck for LLM inference is the GPU, not the CPU — a pod can look nearly idle on CPU while its GPU and KV cache are fully saturated and requests are piling up waiting to be batched. Scaling on queue depth (or GPU utilization) reacts to the resource that's actually constrained; CPU % would stay flat and never trigger a scale-up.</div>
+</div>
+
 ---
 
 ## Model Storage Patterns
@@ -249,6 +343,12 @@ spec:
       storageUri: "s3://my-models/llama-3-8b-instruct/"
       # KServe model agent sidecar downloads this to /mnt/models before starting predictor
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">Why shouldn't an 8B model's 16GB of weights just be baked into the container image?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Model weights are large, and baking them into the image ties every rebuild/push/pull of the image to that weight size — slow builds, slow registry pushes, slow pulls on every node, and a new image for every model update. Keeping weights external (PVC, S3, or a model agent sidecar downloading via storageUri) lets the image stay small and lets the same runtime image serve different model versions without rebuilding anything.</div>
+</div>
 
 ---
 

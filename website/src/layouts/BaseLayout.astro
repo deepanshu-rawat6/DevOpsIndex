@@ -137,9 +137,104 @@ const currentPath = Astro.url.pathname;
       });
     }
 
+    // ── Interactive content components (quiz, tabs, stepper, toggle) ──
+    // See website/COMPONENTS.md for the HTML authoring syntax. These wire
+    // up any matching markup that came through raw from markdown files.
+
+    function initQuizzes() {
+      const cards = Array.from(document.querySelectorAll<HTMLElement>('.quiz-card'));
+      cards.forEach(card => {
+        const btn = card.querySelector<HTMLButtonElement>('.quiz-reveal');
+        const answer = card.querySelector<HTMLElement>('.quiz-a');
+        btn?.addEventListener('click', () => {
+          card.classList.add('revealed');
+          if (answer) answer.hidden = false;
+          updateQuizProgress();
+        });
+      });
+
+      // Optional progress pill: <div class="quiz-progress" data-quiz-progress></div>
+      function updateQuizProgress() {
+        document.querySelectorAll<HTMLElement>('[data-quiz-progress]').forEach(el => {
+          const total = cards.length;
+          const done = cards.filter(c => c.classList.contains('revealed')).length;
+          const fill = el.querySelector<HTMLElement>('.quiz-progress-fill');
+          const label = el.querySelector<HTMLElement>('.quiz-progress-label');
+          if (fill) fill.style.width = total ? `${(done / total) * 100}%` : '0%';
+          if (label) label.textContent = `${done}/${total} checks`;
+        });
+      }
+      updateQuizProgress();
+    }
+
+    function initTabGroups() {
+      document.querySelectorAll<HTMLElement>('.tab-group').forEach(group => {
+        const buttons = Array.from(group.querySelectorAll<HTMLButtonElement>('.tab-buttons [data-tab]'));
+        const panels = Array.from(group.querySelectorAll<HTMLElement>('.tab-panel'));
+        buttons.forEach(btn => {
+          btn.addEventListener('click', () => {
+            const target = btn.dataset.tab;
+            buttons.forEach(b => b.classList.toggle('active', b === btn));
+            panels.forEach(p => p.classList.toggle('active', p.dataset.tabPanel === target));
+          });
+        });
+      });
+    }
+
+    function initSteppers() {
+      document.querySelectorAll<HTMLElement>('.stepper').forEach(stepper => {
+        const panels = Array.from(stepper.querySelectorAll<HTMLElement>('.stepper-panel'));
+        const prevBtn = stepper.querySelector<HTMLButtonElement>('.stepper-prev');
+        const nextBtn = stepper.querySelector<HTMLButtonElement>('.stepper-next');
+        const dotsEl = stepper.querySelector<HTMLElement>('.stepper-dots');
+        const labelEl = stepper.querySelector<HTMLElement>('.stepper-label');
+        let current = 0;
+
+        if (dotsEl) {
+          panels.forEach((_, i) => {
+            const dot = document.createElement('span');
+            if (i === 0) dot.classList.add('active');
+            dot.addEventListener('click', () => goTo(i));
+            dotsEl.appendChild(dot);
+          });
+        }
+
+        function render() {
+          panels.forEach((p, i) => p.classList.toggle('active', i === current));
+          if (dotsEl) Array.from(dotsEl.children).forEach((d, i) => d.classList.toggle('active', i === current));
+          if (prevBtn) prevBtn.disabled = current === 0;
+          if (nextBtn) nextBtn.disabled = current === panels.length - 1;
+          if (labelEl) labelEl.textContent = `Step ${current + 1} of ${panels.length}`;
+        }
+        function goTo(i: number) { current = Math.max(0, Math.min(panels.length - 1, i)); render(); }
+
+        prevBtn?.addEventListener('click', () => goTo(current - 1));
+        nextBtn?.addEventListener('click', () => goTo(current + 1));
+        render();
+      });
+    }
+
+    function initToggles() {
+      document.querySelectorAll<HTMLElement>('.toggle-switch').forEach(group => {
+        const buttons = Array.from(group.querySelectorAll<HTMLButtonElement>('.toggle-buttons [data-toggle-opt]'));
+        const panels = Array.from(group.querySelectorAll<HTMLElement>('.toggle-panel'));
+        buttons.forEach(btn => {
+          btn.addEventListener('click', () => {
+            const target = btn.dataset.toggleOpt;
+            buttons.forEach(b => b.classList.toggle('active', b === btn));
+            panels.forEach(p => p.classList.toggle('active', p.dataset.togglePanel === target));
+          });
+        });
+      });
+    }
+
     function init() {
       renderMermaid();
       addCopyButtons();
+      initQuizzes();
+      initTabGroups();
+      initSteppers();
+      initToggles();
     }
 
     if (document.readyState === 'loading') {

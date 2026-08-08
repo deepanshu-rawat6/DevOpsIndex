@@ -2,6 +2,13 @@
 
 A training pipeline is a CI/CD pipeline for ML: instead of build → test → deploy, it's data-prep → train → evaluate → register → deploy. Each step is a container running on K8s.
 
+Most sections below end with a quick knowledge check — track how many you've cleared as you go:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## Pipeline Anatomy
@@ -17,6 +24,12 @@ graph LR
 ```
 
 This is identical to your CI/CD pipelines — replace "build Docker image" with "train model", replace "run tests" with "evaluate on holdout set".
+
+<div class="quiz-card">
+  <p class="quiz-q">In the pipeline anatomy diagram, what happens if the Evaluate step doesn't meet the accuracy/val_loss threshold?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The pipeline follows the "fail" branch to Alert + stop — it never reaches Register or Deploy. Passing the threshold is a hard gate, not a suggestion: a model that doesn't clear it is never registered, let alone deployed.</div>
+</div>
 
 ---
 
@@ -158,6 +171,37 @@ client.create_run_from_pipeline_func(
 )
 ```
 
+Once submitted, KFP walks the DAG one component at a time, each in its own container — step through what actually runs:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Data prep runs.</strong> <code>prepare_data</code> starts in its own container, fetches from <code>data_source</code>, validates/splits, and writes the result to <code>output_dataset.path</code> — a file, not an in-memory object.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Train runs on a GPU node.</strong> <code>train_model</code> reads the dataset file KFP just handed it, trains, and writes both a model file and metrics (val_loss, accuracy) as outputs.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Evaluate-and-gate runs.</strong> <code>evaluate_and_gate</code> reads the metrics artifact and compares accuracy against <code>accuracy_threshold</code>. Returning <code>False</code> here stops the pipeline — nothing downstream runs.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Conditional register.</strong> Only inside <code>dsl.Condition(gate_step.output == True)</code> does <code>register_model</code> run, pushing the trained model into the MLflow registry.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Why do KFP components pass data to each other as file paths instead of in-memory Python objects?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Each component runs in its own separate container — there's no shared process memory to pass an object through. KFP manages the artifact as a file (<code>Output[Dataset]</code>/<code>Input[Dataset]</code> etc.), writing it in one container and reading it back in the next.</div>
+</div>
+
 ---
 
 ## Apache Airflow — Alternative Orchestrator
@@ -222,6 +266,12 @@ def weekly_retraining():
 weekly_retraining()
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">Why does only the <code>train</code> task specify a <code>node_selector</code> and GPU toleration, while <code>data_prep</code> and <code>register</code> don't?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Only training needs GPU compute. Pinning every task to the GPU node pool would waste expensive, scarce GPU capacity on work that runs fine on regular CPU nodes — so the node selector and toleration are scoped to just the one task that needs them.</div>
+</div>
+
 ---
 
 ## Kubeflow vs Airflow
@@ -235,6 +285,12 @@ weekly_retraining()
 | UI | KFP Dashboard (lineage, metrics) | Airflow UI (task status) |
 | K8s integration | Native (runs on K8s only) | Via KubernetesPodOperator |
 | Best for | Pure ML teams on K8s | Mixed data/ML teams, existing Airflow |
+
+<div class="quiz-card">
+  <p class="quiz-q">Kubeflow Pipelines only runs natively on Kubernetes. How does Airflow reach Kubernetes for the equivalent job?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Via <code>KubernetesPodOperator</code> — Airflow itself isn't K8s-native and can run anywhere, but this operator lets a DAG task launch and manage a pod on a cluster, which is exactly how the <code>data_prep</code>/<code>train</code>/<code>register</code> tasks above reach K8s.</div>
+</div>
 
 ---
 
@@ -255,6 +311,34 @@ graph TD
     GATE -->|no| ALERT["Alert team<br>pipeline run failed gate"]
     REG --> PROMO["Manual or auto-promote<br>to Production"]
 ```
+
+Whichever trigger fires, the run down the middle of that diagram happens in the same order every time — step through it:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. A trigger fires.</strong> One of: a schedule (CronJob/Airflow), Evidently detecting data drift, a Prometheus alert on performance drop, or new data landing in S3.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Training pipeline runs.</strong> Whichever trigger fired, it kicks off the same training pipeline (KFP or Airflow) from earlier — data prep, train, evaluate.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Evaluation gate.</strong> Accuracy is checked against the threshold, exactly like in Pipeline Anatomy.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Gate passes → registry.</strong> The new model version lands in the registry as Staging. If the gate fails, the team gets alerted instead and nothing is promoted.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Promotion.</strong> A human — or an automated policy — decides whether the Staging version actually becomes Production. Passing the gate does not mean it's live.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ### Drift-triggered retraining (webhook pattern)
 
@@ -280,6 +364,12 @@ async def drift_webhook(payload: dict):
     return {"triggered": False}
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">After a model passes the evaluation gate and lands in the registry, is it automatically serving production traffic?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Passing the gate only gets the new version into the registry as Staging. Promotion to Production is a separate step — manual or governed by an auto-promote policy — not an automatic consequence of clearing the accuracy threshold.</div>
+</div>
+
 ---
 
 ## Pipeline Best Practices
@@ -295,3 +385,9 @@ async def drift_webhook(payload: dict):
 ❌ Don't put model weights in git
 ❌ Don't skip the evaluation gate "just this once"
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">Why should intermediate pipeline artifacts (datasets, models) live in S3/GCS rather than a PVC?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Pipelines are meant to be stateless — each run should be reproducible without depending on a persistent volume being attached to the right node or sticking around between runs. Object storage keeps artifacts durable and reachable from any step, regardless of which node ran it.</div>
+</div>

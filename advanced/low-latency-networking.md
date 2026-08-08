@@ -2,21 +2,41 @@
 
 For High-Frequency Trading (HFT) and financial exchange systems, standard cloud networking introduces unacceptable latency. This file covers the three pillars of ultra-low-latency networking: exchange connectivity, multicast market data, and kernel bypass.
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## Why Standard Cloud Networking Is Too Slow
 
-```
-Standard internet path (trading app → exchange):
-  App → EC2/GCE → VPC router → Internet GW → ISP → Exchange
-  Latency: 5–50ms (internet) + kernel overhead (~50–200μs per hop)
+Every layer a packet crosses adds latency — and the standard path stacks far more of them between the trading app and the exchange than an optimized path does. Flip between the two to see which layers disappear:
 
-Optimized HFT path:
-  App → NIC (DPDK) → Direct Connect/Dedicated Line → Exchange colocation
-  Latency: 50–500μs end-to-end, sub-10μs for kernel-bypassed local ops
-```
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="standard" class="active state-bad">Standard internet path</button>
+    <button data-toggle-opt="optimized" class="state-ok">Optimized HFT path</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="standard">
+    <pre><code class="language-mermaid">graph LR
+    App["Trading app"] --> EC2["EC2/GCE"] --> VPCR["VPC router"] --> IGW["Internet GW"] --> ISP["ISP"] --> EXCH["Exchange"]</code></pre>
+    <strong>Latency: 5–50ms</strong> (internet) + kernel overhead (~50–200μs per hop). Six hops — three of them (Internet GW, ISP, the public internet itself) completely outside your control.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="optimized">
+    <pre><code class="language-mermaid">graph LR
+    App2["Trading app"] --> NIC["NIC (DPDK)"] --> DX["Direct Connect / dedicated line"] --> EXCH2["Exchange colocation"]</code></pre>
+    <strong>Latency: 50–500μs end-to-end</strong>, sub-10μs for kernel-bypassed local ops. Four hops, none of them the public internet.
+  </div>
+</div>
 
 Every layer adds latency. HFT eliminates as many layers as possible.
+
+<div class="quiz-card">
+  <p class="quiz-q">The optimized HFT path still has 4 hops, not 1. So why is it so much faster than the standard path's 6 hops?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Hop count alone isn't what matters &mdash; which hops they are does. The standard path's hops route through the public internet (Internet GW, ISP), which adds both raw latency (5&ndash;50ms) <em>and</em> unpredictable jitter from congestion and shared infrastructure. The optimized path replaces those internet hops with a dedicated line and kernel bypass, so every remaining hop is both faster and deterministic.</div>
+</div>
 
 ---
 
@@ -30,6 +50,12 @@ Standard HTTPS/TCP over the public internet for trading has three fundamental pr
 - **Shared infrastructure** — you're competing for bandwidth with other traffic
 
 For context: a stock price can move in 10μs. A 5ms network jitter means you're acting on data that's 500,000 "ticks" stale.
+
+<div class="quiz-card">
+  <p class="quiz-q">A stock price can move in 10μs, and the public internet can jitter by 5ms. Roughly how many "ticks" stale is the data you'd be acting on during that spike?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>About 500,000 (5ms ÷ 10μs). A single congestion-triggered jitter spike on the public internet is enough to make a trading decision on wildly outdated information &mdash; which is why "variable latency," not just "latency," is listed as the first fundamental problem.</div>
+</div>
 
 ### AWS Direct Connect
 
@@ -101,11 +127,12 @@ bfd interval 300 min_rx 300 multiplier 3 # 300ms intervals, 3 misses = 900ms fai
 
 For exchanges with strict uptime SLAs, run **two Direct Connect connections** from two different colo facilities (different physical buildings) in active-active mode:
 
-```
-  Colo A ──DX─→ AWS Direct Connect Location 1
-  Colo B ──DX─→ AWS Direct Connect Location 2
-                ↓ both active, BGP ECMP load balancing
-              Trading VPC
+```mermaid
+graph TD
+    ColoA["Colo A"] -->|DX| Loc1["AWS Direct Connect<br/>Location 1"]
+    ColoB["Colo B"] -->|DX| Loc2["AWS Direct Connect<br/>Location 2"]
+    Loc1 -->|both active,<br/>BGP ECMP load balancing| VPC["Trading VPC"]
+    Loc2 -->|both active,<br/>BGP ECMP load balancing| VPC
 ```
 
 ```bash
@@ -120,19 +147,57 @@ aws directconnect create-direct-connect-gateway-association \
   --gateway-id vgw-xxxxxxxx
 ```
 
+Put the tuned BGP timers, BFD, and this active-active pair together and here's what actually happens when a link dies:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Healthy.</strong> Both Direct Connect links are up. Each has its own BGP session, and BFD is exchanging hellos every 300ms on both.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. A link fails.</strong> Colo A's fiber path (or its BGP peer) goes down. No more BFD hellos arrive on that session.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. BFD detects it.</strong> After 3 missed 300ms intervals (~900ms) BFD declares the session dead &mdash; versus 30&ndash;90 seconds for unmodified BGP hold timers alone.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. BGP withdraws the route.</strong> The failed path drops out of the router's ECMP set for the trading VPC.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Traffic shifts.</strong> Everything flows over the surviving Direct Connect connection (Colo B) with no manual intervention. Total failover: under a second.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Why does BFD cut failover time from 30–90 seconds down to under a second, when it's running alongside BGP rather than replacing it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>BGP's own hold timers only notice a dead peer after a long silence (tens of seconds, even tuned down to hello=3s/hold=9s). BFD runs a much faster, lightweight heartbeat (300ms intervals, 3 missed = ~900ms) purely to detect the failure fast &mdash; then it tells BGP to withdraw the route immediately instead of waiting for BGP's own slower timers to notice.</div>
+</div>
+
 ### On-Premises / Co-location Scenario (Non-AWS)
 
 When colocated in the same building as the exchange (e.g., NSE's colo at Powai, BSE's at Goregaon):
 
+```mermaid
+graph TD
+    Rack["Your server rack"] -->|10GbE fiber<br/>cross-connect| Switch["Exchange switch<br/>Layer 2 direct link<br/>1–10μs, no routers, no internet"]
+    Server["Your server"] --> NIC1["NIC 1<br/>cross-connect to exchange<br/>(trading traffic)"]
+    Server --> NIC2["NIC 2<br/>management network"]
+    NIC2 --> Inet["Internet"] --> Cloud["Your cloud"]
 ```
-Physical cross-connect: 10GbE fiber patch from your rack → exchange switch
-  → Latency: 1–10μs (speed of light through fiber in the building)
-  → No routers, no internet, just a Layer 2 direct link
 
-Your server
-  ├── NIC 1: cross-connect to exchange (trading traffic)
-  └── NIC 2: management network → internet → your cloud
-```
+<div class="quiz-card">
+  <p class="quiz-q">Both AWS Direct Connect and a colo cross-connect skip the public internet entirely. Which one is actually lower latency, and why?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The colo cross-connect (1&ndash;10μs) &mdash; it beats even Direct Connect (0.5&ndash;2ms). Direct Connect still routes through a Direct Connect location, AWS's private backbone, a Direct Connect Gateway, and a Virtual Private Gateway before reaching your VPC. A physical cross-connect in the same building is just a Layer 2 fiber patch straight to the exchange switch &mdash; no routers at all.</div>
+</div>
 
 ---
 
@@ -142,13 +207,32 @@ Your server
 
 UDP Multicast sends **one packet that reaches many receivers simultaneously** without the sender transmitting N copies. Every major exchange (NSE, BSE, CME, NASDAQ) distributes market data (tick data, order book updates) via multicast.
 
-```
-Unicast (normal):    Server → sends 1000 copies → 1000 clients   (1000x bandwidth)
-Broadcast:           Server → sends to everyone → 1000 clients   (wastes bandwidth)
-Multicast:           Server → sends 1 copy → multicast group → 1000 clients (1x bandwidth)
-```
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="unicast" class="active">Unicast</button>
+    <button data-tab="broadcast">Broadcast</button>
+    <button data-tab="multicast">Multicast</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="unicast">
+      <strong>Server sends 1000 copies → 1000 clients.</strong> One packet per recipient &mdash; bandwidth cost scales 1000x with the number of clients.
+    </div>
+    <div class="tab-panel" data-tab-panel="broadcast">
+      <strong>Server sends to everyone → 1000 clients.</strong> Reaches every host on the segment whether it wants the feed or not &mdash; wastes bandwidth on uninterested receivers.
+    </div>
+    <div class="tab-panel" data-tab-panel="multicast">
+      <strong>Server sends 1 copy → multicast group → 1000 clients.</strong> The network, not the sender, replicates the packet only to hosts that joined the group &mdash; bandwidth cost stays 1x no matter how many clients are listening.
+    </div>
+  </div>
+</div>
 
 Multicast uses IP addresses in the **224.0.0.0/4** range. Clients "join" a multicast group to receive packets for that feed.
+
+<div class="quiz-card">
+  <p class="quiz-q">A multicast feed goes from 1,000 subscribers to 10,000 overnight. How many copies of each packet does the sender now need to transmit?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Still just 1. Multicast's bandwidth cost at the sender is independent of receiver count &mdash; the network replicates the packet close to each receiver, not the source. That's the entire point versus unicast, where sender bandwidth scales linearly with the number of clients.</div>
+</div>
 
 ### The Problem in VPCs
 
@@ -216,6 +300,34 @@ aws ec2 register-transit-gateway-multicast-group-members \
   --network-interface-ids eni-aaa eni-bbb eni-ccc
 ```
 
+Step through what those five commands actually build, in order:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Create a multicast-enabled Transit Gateway.</strong> Multicast support is off by default on a TGW &mdash; it has to be explicitly enabled.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Create a multicast domain.</strong> With IGMPv2 support turned on, so instances can dynamically join/leave groups instead of everything being statically registered.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Associate subnets with the domain.</strong> Only instances in an associated subnet can participate in this multicast domain at all.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Register the source.</strong> The ENI of the feed publisher, tied to a specific multicast group IP (e.g. <code>224.1.1.1</code>).
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Register subscribers.</strong> The ENIs of every instance that needs the feed. Each one still has to send its own IGMP join from inside the OS/application before it actually receives packets.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 **On each subscriber instance:**
 
 ```bash
@@ -256,6 +368,12 @@ ip maddress show dev eth0
 # → inet  224.1.1.1
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">An instance stops caring about a multicast feed but its application never sends an explicit IGMPv2 Leave. How does TGW eventually find out it's no longer subscribed?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Via the TGW Querier. TGW periodically sends IGMP queries to check who's still subscribed to each group &mdash; an instance that doesn't respond eventually ages out, even without ever sending an explicit Leave.</div>
+</div>
+
 ---
 
 ## 3. Kernel Bypass — DPDK
@@ -264,25 +382,39 @@ ip maddress show dev eth0
 
 Every packet received by a standard Linux application goes through this path:
 
+```mermaid
+graph LR
+    NIC["NIC hardware"] --> IRQ["interrupt"] --> KIH["kernel interrupt<br/>handler"] --> SOFT["softirq"] --> STACK["network stack<br/>(ip_rcv → tcp_rcv/udp_rcv)"] --> SB["socket buffer"] --> SYS["system call<br/>(recvfrom)"] --> APP["user space<br/>application"]
 ```
-NIC hardware → interrupt → kernel interrupt handler → softirq
-  → network stack (ip_rcv → tcp_rcv / udp_rcv) → socket buffer
-  → system call (recvfrom) → user space application
 
-Total overhead: ~5–50μs per packet, unpredictable due to kernel scheduling
-```
+Total overhead: ~5–50μs per packet, unpredictable due to kernel scheduling.
 
 For HFT, this is too slow and too variable. DPDK (Data Plane Development Kit) **eliminates the kernel from the data path entirely**.
 
 ### How DPDK Works
 
-```
-Without DPDK:
-  NIC → kernel interrupt → kernel TCP/IP stack → socket → app   (50μs+)
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="without" class="active state-bad">Without DPDK</button>
+    <button data-toggle-opt="with" class="state-ok">With DPDK</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="without">
+    <pre><code class="language-mermaid">graph LR
+    NICA["NIC"] --> KIA["kernel interrupt"] --> KSA["kernel TCP/IP stack"] --> SOCKA["socket"] --> APPA["app"]</code></pre>
+    <strong>50μs+</strong> per packet, and variable &mdash; the kernel scheduler decides when your app actually gets to run.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="with">
+    <pre><code class="language-mermaid">graph LR
+    NICB["NIC"] --> PMD["DPDK poll mode driver (user space)"] --> APPB["app"]</code></pre>
+    <strong>Sub-1μs.</strong> The kernel never sees the packet at all &mdash; no interrupt, no context switch, nothing to wait on the scheduler for.
+  </div>
+</div>
 
-With DPDK:
-  NIC → DPDK poll mode driver (PMD) in user space → app          (sub-1μs)
-```
+<div class="quiz-card">
+  <p class="quiz-q">DPDK's poll-mode driver spins in a tight loop constantly checking the NIC instead of waiting for an interrupt. What's the tradeoff?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It burns 100% of a CPU core continuously &mdash; the core is always spinning, never idle &mdash; in exchange for eliminating the unpredictable delay of waiting for the kernel to schedule an interrupt handler. You're trading a whole core for latency determinism.</div>
+</div>
 
 DPDK:
 1. Takes **exclusive control of the NIC** — the kernel never sees those packets
@@ -316,6 +448,29 @@ dpdk-devbind --bind=vfio-pci 0000:00:03.0
 dpdk-devbind --status
 # → 0000:00:03.0 'Virtio network device' drv=vfio-pci unused=virtio-pci
 ```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Install DPDK.</strong> The library and poll-mode drivers (PMDs) for your NIC.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Reserve huge pages.</strong> 2MB pages instead of the default 4KB &mdash; fewer, bigger pages means far fewer TLB misses walking packet buffers.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Load <code>vfio-pci</code> and bind the NIC to it.</strong> This is the point of no return for the kernel &mdash; once bound, the kernel's network stack can no longer see or use this NIC at all.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Verify the bind.</strong> <code>dpdk-devbind --status</code> should now show the NIC's driver as <code>vfio-pci</code> instead of its original kernel driver.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ### DPDK Application Skeleton (C)
 
@@ -410,6 +565,12 @@ dpdk-app -l 0,1,2,3 \
 
 EFA uses RDMA (Remote Direct Memory Access) — data is written directly from one machine's memory into another's NIC buffer, bypassing both kernels. Latency: ~2–4μs between instances in the same placement group.
 
+<div class="quiz-card">
+  <p class="quiz-q">RDMA (via EFA) writes data straight from one machine's memory into another machine's NIC buffer. Whose kernel is involved in that transfer?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Neither. RDMA bypasses both the sender's <em>and</em> the receiver's kernel entirely &mdash; not just the local kernel bypass DPDK gives you on one box. That's why inter-instance latency (2&ndash;4μs) can rival a well-tuned local DPDK path, even though the data is crossing the wire to a different machine.</div>
+</div>
+
 ---
 
 ## Latency Budget — What Each Layer Costs
@@ -426,6 +587,12 @@ DPDK (kernel bypass)       0.1–2μs/packet      ✓
 RDMA/EFA                   2–4μs inter-host    ✓
 Shared memory (same host)  0.05–0.1μs          ✓ fastest
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">Direct Connect shows a higher number (0.5–2ms) than VPC software routing (10–100μs) in this table, yet DX gets a ✓ and VPC routing only "borderline." What does the ✓ actually track — the raw number, or something else?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Something else: whether the public internet's failure modes (jitter, congestion, shared infrastructure) are eliminated, not just the raw microsecond count. VPC software routing is only one component of a path that can still depend on the internet/ISP hops that cause those problems. Direct Connect replaces the internet entirely with dedicated fiber, so its latency is higher in absolute terms but deterministic &mdash; no jitter, no congestion, no shared path.</div>
+</div>
 
 ---
 
