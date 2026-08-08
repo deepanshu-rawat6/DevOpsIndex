@@ -2,6 +2,13 @@
 
 Extension points, the Descriptor pattern, Stapler data-binding, credential handling, background tasks, security review process, testing, and publishing to the Update Center.
 
+Most sections below end with a **❓ knowledge check** — track how many you've cleared as you go:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## Extension Point Model
@@ -31,6 +38,37 @@ ExtensionList.lookup(Builder.class)
 or Jenkins.get().getExtensionList(...)"]:::blue
 ```
 
+Same flow, one step at a time:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Jenkins startup.</strong> The controller process boots and the <code>PluginManager</code> starts loading installed plugins.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Plugin load.</strong> Each <code>.hpi</code>/<code>.jpi</code> archive is extracted and its plugin JAR is put on the classpath.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Index read.</strong> Jenkins reads the pre-built <code>META-INF/annotations/</code> index of <code>@Extension</code> classes &mdash; generated at compile time by the annotation processor, not discovered by scanning the classpath at runtime.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Instantiation.</strong> <code>ExtensionFinder</code> instantiates each indexed class via the Guice/Jenkins injector.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Registration.</strong> Each instance is registered into the <code>ExtensionList&lt;T&gt;</code> matching its base type (<code>Builder</code>, <code>Publisher</code>, etc.).
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Lookup at runtime.</strong> Application code calls <code>ExtensionList.lookup(Builder.class)</code> or <code>Jenkins.get().getExtensionList(...)</code> to retrieve the registered instances &mdash; no further scanning happens.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 **Key mechanic:** `@Extension` triggers an annotation processor (`hpi:hpi` / `maven-hpi-plugin`) at build time that writes an index file into `META-INF/annotations/org.jenkinsci.Symbol` and related indices — Jenkins doesn't do classpath reflection scanning at runtime for every class, it reads these pre-built indices. This is why a clean rebuild is sometimes required after adding a new `@Extension` class if your IDE's incremental compiler misses the annotation processing step.
 
 ```java
@@ -49,6 +87,12 @@ ExtensionList<Builder> allBuilders = Jenkins.get().getExtensionList(Builder.clas
 // Get a specific singleton extension (e.g. a global config extension)
 MyGlobalConfig config = ExtensionList.lookupSingleton(MyGlobalConfig.class);
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">You add a new <code>@Extension</code> class but Jenkins doesn't pick it up until you force a clean rebuild. Why?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Jenkins doesn't scan the classpath for <code>@Extension</code> classes at runtime &mdash; it reads a pre-built index in <code>META-INF/annotations/</code> that an annotation processor writes at compile time. If an IDE's incremental compiler skips re-running that annotation processor, the index is stale and the new extension is invisible until a full rebuild regenerates it.</div>
+</div>
 
 ---
 
@@ -74,6 +118,12 @@ public class MyBuilder extends Builder implements SimpleBuildStep {
     }
 }
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A new plugin step logically belongs in the post-build phase. Should you extend <code>Publisher</code> directly, or implement <code>SimpleBuildStep</code>?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>SimpleBuildStep</code>, regardless of which phase the step conceptually belongs to. It works uniformly in both freestyle and Pipeline (<code>steps { myStep() }</code>) from day one, with no <code>AbstractBuild</code> coupling. Extend <code>Builder</code>/<code>Publisher</code> directly only if you need freestyle-specific APIs that <code>SimpleBuildStep</code> doesn't expose.</div>
+</div>
 
 ---
 
@@ -167,6 +217,12 @@ public class DeployBuilder extends Builder implements SimpleBuildStep {
 
 **`doFillXItems` / `doCheckX` naming convention is load-bearing:** Stapler maps `doFillEnvironmentItems` to the field named `environment` in the corresponding Jelly `<select>` block, and `doCheckEnvironment` to live-validate the `environment` field. Get the field name wrong and the binding silently does nothing.
 
+<div class="quiz-card">
+  <p class="quiz-q">You rename a form field from <code>environment</code> to <code>targetEnv</code> in <code>config.jelly</code> but forget to rename <code>doFillEnvironmentItems</code>/<code>doCheckEnvironment</code> to match. What happens?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Nothing visible fails loudly &mdash; the binding just silently does nothing. Stapler matches <code>doFillXItems</code>/<code>doCheckX</code> to a field by name convention alone, so a mismatch means the dropdown never populates and the field never gets live-validated, with no error to point you at the cause.</div>
+</div>
+
 ---
 
 ## Stapler Data-Binding
@@ -190,6 +246,37 @@ sequenceDiagram
     Descriptor-->>Stapler: instance returned
     Stapler-->>Jenkins core: persisted into job config.xml
 ```
+
+Walk the same round-trip one hop at a time:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Form render.</strong> <code>config.jelly</code> renders an <code>&lt;f:entry&gt;</code> for each field, pre-filled from the existing model instance's values.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Submit.</strong> The browser POSTs the form data back to Jenkins on save.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. newInstance().</strong> Stapler calls the Descriptor's <code>newInstance(StaplerRequest, JSONObject formData)</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Construct.</strong> The Descriptor calls <code>new DeployBuilder(formData.getString("environment"))</code> &mdash; the <code>@DataBoundConstructor</code> &mdash; to build the required fields.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Set optional fields.</strong> Stapler calls each <code>@DataBoundSetter</code>, but only for fields actually present in <code>formData</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Persist.</strong> The fully constructed instance is returned to Stapler and persisted into the job's <code>config.xml</code>.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 - **`@DataBoundConstructor`** marks the constructor Stapler uses to build the object from form data. Required fields belong here — they become immutable (no setter needed).
 - **`@DataBoundSetter`** marks optional field setters. Stapler only calls them if the corresponding form field was present/non-empty — this is how truly optional config avoids forcing a giant constructor with nulls for everything.
@@ -217,6 +304,12 @@ sequenceDiagram
 ```
 
 `escape-by-default='true'` matters — Jelly does NOT auto-escape output by default in older syntax forms; explicit escaping avoids XSS (see Security Review section).
+
+<div class="quiz-card">
+  <p class="quiz-q">A field is optional and has a <code>@DataBoundSetter</code>. The submitted form leaves that field blank. Does Stapler call the setter with an empty value?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Stapler only calls a <code>@DataBoundSetter</code> if the corresponding form field was present/non-empty in the submitted data. This is exactly what lets optional config stay optional instead of forcing a constructor with nulls for every field that might not be set.</div>
+</div>
 
 ---
 
@@ -278,6 +371,12 @@ String password = creds.getPassword().getPlainText(); // Secret — only call ge
 - Never pass credentials as CLI arguments visible in `ps aux` on shared agents — prefer environment variables scoped to the subprocess, or files with restrictive permissions cleaned up after use.
 - `withCredentials` in Pipeline (`credentials-binding-plugin`) is the sanctioned pattern for this exact reason — it binds env vars and registers them with the masking filter automatically.
 
+<div class="quiz-card">
+  <p class="quiz-q">Your plugin base64-encodes a secret before writing a debug line to the build log. Does Jenkins' credential masking still catch it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Credential masking only recognizes the <em>exact byte sequence</em> of the secret value. Transforming it first &mdash; base64-encoding, concatenating into a URL, hashing it wrong &mdash; produces a different byte sequence that the masking filter never matches, so the secret leaks into the log in plain sight.</div>
+</div>
+
 ---
 
 ## AsyncPeriodicWork for Background Tasks
@@ -325,6 +424,12 @@ protected void execute(TaskListener listener) {
 
 This cron-based self-gating pattern (short fixed tick, gate the actual work by wall-clock or a stored "last run" timestamp) is standard across Jenkins core's own `AsyncPeriodicWork` subclasses (e.g. fingerprint cleanup) because the API itself offers no native cron support.
 
+<div class="quiz-card">
+  <p class="quiz-q">You set <code>getRecurrencePeriod()</code> to 1 hour, but the previous run is still executing when the hour is up. Does Jenkins queue a second run to fire the moment the first one finishes?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. <code>AsyncPeriodicWork</code> has built-in overlap protection — it won't start a new run while the previous one is still executing. The recurrence period is a <em>minimum</em> interval, not a guarantee: an overdue tick is skipped or delayed, never queued up to fire immediately after.</div>
+</div>
+
 ---
 
 ## Jenkins OSS Plugin Security Review Process
@@ -369,9 +474,32 @@ old XStream configs without a type whitelist"]:::red
 - Confirm every custom `doX()` HTTP endpoint that mutates state is `@RequirePOST` and checks the caller has an appropriate `Permission` (`Item.CONFIGURE`, `Jenkins.ADMINISTER`, etc.) — don't rely on UI hiding alone.
 - Search for any `ObjectInputStream`/raw Java deserialization of external input.
 
+<div class="quiz-card">
+  <p class="quiz-q">A <code>doCheckUrl</code> form-validation method makes an outbound HTTP request to the URL the user just typed, so it can confirm the URL is reachable. Why does this show up in security review findings even though it's "just validation"?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It's a classic SSRF vector. Form-validation methods run frequently and unauthenticated-adjacent, as the user types — an attacker can use the controller itself as a request proxy against internal-only URLs (cloud metadata endpoints, internal services) with no allowlist stopping it. "It's only validation" doesn't change that the controller is the one making the outbound request.</div>
+</div>
+
 ---
 
 ## Testing: JenkinsRule and JenkinsPipelineUnit
+
+Two different tools for two different layers — flip between them before you pick one:
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="jenkinsrule" class="active">JenkinsRule</button>
+    <button data-tab="pipelineunit">JenkinsPipelineUnit</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="jenkinsrule">
+      <strong>Full in-memory Jenkins controller, spun up per test class.</strong> Slow relative to a pure unit test, but it's the only way to catch real integration issues &mdash; Descriptor registration, Stapler form round-tripping via <code>configRoundtrip</code>, and actual <code>perform()</code> execution against a live core. Use it to test the Java <code>Builder</code>/<code>Publisher</code> implementation itself.
+    </div>
+    <div class="tab-panel" data-tab-panel="pipelineunit">
+      <strong>Mocks the Jenkins Groovy CPS runtime &mdash; no controller involved at all.</strong> Fast feedback, but it only exercises Pipeline/Groovy-level logic: Shared Library <code>vars/*.groovy</code> steps and <code>Jenkinsfile</code> behavior, never the underlying Java extension.
+    </div>
+  </div>
+</div>
 
 ### JenkinsRule (JUnit, full in-memory Jenkins instance)
 
@@ -436,6 +564,12 @@ class DeployAppStepTest extends BasePipelineTest {
 
 **When to use which:** `JenkinsRule` for testing the actual Java `Builder`/`Publisher` implementation, Descriptor form round-tripping, and real `perform()` execution against a live (in-memory) controller. `JenkinsPipelineUnit` for testing Groovy Pipeline scripts and Shared Library steps in isolation, fast, without spinning up a controller at all — it mocks the Jenkins Groovy CPS runtime.
 
+<div class="quiz-card">
+  <p class="quiz-q">You need to verify that a <code>@DataBoundConstructor</code> mismatch doesn't silently break config round-tripping for your <code>Builder</code>. Which test tool actually catches that, and which one can't?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>JenkinsRule</code>'s <code>configRoundtrip()</code> catches it &mdash; it spins up a real (if lightweight) in-memory controller and exercises the actual Stapler binding path. <code>JenkinsPipelineUnit</code> can't: it mocks the Groovy CPS runtime for Pipeline scripts and never touches the Java extension's Descriptor or Stapler binding at all.</div>
+</div>
+
 ---
 
 ## Publishing to the Jenkins Update Center
@@ -460,6 +594,37 @@ Jenkins Artifactory repo"]:::green
 regenerated (periodic job)
 plugin now installable"]:::green
 ```
+
+Same pipeline, one stage at a time:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Hosting request.</strong> One-time request via Jenkins Artifactory (JIRA/GitHub-based) to get your plugin repo hosted.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. CI wiring.</strong> The plugin repo is wired into Jenkins Infra CI (<code>ci.jenkins.io</code>).
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Merge &amp; build.</strong> Changes merged to <code>main</code>/<code>master</code> trigger CI to build and run tests.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Release trigger.</strong> A tag or manual trigger runs <code>mvn release:prepare release:perform</code>, or the release-drafter GitHub Action bumps the version and pushes the artifact.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Artifactory push.</strong> The released artifact lands in the Jenkins Artifactory Maven repo.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Update Center refresh.</strong> The Update Center metadata generator (a periodic job) picks it up, and the plugin becomes installable from Manage Jenkins → Plugins.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 **Release process (typical modern flow via GitHub Actions):**
 1. Merge changes to `main`/`master` — CI (`ci.jenkins.io` or GitHub Actions with the `jenkins-infra` release action) builds and runs tests.
@@ -497,6 +662,12 @@ plugin now installable"]:::green
 - Changing a `@DataBoundConstructor` signature breaks deserialization of existing `config.xml` files for jobs already using the old shape — add new fields via `@DataBoundSetter` instead of changing the constructor, and implement `readResolve()` for migrating old serialized state when a breaking model change is unavoidable.
 - Removing a `@Symbol`-exposed Pipeline step breaks existing Jenkinsfiles across every consuming org — deprecate first (mark `@Deprecated`, log a warning), remove only in a major version bump with a clear migration note.
 - Run [Plugin Compatibility Tester (PCT)](https://github.com/jenkinsci/plugin-compat-tester) or the incrementals/BOM compatibility check before releasing a core-baseline bump, if your plugin has significant downstream dependents.
+
+<div class="quiz-card">
+  <p class="quiz-q">You need to add a required-sounding new option to an existing <code>@DataBoundConstructor</code>. Should you change the constructor's signature directly?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Changing a <code>@DataBoundConstructor</code> signature breaks deserialization of every existing job's <code>config.xml</code> already using the old shape. Add new fields via <code>@DataBoundSetter</code> instead, and implement <code>readResolve()</code> to migrate old serialized state if a breaking model change is truly unavoidable.</div>
+</div>
 
 ---
 
@@ -645,6 +816,12 @@ public class GreeterBuilderTest {
     }
 }
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">In <code>GreeterBuilder</code>, <code>shout</code> defaults to <code>false</code> and is set via <code>@DataBoundSetter</code>, while <code>name</code> is a constructor parameter. What breaks if a saved job's config never had <code>shout</code> set, and Stapler tries to reconstruct it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Nothing breaks. Stapler only calls <code>setShout(...)</code> if <code>shout</code> was present in the submitted form data — if it's absent, the field simply keeps its declared default (<code>false</code>). That's the whole point of putting optional fields on <code>@DataBoundSetter</code>s instead of the constructor: old configs that predate the field still deserialize cleanly.</div>
+</div>
 
 ---
 

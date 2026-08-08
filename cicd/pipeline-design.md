@@ -1,5 +1,14 @@
 # CI/CD Pipeline Design — End to End
 
+A single Java service, built once by CI and rolled out to two independent Kubernetes clusters (staging and prod) either via GitOps or a push-based pipeline. Each major stage below carries a quiz — track how many you've cleared as you go:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
+---
+
 ## Full Java CI Pipeline
 
 ```mermaid
@@ -13,6 +22,43 @@ graph LR
     DOCKER --> SCAN["7. Security scan<br>trivy image / snyk<br>fail on CRITICAL CVEs"]
     SCAN --> PUSH_IMG["8. Push to registry<br>ECR / DockerHub<br>tag: sha + semver"]
 ```
+
+Same eight stages, one at a time:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Checkout code.</strong> <code>git clone --depth 1</code> — shallow clone, just enough history to build off the tip of the branch/PR.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Pull dependencies.</strong> <code>mvn dependency:resolve</code>, or served from a cached <code>~/.m2</code> — avoids re-downloading the world on every run.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Unit tests.</strong> <code>mvn test</code> — JUnit + Mockito, no external systems involved. Fast, and it runs first so a broken build fails cheaply.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Integration tests.</strong> <code>mvn verify</code> — spins up testcontainers for things like a real DB or Redis. Slower than unit tests, so it only runs once the cheap check has already passed.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Build artifact.</strong> <code>mvn package -DskipTests</code> → <code>target/app.jar</code>. Tests already ran in steps 3–4 — skipping them here avoids running the same suites twice.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Build Docker image.</strong> Multi-stage Dockerfile → <code>image:sha-abc1234</code>, tagged with the commit SHA so every image is traceable back to the exact code that built it.
+    </div>
+    <div class="stepper-panel">
+      <strong>7. Security scan.</strong> <code>trivy image</code> / <code>snyk</code>, failing the build on CRITICAL CVEs — deliberately placed after the image exists but before it's pushed anywhere.
+    </div>
+    <div class="stepper-panel">
+      <strong>8. Push to registry.</strong> ECR / DockerHub, tagged with both the SHA and a semver tag — only a scanned, passing image ever reaches the registry.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ### GitHub Actions: Full Java CI
 
@@ -82,9 +128,30 @@ jobs:
         exit-code: 1    # fail CI if CRITICAL found
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">The workflow runs <code>mvn package -DskipTests</code> to build the JAR, even though unit and integration tests already ran earlier in the same job. Why skip tests here instead of just letting them run again?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The suites already ran and passed in the earlier <code>mvn test</code> and <code>mvn verify</code> steps &mdash; re-running them during packaging would just repeat the same work and slow the pipeline down for no new information. <code>-DskipTests</code> keeps the packaging step to what it's actually for: compiling and assembling the JAR.</div>
+</div>
+
 ---
 
 ## CD: Deploy to Two Clusters
+
+Same artifact, two clusters (staging, prod) — the two options below differ in who actually talks to the clusters:
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="argocd" class="active state-ok">ArgoCD (GitOps)</button>
+    <button data-toggle-opt="gha" class="state-warn">GitHub Actions / Jenkins</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="argocd">
+    <strong>Pull-based.</strong> CI never touches the clusters directly &mdash; it only commits an image tag change to a manifests repo. ArgoCD, running in a management cluster, notices the git change and runs the actual <code>sync</code> against each cluster. Git is the source of truth: what's live is whatever the manifests repo says it should be.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="gha">
+    <strong>Push-based.</strong> The CI/CD pipeline itself holds credentials for both clusters and runs <code>kubectl</code>/<code>helm</code> directly against them. Simpler to reason about &mdash; there's no separate GitOps controller in the loop &mdash; but the pipeline now needs direct network and credential access to production.
+  </div>
+</div>
 
 ### Option A: ArgoCD (Recommended — GitOps)
 
@@ -108,6 +175,37 @@ sequenceDiagram
     ARGO->>C2: sync Application prod --> deploy new image
     C2-->>ARGO: Healthy
 ```
+
+Step through the same rollout one stage at a time:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. CI updates the staging manifest.</strong> The CI pipeline's only cluster-facing action is a git commit: <code>staging/values.yaml</code> gets <code>image.tag=sha-abc1234</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. ArgoCD detects the change.</strong> Running in the management cluster, it notices the manifests repo moved and diffs it against what's actually deployed.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Sync to Cluster 1 (staging).</strong> ArgoCD applies the new manifests to the staging cluster. Once pods roll out and pass their checks, the Application reports Healthy.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Validation gate.</strong> A manual approval or an automated test suite confirms staging looks right before anything touches prod.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. CI updates the prod manifest.</strong> Same commit pattern, this time to <code>prod/values.yaml</code> — same image tag as staging, so prod runs exactly what staging just validated.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Sync to Cluster 2 (prod).</strong> ArgoCD detects the second change and syncs the prod Application. Healthy once rolled out — both clusters now run the same image, reached independently and in sequence.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 **Where does ArgoCD live?** One ArgoCD instance in a management cluster. It registers both staging and prod clusters via `argocd cluster add`. Both clusters' kubeconfigs are stored as Secrets in the ArgoCD namespace.
 
@@ -137,6 +235,12 @@ spec:
       destination:
         server: "{{url}}"
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">In the ArgoCD flow, what actually triggers a deployment change on the staging cluster — the CI pipeline finishing, or something else?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Something else: ArgoCD detecting the git change in the manifests repo. CI's only job is to update <code>values.yaml</code> and commit &mdash; it never talks to the cluster directly. The actual <code>sync</code> against the cluster is ArgoCD noticing the drift between git and what's running, which is the whole point of a pull-based GitOps model.</div>
+</div>
 
 ### Option B: GitHub Actions / Jenkins — Pushing via kubectl/helm
 
@@ -192,6 +296,12 @@ jobs:
           --wait --timeout 5m \
           --atomic
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">The <code>deploy-prod</code> job declares <code>needs: deploy-staging</code> and <code>environment: production</code>. What actually stops it from deploying if staging fails or nobody's approved it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>needs: deploy-staging</code> stops the job from starting at all unless the staging job succeeded. <code>environment: production</code> layers a separate gate on top of that &mdash; a required manual approval in GitHub &mdash; so even a successful staging deploy doesn't automatically greenlight prod.</div>
+</div>
 
 ---
 

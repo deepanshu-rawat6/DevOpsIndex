@@ -1,5 +1,12 @@
 # Jenkins
 
+Each major section below ends with a quick knowledge check — try it before scrolling past.
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## Architecture
@@ -31,6 +38,40 @@ graph TD
 - **Controller** — the Jenkins server: schedules jobs, stores state, serves UI. Never run builds on the controller itself.
 - **Agent** — worker nodes where builds actually run. Can be static (always-on EC2) or dynamic (K8s pod spawned per build, deleted when done).
 - **Executor** — a slot on an agent. One executor = one concurrent build on that agent.
+
+Same flow, walked through one step at a time instead of all at once:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Trigger.</strong> A poll-SCM check or an incoming webhook reaches the controller for a configured job.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Controller dispatches to an agent.</strong> The controller matches the job against an available agent (docker container, Kubernetes pod, or EC2 spot instance) and claims a free executor on it — it never runs the build itself.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Checkout.</strong> The agent checks out the source from git.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Run stages.</strong> The pipeline's stages execute on that agent, occupying its claimed executor slot for the duration.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Archive &amp; report.</strong> Artifacts are archived and results published back to the controller; the executor frees up for the next job.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Why does the controller hand jobs off to agents (docker, Kubernetes pod, EC2 spot) instead of running builds itself?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The controller's job is to schedule jobs, store config, and serve the UI — never to run builds. Actual build work always happens on an agent's executor, whichever kind of agent it is, so the controller stays free to keep orchestrating the rest of the cluster.</div>
+</div>
 
 ---
 
@@ -89,6 +130,37 @@ pipeline {
 }
 ```
 
+Execution order for the pipeline above, stepped through:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Build.</strong> Runs on the agent labeled <code>docker</code>. <code>sh 'docker build -t ${APP_NAME}:${BUILD_NUMBER} .'</code> builds the image.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Test.</strong> <code>go test ./...</code> runs. Its <code>post { always { ... } }</code> publishes test results whether the tests passed or failed.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Deploy — conditional.</strong> <code>when { expression { params.DRY_RUN == false } } </code> decides whether this stage runs at all. Set <code>DRY_RUN=true</code> and the stage is skipped outright, not failed.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Pipeline post block.</strong> Once every stage that was going to run has finished, <code>post { success / failure }</code> fires exactly one of the two and sends a Slack message either way.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A build is triggered with <code>DRY_RUN=true</code>. What happens to the "Deploy" stage?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It's skipped entirely — <code>when { expression { params.DRY_RUN == false } }</code> evaluates false, so Jenkins never enters the stage. A skipped stage isn't a failed one: if every stage that did run succeeded, the pipeline's <code>post { success }</code> block still fires.</div>
+</div>
+
 ---
 
 ## Dynamic Variables and Script Block
@@ -116,6 +188,12 @@ stage('Build Image') {
     }
 }
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q"><code>gitTag</code> is set with plain <code>def gitTag = sh(...)</code> inside the <code>script</code> block of the "Get Version" stage. Can the "Build Image" stage's steps use <code>gitTag</code> directly?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. A plain Groovy <code>def</code> variable is local to the <code>script</code> block that created it. Only what gets assigned to <code>env.*</code> — here <code>env.APP_VERSION</code> and <code>env.DOCKER_TAG</code> — is available to later stages.</div>
+</div>
 
 ---
 
@@ -152,6 +230,12 @@ stage('Deploy to AWS') {
     }
 }
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A step accidentally runs <code>echo $AWS_SECRET_ACCESS_KEY</code> after it was injected via <code>withCredentials</code>. What shows up in the console log?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Not the real secret — Jenkins auto-masks any injected credential value wherever it appears in the log, printing <code>****</code> instead. That masking is exactly why credentials go through <code>withCredentials</code> instead of being hardcoded in the Jenkinsfile.</div>
+</div>
 
 ---
 
@@ -202,6 +286,12 @@ pipeline {
     }
 }
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">You add a new file <code>vars/runGoTests.groovy</code> with a <code>def call() { ... }</code> inside. How do you invoke it from any Jenkinsfile that imports the library?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Just call it like a built-in step — <code>runGoTests()</code>. Every file under <code>vars/</code> becomes a global pipeline function named after the file; its <code>call()</code> method is what runs when that function name is used, the same way <code>deployToECS(...)</code> works for <code>vars/deployToECS.groovy</code>.</div>
+</div>
 
 ---
 

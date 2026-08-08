@@ -1,5 +1,10 @@
 # Docker Internals — Layers, Isolation, and containerd
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ## Image Layers and Copy-on-Write
 
 Every Dockerfile instruction creates a layer. Layers are **immutable** and **shared** across images.
@@ -15,6 +20,31 @@ graph BT
 ```
 
 **Copy-on-Write (CoW):** When a container modifies a file from a lower read-only layer, the storage driver copies the file to the writable layer first, then modifies it. Lower layers are never changed — only the copy in the writable layer changes.
+
+Step through what actually happens the moment a write hits a file that only exists in a lower layer:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Read, before any write.</strong> The container reads <code>/app/config.py</code>. It doesn't exist in Layer 4 (the writable layer), so the storage driver looks down the stack and resolves it from Layer 2.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Write arrives.</strong> The container writes to that same file. The driver checks the writable layer first and finds no copy there yet &mdash; only the lower, read-only Layer 2 has it.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Copy-up.</strong> The <em>entire file</em> (not just the changed bytes) is copied from Layer 2 into Layer 4, the writable layer.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Modify the copy.</strong> The write is applied to the new copy now sitting in Layer 4. Layer 2's original bytes are never touched &mdash; every other container built from the same image still sees the unmodified file.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ```bash
 # See layers of an image
@@ -32,19 +62,35 @@ docker info | grep Storage
 
 ### Why Layer Order Matters
 
-```dockerfile
-# BAD: source code copied before dependencies
-# → Any code change invalidates the pip install layer → full reinstall
-FROM python:3.11-slim
-COPY . .                          # changes every commit
-RUN pip install -r requirements.txt  # reinstalls every commit
+Caching works layer-by-layer from the top down: the moment one instruction's inputs change, that layer and every layer after it get rebuilt. Same two instructions, two different orders, very different rebuild cost:
 
-# GOOD: stable layers first
-FROM python:3.11-slim
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="bad-order" class="active">Bad ordering</button>
+    <button data-tab="good-order">Good ordering</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="bad-order">
+      <pre><code>FROM python:3.11-slim
+COPY . .                          # changes every commit
+RUN pip install -r requirements.txt  # reinstalls every commit</code></pre>
+      Source code copied before dependencies. Any code change &mdash; even a comment tweak &mdash; invalidates the <code>COPY . .</code> layer, which invalidates every layer after it, so <code>pip install</code> reruns on every single commit.
+    </div>
+    <div class="tab-panel" data-tab-panel="good-order">
+      <pre><code>FROM python:3.11-slim
 COPY requirements.txt .           # only changes when deps change
 RUN pip install -r requirements.txt  # cached unless requirements.txt changes
-COPY . .                          # code changes don't bust the dep layer
-```
+COPY . .                          # code changes don't bust the dep layer</code></pre>
+      Stable layers first. <code>requirements.txt</code> rarely changes, so the <code>pip install</code> layer stays cached across most commits &mdash; only a change to <code>requirements.txt</code> itself busts it. Code changes only invalidate the final, cheap <code>COPY . .</code> layer.
+    </div>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A container modifies a file that originally came from Layer 1 of its image. After the write, does Layer 1's copy of that file change?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. The storage driver copies the file into the container's writable layer first (copy-on-write), then applies the change there. Layer 1 itself is never touched &mdash; every other image or container sharing that base layer still sees the original, unmodified file.</div>
+</div>
 
 ---
 
@@ -86,6 +132,12 @@ docker run --rm alpine ps aux
 ps aux | grep alpine   # different, higher PID
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">Does a Docker container run under its own separate Linux kernel, isolated from the host's?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. There's no hypervisor and no separate kernel &mdash; a container is just a Linux process with restricted visibility. Namespaces make it <em>look</em> like it has its own PID 1, network stack, mounts, and hostname, but every container on a host shares that one host kernel underneath.</div>
+</div>
+
 ---
 
 ## Resource Limits — Linux cgroups
@@ -113,6 +165,12 @@ docker inspect <container> --format='{{.HostConfig.Memory}}'
 cat /sys/fs/cgroup/cpu/docker/CONTAINER_ID/cpu.stat
 # nr_throttled: 45   ← this many scheduling periods were throttled
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q"><code>docker run --cpus 0.5</code> sets <code>cpu.cfs_quota_us=50000</code> against <code>cpu.cfs_period_us=100000</code>. What does that ratio actually enforce?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>50% of <em>one</em> CPU &mdash; the kernel scheduler gives this container 50,000 out of every 100,000 microseconds of a single core. It's not "50% of all cores." Periods where the container tries to use more than its quota show up as <code>nr_throttled</code> in the cgroup CPU stats.</div>
+</div>
 
 ---
 

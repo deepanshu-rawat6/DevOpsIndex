@@ -1,5 +1,14 @@
 # Docker Networking
 
+Docker supports several network drivers, each changing how a container's traffic reaches the wire — from a fully isolated virtual bridge to sharing the host's real network stack. This guide covers how each one works under the hood, when to reach for it, and where they actually differ once you get past the one-line description.
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
+---
+
 ## 1. Network Drivers Overview
 
 ```mermaid
@@ -28,6 +37,41 @@ graph TD
 | overlay | yes | yes (Swarm) | yes | moderate |
 | macvlan | L2 | no | yes (L2) | best |
 | none | full | no | no | — |
+
+Same five drivers, this time as a quick side-by-side of the core mechanism and when to reach for each — the detailed walkthroughs and packet-level diagrams for each one follow in the sections below.
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="ov-bridge" class="active">bridge</button>
+    <button data-tab="ov-host">host</button>
+    <button data-tab="ov-overlay">overlay</button>
+    <button data-tab="ov-macvlan">macvlan</button>
+    <button data-tab="ov-none">none</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="ov-bridge">
+      <strong>Own namespace + virtual NIC.</strong> A veth pair connects the container's <code>eth0</code> to the host's <code>docker0</code> bridge; outbound traffic is NATed (MASQUERADE) through the host's real interface. Use for: the default choice for single-host container-to-container communication, dev/test isolation.
+    </div>
+    <div class="tab-panel" data-tab-panel="ov-host">
+      <strong>No namespace of its own.</strong> The container shares the host's network namespace directly &mdash; no veth, no NAT, no port mapping. Whatever port it binds is a real host port. Use for: max throughput / lowest latency, or when a container needs raw socket access or must reach <code>localhost</code> services on the host.
+    </div>
+    <div class="tab-panel" data-tab-panel="ov-overlay">
+      <strong>Own namespace + VXLAN tunnel.</strong> Each node gets a <code>br0</code> + <code>vxlan0</code>; container packets are encapsulated in UDP (port 4789) and carried to other nodes, with Swarm's control plane keeping service DNS and virtual IPs in sync. Use for: multi-host container communication under Swarm.
+    </div>
+    <div class="tab-panel" data-tab-panel="ov-macvlan">
+      <strong>Sub-interface with a real MAC.</strong> The container gets its own MAC address on a sub-interface of the host's physical NIC &mdash; it looks like an independent device on the LAN, not something behind the host. Use for: legacy apps needing L2 access (DHCP, multicast, ARP), or a specific required MAC.
+    </div>
+    <div class="tab-panel" data-tab-panel="ov-none">
+      <strong>Loopback only.</strong> No veth, no bridge, no host-stack sharing &mdash; nothing external at all. Use for: fully isolated batch/offline processing, or as a security sandbox where any networking is a liability.
+    </div>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A custom bridge network gives containers isolation and DNS by name on one host. Does that mean two bridge-networked containers on two <em>different</em> hosts can reach each other by name too?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Bridge is single-host only &mdash; the table's "Multi-host" column reads "no" for bridge. Reaching containers across hosts by name needs an overlay network (Swarm), which tunnels traffic between nodes over VXLAN and resolves names to virtual IPs through the Swarm control plane.</div>
+</div>
 
 ---
 
@@ -73,6 +117,12 @@ Incoming packet to host:8080 → kernel rewrites dest to container:80 → packet
 
 A **docker-proxy** process also listens on 8080 to handle loopback traffic (packets originating from the host itself that bypass iptables DNAT).
 
+<div class="quiz-card">
+  <p class="quiz-q">A container publishes port 8080:80. Traffic from another machine on the LAN gets NATed to the container fine via the iptables DNAT rule. Does that same rule handle a <code>curl localhost:8080</code> run on the Docker host itself?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. iptables DNAT only fires on packets that actually traverse PREROUTING &mdash; traffic that originates on the host itself (loopback) bypasses that chain entirely. Docker starts a separate <strong>docker-proxy</strong> userspace process listening on the same port specifically to catch and forward that loopback case.</div>
+</div>
+
 ---
 
 ## 3. Custom Bridge vs Default Bridge
@@ -91,6 +141,12 @@ docker run --network my-net --name db   postgres
 | `--link` needed for names | yes (deprecated) | no |
 
 Custom bridges use Docker's **embedded DNS** (127.0.0.11) — containers resolve each other by name automatically. Default bridge only supports IP or `--link`.
+
+<div class="quiz-card">
+  <p class="quiz-q">Two containers are both on the default <code>docker0</code> bridge network, no <code>--link</code> used. Can they reach each other by container name out of the box?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. The default bridge has no embedded DNS &mdash; only IP addresses work, or the deprecated <code>--link</code> flag. A custom bridge (<code>docker network create my-net</code>) registers Docker's embedded DNS (127.0.0.11) automatically, which is what makes <code>ping db</code>-style name resolution work.</div>
+</div>
 
 ---
 
@@ -121,6 +177,12 @@ docker run --network host nginx
 
 **Risk:** port conflicts — container ports are host ports.
 
+<div class="quiz-card">
+  <p class="quiz-q">You start two containers with <code>--network host</code>, and both try to bind port 80. What happens?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The second one fails to bind. With host networking there's no veth, no NAT, and no per-container port space &mdash; both containers are binding directly to the one real host:80, exactly like two ordinary processes on the same machine fighting over the same port.</div>
+</div>
+
 ---
 
 ## 5. Overlay Network (Swarm / Multi-Host)
@@ -144,6 +206,34 @@ flowchart LR
 1. Docker creates a `br0` bridge + `vxlan0` interface on each node.
 2. Packets from container-a are encapsulated in UDP (VXLAN, port 4789) with outer IP = Node1's IP.
 3. Node2 decapsulates and delivers to container-b via its local bridge.
+
+Step through what one packet actually goes through, hop by hop:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Setup.</strong> Each node in the Swarm already has a <code>br0</code> bridge and a <code>vxlan0</code> interface created by the overlay driver &mdash; this happens once, not per-packet.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Container-a sends.</strong> The packet leaves container-a's veth into Node1's <code>br0</code>, addressed to container-b's overlay IP (<code>10.0.0.3</code>).
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Encapsulation.</strong> <code>vxlan0</code> wraps the original packet inside a new UDP packet (VXLAN, port 4789), with the outer IP set to Node1's real host IP.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Crosses the physical network.</strong> To the switch/router in between, this just looks like ordinary UDP traffic between Node1 and Node2 &mdash; it has no visibility into the container IPs riding inside.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Decapsulation &amp; delivery.</strong> Node2's <code>vxlan0</code> strips the outer UDP header and hands the original packet to its local bridge, which delivers it to container-b.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ### Swarm Service Discovery
 

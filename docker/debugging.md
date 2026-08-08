@@ -1,5 +1,12 @@
 # Docker Debugging Scenarios
 
+Ten failure patterns you'll actually hit running Docker in production — the symptom, a live diagnostic flowchart, the commands to confirm the cause, and how to stop it recurring. Track how many knowledge checks you clear as you go:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## 1. Container Exits Immediately
@@ -21,6 +28,27 @@ flowchart TD
     I -->|No| J[Override entrypoint:<br/>docker run -it --entrypoint sh]
     I -->|Yes| K[Fix app error]
 ```
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="code0" class="active">Exit 0</button>
+    <button data-toggle-opt="code1" class="state-warn">Exit 1</button>
+    <button data-toggle-opt="code137" class="state-bad">Exit 137</button>
+    <button data-toggle-opt="code139" class="state-bad">Exit 139</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="code0">
+    <strong>CMD completed normally.</strong> Not necessarily a good sign for a long-running service &mdash; it usually means the foreground process finished and returned on its own (a script that ran to completion, a missing daemon flag), not that the app came up and stayed up serving traffic.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="code1">
+    <strong>App error.</strong> The process ran and exited on its own with a non-zero status. <code>docker logs</code> is where the actual error shows up &mdash; fix the app-level problem it reveals.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="code137">
+    <strong>OOM / SIGKILL.</strong> 128 + signal 9. The kernel or Docker killed the process outright &mdash; confirm with the container's <code>OOMKilled</code> flag before assuming memory; see Scenario 2.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="code139">
+    <strong>Segfault.</strong> 128 + signal 11. The process crashed at a low level &mdash; usually a bug in the binary or a native dependency, not a Docker problem. <code>docker logs</code> and a core dump (if enabled) are the next stop.
+  </div>
+</div>
 
 ```bash
 # Check exit code and error

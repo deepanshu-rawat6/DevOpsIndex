@@ -2,6 +2,13 @@
 
 Argo Rollouts extends Kubernetes Deployments with canary and blue-green strategies, automated analysis, and traffic management integration.
 
+Each major section below ends with a quick knowledge check — try to answer before revealing:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## Why Not Plain Kubernetes Rolling Updates?
@@ -14,6 +21,12 @@ Argo Rollouts extends Kubernetes Deployments with canary and blue-green strategi
 | Blue-green | No | Yes — full traffic switch |
 | Rollback trigger | Manual only | Automatic on metric degradation |
 | Preview URL | No | Yes — separate Service for canary |
+
+<div class="quiz-card">
+  <p class="quiz-q">With a plain Kubernetes RollingUpdate, the new version starts throwing errors right after rollout. What triggers a rollback?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Nothing automatic — rollback is manual only with plain RollingUpdate. Argo Rollouts is what adds automatic rollback, driven by an AnalysisRun querying Prometheus/Datadog and pausing or aborting the rollout on metric degradation.</div>
+</div>
 
 ---
 
@@ -31,6 +44,12 @@ graph TD
 
     CTRL["Argo Rollouts Controller<br>(watches Rollout CRDs)"] --> ROLLOUT
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">Do you keep your existing Deployment object and add a Rollout alongside it, or does the Rollout replace the Deployment entirely?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It replaces the Deployment entirely. The Rollout CRD is a drop-in swap for a Deployment, not an addition — same pod template underneath, but the Rollout (not a Deployment) now owns the stable and canary ReplicaSets.</div>
+</div>
 
 ---
 
@@ -87,6 +106,40 @@ spec:
       - pause: {duration: 5m}
       - setWeight: 100        # full rollout
 ```
+
+That `steps` list is a timeline, not a one-shot config — walk through what the rollout is actually doing at each stage:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. setWeight: 5.</strong> 5% of traffic is routed to the canary Service, 95% stays on stable. Both ReplicaSets are running side by side.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. pause: duration 5m.</strong> Hold at 5% for 5 minutes. Nobody's watching a dashboard yet at this scale — this is just a small blast radius while early problems surface.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. setWeight: 20.</strong> Traffic to canary steps up to 20% now that the 5% window passed cleanly.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. pause: {}.</strong> An empty pause has no duration — it pauses <em>indefinitely</em>. The rollout sits here until a human runs <code>kubectl argo rollouts promote my-app</code>. This is the manual gate.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. setWeight: 50.</strong> Half of production traffic now hits the canary version.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. pause: duration 5m.</strong> One more timed hold at 50% before going all the way.
+    </div>
+    <div class="stepper-panel">
+      <strong>7. setWeight: 100.</strong> Canary is now the only version serving traffic. The old stable ReplicaSet scales down and the canary becomes the new stable.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ### With automated Prometheus analysis
 
@@ -176,6 +229,12 @@ spec:
               number: 8080
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">A canary step has <code>successCondition: result[0] >= 0.95</code> and <code>failureLimit: 3</code>. The success rate dips below 0.95 for 2 consecutive checks, then recovers. Does the rollout abort?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. <code>failureLimit: 3</code> counts <em>consecutive</em> failures — it takes 3 in a row before Argo Rollouts aborts (scales canary to 0, stable keeps serving 100%). A metric that dips for 2 checks and then recovers never hits that threshold, so the rollout just continues.</div>
+</div>
+
 ---
 
 ## Blue-Green Rollout
@@ -237,6 +296,40 @@ kubectl argo rollouts promote my-app-bg
 # Or via ArgoCD UI / CLI
 argocd app sync my-app   # if using ArgoCD to manage the Rollout
 ```
+
+The Before/After diagram above is really five distinct moments — step through the actual cutover:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Steady state.</strong> <code>activeService</code> routes 100% of production traffic to v1 pods. <code>previewService</code> points at v2 pods, but only internal/QA traffic reaches them — no production user has seen v2 yet.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Pre-promotion analysis.</strong> The <code>success-rate</code> AnalysisTemplate queries Prometheus against <code>my-app-preview</code> — validating v2 before any real traffic goes near it.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Manual gate.</strong> With <code>autoPromotionEnabled: false</code>, nothing switches until <code>kubectl argo rollouts promote my-app-bg</code> (or an ArgoCD sync) runs.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Cutover.</strong> <code>activeService</code> is repointed to the v2 pods. Production traffic goes from 0% to 100% on v2 in one shot — no gradual ramp like canary.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Scale-down delay.</strong> The old v1 pods aren't deleted immediately — <code>scaleDownDelaySeconds: 30</code> keeps them warm for 30s. A rollback in that window is just flipping <code>activeService</code> back; the v1 pods are still there to receive traffic.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Right after <code>kubectl argo rollouts promote</code> completes on a blue-green rollout with <code>scaleDownDelaySeconds: 30</code>, are the old v1 pods gone?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. The <code>activeService</code> switches to v2 immediately, but the v1 pods are kept running for 30 more seconds before being scaled down. That grace window is what makes a rollback "instant" — it's just flipping the Service back while the old pods are still warm, not waiting for new pods to start.</div>
+</div>
 
 ---
 
@@ -305,6 +398,12 @@ resource.customizations.health.argoproj.io_Rollout: |
 4. Analysis queries Prometheus automatically
 5. On success: full promotion. On failure: auto-rollback to previous revision in git.
 
+<div class="quiz-card">
+  <p class="quiz-q">In this GitOps flow, who decides whether to abort a failing canary — someone watching the ArgoCD UI, or something automatic?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It's automatic. The Argo Rollouts controller runs the analysis against Prometheus during the canary steps and, on failure, auto-rolls-back to the previous git revision without a human in the loop. ArgoCD's role here is just keeping the live <code>Rollout</code> resource synced with git — the progressive-delivery decision-making happens inside Argo Rollouts, not ArgoCD.</div>
+</div>
+
 ---
 
 ## Canary vs Blue-Green Decision
@@ -317,3 +416,9 @@ resource.customizations.health.argoproj.io_Rollout: |
 | Best for | Stateless services, high traffic | Services needing zero-downtime switch, stateful |
 | DB migrations | Risky — both versions run simultaneously | Safer — preview env for testing |
 | Real user validation | Yes — real traffic on canary | No — preview is internal only |
+
+<div class="quiz-card">
+  <p class="quiz-q">You're rolling out a change to a stateful service that also touches the database schema. Which strategy gives you an isolated environment to validate the new version against before real users see it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Blue-green — the preview Service is internal-only, so you can validate the new version (and any DB migration) before flipping production traffic to it. Canary sends real user traffic to the new version starting at its very first step, which is exactly what makes it riskier when both versions are touching the same database simultaneously.</div>
+</div>

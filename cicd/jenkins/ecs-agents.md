@@ -2,6 +2,13 @@
 
 A deep-dive into how Jenkins ECS agents work internally — the inbound agent protocol, ECS task provisioning, scaling mechanics, and the optimizations that reduced costs 60% and build times from 35 to 18 minutes.
 
+Most sections end with a knowledge check — try to answer before revealing. Track how many you've cleared as you go:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## The Problem: Monolithic Jenkins
@@ -34,6 +41,12 @@ graph TD
 ```
 
 **The shift:** Controller is now just a scheduler — lightweight, small instance. All build work happens on ephemeral ECS tasks that exist only for the duration of the job.
+
+<div class="quiz-card">
+  <p class="quiz-q">In the master-agent model, is the Jenkins controller still where builds actually execute?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. The controller drops to a t2.small (~$15/month) and only schedules work &mdash; it's the ECS tasks (Fargate or EC2) that run the actual build. Those tasks are ephemeral: they spin up per job and terminate when the job's done, so you stop paying for the "idle 70% of the time" problem the monolithic setup had.</div>
+</div>
 
 ---
 
@@ -78,6 +91,40 @@ sequenceDiagram
 
 **Why outbound connection matters for ECS:**
 The controller doesn't need to reach the agent's IP. The agent reaches out to the controller. This means agents can be in private subnets with no inbound rules from the controller — only the controller needs an inbound rule on port 50000 from the agent's security group.
+
+Same lifecycle, one step at a time:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Job queued, no agent.</strong> <code>NodeProvisioner</code> notices a queued job with nothing to run it and asks the ECS plugin for a new agent.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. RunTask called.</strong> The plugin calls <code>ecs:RunTask</code> with the task definition and any overrides. ECS returns a <code>taskArn</code> immediately &mdash; the task is <code>PENDING</code>, nothing is running yet.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Container starts, agent dials out.</strong> The container pulls its image from ECR and runs <code>/usr/local/bin/jenkins-agent</code>, which launches <code>agent.jar</code> and connects <strong>outbound</strong> to the controller's JNLP port, presenting its per-agent secret token.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Controller accepts, build runs.</strong> The controller marks the agent <code>ONLINE</code>, sends it the pipeline steps, and streams logs back while the task executes them.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Teardown.</strong> Once the controller sees the agent go idle, the plugin calls <code>ecs:StopTask</code>. ECS kills the container and per-second billing stops.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Does the Jenkins controller connect out to the ECS agent, or does the agent connect to the controller?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The agent connects to the controller &mdash; <code>agent.jar</code> inside the container makes an outbound connection to the controller's JNLP port (default 50000). The controller never SSHes or reaches into the agent's IP. That's why agents can sit in private subnets with no inbound rules of their own; only the controller needs an inbound rule open for traffic from the agent's security group.</div>
+</div>
 
 ---
 
@@ -128,6 +175,12 @@ graph TD
 - AWS manages the underlying EC2 host — you never see it, patch it, or worry about it
 - Billing: per-second from when task enters RUNNING state to when it stops
 - Cold start: image pull (mitigated by SOCI) + JVM startup = typically 30-90 seconds
+
+<div class="quiz-card">
+  <p class="quiz-q">Can a Fargate agent do Docker-in-Docker by mounting /var/run/docker.sock like an EC2 agent does?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Fargate doesn't support privileged mode, and mounting the Docker socket requires it. There's no underlying host to expose a socket from anyway &mdash; AWS manages it and you never see it. DinD is an EC2-launch-type-only capability here.</div>
+</div>
 
 ---
 
@@ -190,6 +243,12 @@ graph TD
 }
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">When there's no spare EC2 capacity in the cluster for a queued job, why does the cold start take so much longer than Fargate's?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It's a two-stage cold start: the ECS Capacity Provider has to signal the ASG to launch a brand-new EC2 Spot instance first (~2 minutes to boot), and only then does image pull + JVM startup happen on top of that. Fargate skips the boot stage entirely because AWS already manages the compute. A Golden AMI with pre-baked tools shrinks the second stage, but can't remove the EC2 boot time itself.</div>
+</div>
+
 ---
 
 ## Scaling: How 1 Job = 1 Agent Works
@@ -245,6 +304,37 @@ graph TD
 -Dhudson.slaves.NodeProvisioner.MARGIN0=0.85
 ```
 These JVM flags make the provisioner react faster to queued jobs instead of waiting for the standard smoothing interval.
+
+The diagram above packs all four moments into one picture — step through them instead:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. t=0.</strong> 10 jobs queue up simultaneously. 0 idle executors are available for any of them.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. t≈30s.</strong> <code>NodeProvisioner</code> fires, sees 10 queued jobs against 0 idle agents, and calls the ECS plugin's <code>RunTask</code> once <strong>per job</strong> &mdash; 10 separate API calls, no batching, no shared pool.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. t≈90s.</strong> All 10 Fargate tasks reach <code>RUNNING</code>. Each one connects its own agent and starts executing its own job independently.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Jobs finish.</strong> Each task's <code>StopTask</code> fires the moment <em>that</em> job is done &mdash; not when all 10 finish. Billing stops per task, per second, independently.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">10 jobs queue up at once on Fargate. Do they share a pool of pre-warmed agents, or does each one get its own?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Each gets its own. There's no shared pool &mdash; every queued job that needs an agent results in one independent <code>ecs:RunTask</code> call, so 10 queued jobs mean 10 RunTask calls and 10 separate Fargate tasks. On Fargate that scales effectively without limit since AWS allocates the compute; on EC2 it's bounded by how fast the ASG can scale out.</div>
+</div>
 
 ---
 
@@ -334,28 +424,49 @@ COPY --from=jnlp /usr/share/jenkins/slave.jar  /usr/share/jenkins/slave.jar
 ENTRYPOINT ["/usr/local/bin/jenkins-agent"]
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">To use a different container image for a Terraform job vs a Maven job, do you need a separate ECS Plugin Cloud configured for each?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. <code>inheritFrom</code> in the Jenkinsfile keeps the base cloud's CPU, memory, and network config, while <code>image</code> overrides just the container image for that one job. The task definition template is a base, not a hard requirement &mdash; any Jenkinsfile can point at a different ECR image on top of it.</div>
+</div>
+
 ---
 
 ## Agent Reuse (Avoid Cold Start on Every Build)
 
 By default, the ECS plugin creates a new task per build and terminates it when done. You can reuse a running agent within a time window.
 
-```groovy
-// Forces new ECS task every build (default)
-agent {
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="fresh" class="active">New task per build (default)</button>
+    <button data-tab="reuse">Reuse via label</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="fresh">
+      <pre><code>agent {
     ecs {
         inheritFrom 'fargate-cloud'
         image '...ecr.../agent-java:latest'
     }
-}
-
-// Reuses existing agent by label if still alive (idle timeout window)
-agent {
+}</code></pre>
+      Every build gets a brand-new ECS task and pays the full cold start &mdash; image pull, JVM startup, JNLP connect &mdash; even if the previous build's agent just terminated seconds ago.
+    </div>
+    <div class="tab-panel" data-tab-panel="reuse">
+      <pre><code>agent {
     label 'fargate-cloud'
-}
-```
+}</code></pre>
+      If an agent from a previous build is still alive under this label (within the task idle timeout), Jenkins assigns the next build to it directly &mdash; no <code>ecs:RunTask</code> call, no cold start at all.
+    </div>
+  </div>
+</div>
 
 With `label`, if an agent from a previous build is still alive (within the task idle timeout), Jenkins assigns the next build to it directly — no ECS RunTask call, no cold start. The task idle timeout in the ECS plugin config controls how long an idle agent stays alive waiting for the next job.
+
+<div class="quiz-card">
+  <p class="quiz-q">Switching a job's agent block from the ecs {} form to agent { label 'fargate-cloud' } &mdash; does that guarantee a fresh ECS task every time?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No, the opposite. <code>label</code> is what enables reuse: if an agent from a previous build under that label is still alive within the idle timeout, Jenkins hands the build straight to it &mdash; no RunTask call, no cold start. A fresh task only gets provisioned if nothing reusable is currently alive.</div>
+</div>
 
 ---
 
@@ -389,6 +500,12 @@ graph LR
 **Controller tunnel config:** In the ECS plugin cloud settings:
 - `Tunnel connection through`: private IP of controller (e.g. `10.0.1.50:50000`)
 - `Alternative Jenkins URL`: `http://10.0.1.50:8080` (private, not public URL)
+
+<div class="quiz-card">
+  <p class="quiz-q">The JNLP port needs an inbound security group rule somewhere. Is it on the controller's SG or the agent's SG?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The controller's SG needs the inbound rule &mdash; TCP 50000 from the agent's SG. Since the agent initiates the connection outbound, the agent's SG needs no inbound rule from the controller at all. Missing this on the controller side is the single most common misconfiguration: the agent starts, tries to connect, fails silently, and you just see "agent is offline" forever with no obvious error.</div>
+</div>
 
 ---
 

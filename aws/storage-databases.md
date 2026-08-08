@@ -2,6 +2,11 @@
 
 S3, RDS, Aurora, ElastiCache, DynamoDB — the data layer every backend engineer uses.
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## S3 (Simple Storage Service)
@@ -52,6 +57,14 @@ graph LR
 }
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">Why would you pick S3 Intelligent-Tiering over just writing a lifecycle policy straight to Standard-IA?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    Intelligent-Tiering monitors actual access patterns and moves objects between tiers automatically, with no retrieval fee. A lifecycle policy is blind to access &mdash; it transitions objects on a fixed schedule (day 30, day 90, ...) regardless of whether anyone is still reading them. Intelligent-Tiering is for "I don't know the access pattern"; a lifecycle policy is for "I already know it."
+  </div>
+</div>
+
 ### Versioning & Replication
 
 **Versioning:** Once enabled on a bucket, every `PutObject` creates a new version. Delete adds a delete marker (object recoverable). Can't disable — only suspend.
@@ -65,6 +78,14 @@ Destination: eu-west-1 bucket (versioning on)
 ```
 
 **Same-Region Replication (SRR):** Same region, different account or bucket. Use for log aggregation, test/prod data copies.
+
+<div class="quiz-card">
+  <p class="quiz-q">You delete an object in a bucket with versioning enabled. Is the data gone?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No. Delete adds a delete marker on top &mdash; the object becomes "not found" on a normal <code>GetObject</code>, but every prior version is still sitting in the bucket and recoverable. You'd have to explicitly delete the specific version (or the delete marker) to actually remove the data. Versioning also can't be disabled once turned on &mdash; only suspended.
+  </div>
+</div>
 
 ### Access Control
 
@@ -87,6 +108,14 @@ For cross-account access: both the IAM policy on the caller AND the bucket polic
   }]
 }
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A bucket policy grants read access to a role in another AWS account. That role's own IAM policy back home grants it nothing on S3. Can it read the object?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No. Cross-account access needs both sides to say yes: the bucket policy (resource-based) AND the caller's own IAM policy (identity-based). Either one alone is insufficient &mdash; a permissive bucket policy doesn't override a caller that has no permission to call S3 in the first place.
+  </div>
+</div>
 
 ### Presigned URLs
 
@@ -167,6 +196,27 @@ aws s3api put-object-retention \
 # GOVERNANCE mode: users with s3:BypassGovernanceRetention CAN delete
 ```
 
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="governance" class="active state-warn">GOVERNANCE</button>
+    <button data-toggle-opt="compliance" class="state-bad">COMPLIANCE</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="governance">
+    A guardrail, not a guarantee. Retention still blocks deletes by default, but anyone holding the <code>s3:BypassGovernanceRetention</code> permission can override it. Good for protecting against accidental deletes.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="compliance">
+    A real lock. Nobody &mdash; not a user with elevated permissions, not the account root user &mdash; can delete or overwrite the object before its retain-until date passes. This is the mode that satisfies SEC 17a-4 / HIPAA-style requirements.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Under GOVERNANCE mode Object Lock, can an object be deleted before its retention date expires?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    Yes &mdash; if the caller holds the <code>s3:BypassGovernanceRetention</code> permission. That's the key difference from COMPLIANCE mode, where no one can delete it early, root included, until the retain date passes.
+  </div>
+</div>
+
 ### S3 Select — Query Inside Objects
 
 Query CSV/JSON/Parquet objects with SQL without downloading the whole file:
@@ -203,6 +253,14 @@ Byte-Range Fetches:
   GET /myfile?Range: bytes=0-1048576   # first 1MB
   Application assembles parts → faster for large downloads
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">All your objects are written with keys like <code>file1.parquet</code>, <code>file2.parquet</code> directly at the bucket root, with no date or hash prefix. What performance problem does that cause at scale?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    Every one of those keys shares the same single prefix, so they're all fighting over that one prefix's throughput ceiling (~3500 PUT/s, ~5500 GET/s) &mdash; a bottleneck. The fix is spreading keys across many prefixes (e.g. a date or hash prefix like <code>2024/01/15/abc123.parquet</code>), which scales linearly instead of hitting one shared cap.
+  </div>
+</div>
 
 ---
 
@@ -247,6 +305,39 @@ graph TD
 
 You can have BOTH: Multi-AZ for HA + Read Replicas for scale. They're orthogonal.
 
+Multi-AZ failover unfolds over several steps, not instantly — walk through it:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Normal operation.</strong> Primary (AZ-a) serves all reads and writes. Standby (AZ-b) is kept current via synchronous replication but serves zero traffic of its own.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Primary fails.</strong> RDS detects the outage — an AZ failure, an instance crash, storage failure, or a manual failover for maintenance.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Standby promoted.</strong> Because replication was synchronous, the standby is already fully caught up — it's promoted to primary with zero data loss.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Traffic resumes.</strong> Clients reconnect to the same endpoint, now pointing at the promoted instance. Total time: ~60-120s, the number in the table above.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Can a Multi-AZ standby serve read traffic to take load off the primary?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No. The Multi-AZ standby serves zero traffic — its only job is being ready to take over on failover. Offloading reads is what Read Replicas are for. Confusing the two is the single most common RDS-HA mistake: you can run both together, but they solve different problems.
+  </div>
+</div>
+
 ### Aurora Architecture
 
 Aurora is not just "managed MySQL/PostgreSQL" — it's a **storage-compute separation** architecture.
@@ -285,6 +376,39 @@ graph TD
 - Readers share the same storage — **no replication lag** on reads (reads are consistent)
 - Failover is faster (~30s) because a reader is already connected to the same storage
 
+Step through an Aurora failover to see why it's faster than RDS Multi-AZ's:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Normal operation.</strong> Writer handles all writes; readers serve reads — all of them against the same shared distributed storage (6 copies, 3 AZs).
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Writer fails.</strong> Aurora detects the writer instance is unreachable.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. A reader is promoted.</strong> No catch-up needed — the reader is already reading from the exact same storage the writer wrote to. It's promoted to writer.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Traffic resumes.</strong> Total failover time ~30s — faster than Multi-AZ's ~60-120s because there's no separate replica that needs to be caught up, just a role change on top of shared storage.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Why does an Aurora reader have no replication lag, unlike an RDS read replica?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    An Aurora reader isn't a separate copy of the data being shipped over asynchronously — it reads directly from the same distributed storage layer the writer writes to. An RDS read replica, by contrast, is a separate instance with its own storage, kept current via async replication that can fall behind.
+  </div>
+</div>
+
 ### Aurora Serverless v2
 
 Scales compute (ACUs — Aurora Capacity Units) instantly in fine-grained increments. Unlike v1 which had cold starts, v2 scales continuously.
@@ -298,17 +422,43 @@ Scale to zero: yes (v2 can pause)
 
 Good for: dev/test environments, irregular workloads, unpredictable spikes.
 
+<div class="quiz-card">
+  <p class="quiz-q">What's the key operational difference between Aurora Serverless v1 and v2 for a bursty workload?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    v1 had cold starts when scaling up from idle. v2 scales continuously and near-instantly in fine-grained ACU increments — no cold-start pause on the way up, though it can still scale all the way to zero (pause) when genuinely idle.
+  </div>
+</div>
+
 ### RDS Proxy
 
 Connection pooler as a managed service — sits between your app and RDS/Aurora.
 
 **Problem it solves:** Serverless functions (Lambda) open new DB connections per invocation. RDS can handle ~5000 connections max. 1000 concurrent Lambdas = 1000 connections, overwhelming the DB.
 
-```
-Lambda (1000 concurrent) → RDS Proxy (maintains ~50 pooled connections) → RDS
+```mermaid
+graph LR
+    classDef blue fill:#3498db,stroke:#2980b9,color:#fff,rx:8
+    classDef orange fill:#e67e22,stroke:#d35400,color:#fff,rx:8
+    classDef green fill:#2ecc71,stroke:#27ae60,color:#fff,rx:8
+
+    LAMBDA["Lambda<br/>1000 concurrent invocations"]:::blue
+    PROXY["RDS Proxy<br/>~50 pooled connections"]:::orange
+    RDS["RDS / Aurora"]:::green
+
+    LAMBDA -->|"1000 connection attempts"| PROXY
+    PROXY -->|"~50 pooled connections"| RDS
 ```
 
 Also provides: IAM authentication for DB connections, automatic failover (no connection string change needed), TLS enforcement.
+
+<div class="quiz-card">
+  <p class="quiz-q">1000 concurrent Lambda invocations connect through RDS Proxy instead of directly to the database. How many connections does the database itself actually see?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    Roughly ~50 — the pooled connection count RDS Proxy maintains, not 1000. The proxy multiplexes many client connections onto a small pool of real DB connections, which is exactly the problem it exists to solve — RDS tops out around ~5000 connections total, and 1000 concurrent Lambdas connecting directly would overwhelm it fast.
+  </div>
+</div>
 
 ---
 
@@ -327,6 +477,14 @@ Managed in-memory caching. Two engines:
 | **Use case** | Sessions, leaderboards, rate limiting, queues | Simple KV cache, high-throughput read cache |
 
 **Rule:** Use Redis unless you specifically need Memcached's multi-threaded simplicity or are already on Memcached.
+
+<div class="quiz-card">
+  <p class="quiz-q">Your app needs pub/sub messaging and wants cached data to survive a node restart. Which ElastiCache engine fits, and why not the other?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    Redis. Memcached has neither persistence nor pub/sub at all — both are Redis-only in this comparison. Memcached only wins when you specifically want its multi-threaded simplicity for a pure ephemeral key-value cache with no need for either feature.
+  </div>
+</div>
 
 ### Redis Cluster Mode
 
@@ -350,6 +508,14 @@ graph TD
 
 16384 hash slots divided across shards. Key `k` maps to slot `CRC16(k) % 16384`. Client connects to any node and gets redirected.
 
+<div class="quiz-card">
+  <p class="quiz-q">A client connects to any node in the Redis Cluster and asks for key "foo". Does that node serve the request directly?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    Only if it happens to own the slot for "foo". Otherwise it redirects the client to whichever node does own that key's hash slot — computed as <code>CRC16(k) % 16384</code>. "Connect to any node" doesn't mean any node can serve any key; the slot math decides ownership, not the node you happened to connect to.
+  </div>
+</div>
+
 ### Cache-Aside Pattern (Lazy Loading)
 
 ```go
@@ -368,6 +534,14 @@ func getUser(id string) (*User, error) {
 ```
 
 **Write-through** (update cache on every write) prevents stale reads but wastes memory caching rarely-read data. Cache-aside is more common.
+
+<div class="quiz-card">
+  <p class="quiz-q">You switch a service from cache-aside to write-through caching. What did you trade for what?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    You traded memory for freshness. Write-through updates the cache on every write, so a read never sees a stale value — but it also caches data that might never actually be read, wasting memory. Cache-aside only populates the cache on a real read miss, so unread data never takes up space, at the cost of the first reader after any write potentially seeing stale data.
+  </div>
+</div>
 
 ---
 
@@ -390,6 +564,14 @@ Query: all orders for customer "123", sorted by time
   KeyConditionExpression: customerId = "123" AND begins_with(SK, "order#")
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">With a composite primary key (partition key + sort key), can two items share the same partition key?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    Yes — that's the whole point of a composite key. Uniqueness is enforced on the PK+SK pair, not the partition key alone, and items sharing a partition key get sorted by their sort key — which is exactly what enables range queries like "all orders for customer 123, sorted by time."
+  </div>
+</div>
+
 ### Read/Write Capacity
 
 | Mode | When to use |
@@ -398,6 +580,14 @@ Query: all orders for customer "123", sorted by time
 | **On-demand** | Unpredictable spikes; pay per request; ~6x more expensive at steady load |
 
 **RCU/WCU:** 1 RCU = 1 strongly consistent read of 4 KB/s (or 2 eventually consistent reads). 1 WCU = 1 write of 1 KB/s.
+
+<div class="quiz-card">
+  <p class="quiz-q">You switch a steady, predictable-traffic table to On-Demand capacity mode to stop worrying about throttling. What did that cost you?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    Roughly 6x more per request at the same steady load compared to Provisioned capacity. On-Demand's convenience is worth it for unpredictable spikes, but once traffic is predictable enough to provision RCU/WCU for, Provisioned (with Auto Scaling) is the cheaper choice.
+  </div>
+</div>
 
 ### GSI (Global Secondary Index)
 
@@ -416,6 +606,14 @@ Query: all PENDING orders sorted by time
 ```
 
 GSIs have their own RCU/WCU capacity and can diverge from the main table during heavy writes (eventual consistency).
+
+<div class="quiz-card">
+  <p class="quiz-q">You write a new item to the base table and immediately query a GSI expecting to find it. Guaranteed?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No. GSIs replicate from the base table asynchronously and can diverge from it during heavy write activity — that's the eventual consistency the table's own strongly-consistent reads don't have to deal with. A GSI query right after a write can miss it.
+  </div>
+</div>
 
 ### DynamoDB Streams + Lambda (Event-driven)
 
@@ -447,3 +645,11 @@ Classic CDC pattern inside AWS: changes in DynamoDB propagate to other systems v
 | **Latency** | ms-level | Sub-ms | Low ms |
 | **Use case** | Static files, backups, data lake, artifacts | OS volumes, DB storage | Shared config, CMS, home dirs |
 | **Cost** | $0.023/GB | $0.10/GB (gp3) | $0.30/GB |
+
+<div class="quiz-card">
+  <p class="quiz-q">You need one filesystem mounted read-write across 50 EC2 instances at once. Why not just use EBS Multi-Attach?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    EBS Multi-Attach tops out at 16 instances — it's still fundamentally single-AZ block storage, just shared among a limited set of attachments, and your application has to handle its own write coordination since there's no filesystem-level locking. EFS is the one actually built for many EC2 instances mounting the same filesystem concurrently, Multi-AZ, via NFS.
+  </div>
+</div>

@@ -2,6 +2,13 @@
 
 A production-focused Docker reference covering architecture, image layers, essential commands, Dockerfile best practices, Compose, and runtime flags.
 
+Most major sections end with a quick knowledge check — track how many you've cleared:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## 1. Architecture
@@ -30,6 +37,43 @@ graph TD
 | containerd-shim | Keeps container running if containerd restarts; reports exit codes |
 | runc | Low-level OCI runtime — calls clone(2) to create namespaces |
 | Kernel | pid/net/mnt/uts/ipc namespaces + cgroups v2 for resource limits |
+
+Step through what actually happens between typing `docker run` and a process landing in a namespace:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Docker CLI.</strong> <code>docker run</code> serializes the request and sends it over the UNIX socket <code>/var/run/docker.sock</code> to the daemon. Nothing has started yet — this is just an API call.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. dockerd.</strong> The daemon resolves the image, sets up networking/volumes, and hands the actual container lifecycle off to containerd over gRPC.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. containerd.</strong> Pulls the image if it isn't cached, prepares the snapshot, and spawns a dedicated <code>containerd-shim</code> process for this one container.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. containerd-shim.</strong> Execs <code>runc</code> to do the low-level setup. The shim itself stays resident as the container's true parent process.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. runc.</strong> Calls <code>clone(2)</code> to create the namespaces (pid/net/mnt/uts/ipc) and wires up cgroups v2, starts the container's process, then exits — runc doesn't stick around.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Running.</strong> The shim is now the only thing between the container process and the kernel. If containerd itself crashes and restarts, the shim keeps the container alive and reports its exit code back once containerd is back.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">containerd crashes and restarts. Does a container it was managing go down too?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. <code>containerd-shim</code> is the container's actual parent process, not containerd itself — the shim keeps the container running independently and reports its exit code back to containerd once it's back up. That's the whole reason the shim exists as a separate process.</div>
+</div>
 
 ---
 

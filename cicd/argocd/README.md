@@ -2,6 +2,13 @@
 
 ArgoCD is a declarative GitOps continuous delivery tool for Kubernetes. Git is the single source of truth; ArgoCD continuously syncs the cluster to match it.
 
+Most sections below end with a quick knowledge check — track how many you've cleared as you go:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## GitOps Model
@@ -26,15 +33,60 @@ graph LR
     CLUSTER -->|"health checks"| ARGO
 ```
 
-**Pull-based vs push-based:**
-- Push (Jenkins/GHA): pipeline has cluster credentials, applies changes directly
-- Pull (ArgoCD): agent inside cluster pulls changes from git, no external credentials needed
+That diagram is a loop, not a one-shot pipeline. Step through what actually happens, one stage at a time:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Developer pushes.</strong> A K8s manifest, Helm chart, or Kustomize change lands in the git repo — the single source of truth.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. ArgoCD's controller watches.</strong> It's continuously watching the git repo, not waiting to be triggered by a pipeline.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Computes a diff.</strong> Git state vs live cluster state, resource by resource.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Syncs if out of sync.</strong> Applies whatever's needed to make the cluster match git — the <code>kubectl apply</code> equivalent.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Health checks, then loop.</strong> ArgoCD checks the cluster's health and goes right back to watching — this never stops running.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="push" class="active">Push (Jenkins/GHA)</button>
+    <button data-tab="pull">Pull (ArgoCD)</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="push">
+      The pipeline itself has cluster credentials and applies changes directly to the cluster.
+    </div>
+    <div class="tab-panel" data-tab-panel="pull">
+      An agent running inside the cluster pulls changes from git — no external system needs cluster credentials at all.
+    </div>
+  </div>
+</div>
 
 **Why GitOps wins for Kubernetes:**
 - Cluster credentials never leave the cluster — no secrets in CI pipelines
 - Full audit trail in git: who changed what, when, and why (via PR description)
 - Rollback = `git revert` + ArgoCD auto-syncs back
 - Multi-cluster: one ArgoCD instance can manage many clusters
+
+<div class="quiz-card">
+  <p class="quiz-q">In ArgoCD's pull model, which side actually holds the cluster credentials — the CI pipeline or the in-cluster agent?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The in-cluster ArgoCD agent. It pulls changes from git itself, so cluster credentials never have to leave the cluster or live in a CI pipeline &mdash; the opposite of push-based tools like Jenkins/GHA, where the pipeline holds the credentials and applies changes directly.</div>
+</div>
 
 ---
 
@@ -73,6 +125,12 @@ spec:
 ```
 
 **Without `automated` sync:** ArgoCD detects drift but waits for a human to click "Sync" or run `argocd app sync my-app`. Manual sync = change management gate before applying to production.
+
+<div class="quiz-card">
+  <p class="quiz-q">You create an Application without a <code>syncPolicy.automated</code> block. A new commit lands in git — does ArgoCD apply it to the cluster automatically?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Without <code>automated</code>, ArgoCD only detects drift and marks the app OutOfSync &mdash; a human still has to click Sync or run <code>argocd app sync</code> for the change to actually apply. That manual gate is exactly the change-management checkpoint you want in front of production.</div>
+</div>
 
 ---
 
@@ -115,6 +173,12 @@ graph TD
 | Auto sync + self-heal | Dev/ephemeral — full automation, git is absolute truth |
 | Auto sync + prune | Any — clean up resources deleted from git |
 
+<div class="quiz-card">
+  <p class="quiz-q">Auto sync is enabled but <code>selfHeal</code> is not. Someone runs <code>kubectl edit deployment</code> straight against the cluster. Does ArgoCD revert it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Without <code>selfHeal: true</code>, ArgoCD only reacts to changes in git — a manual cluster edit just shows up as OutOfSync. It won't auto-revert the patch until selfHeal is also enabled, or someone triggers a sync by hand.</div>
+</div>
+
 ---
 
 ## Sync Waves and Hooks
@@ -149,10 +213,61 @@ metadata:
 ```
 
 **Hook types:**
-- `PreSync` — runs before sync (migrations, backups)
-- `Sync` — runs during sync alongside regular resources
-- `PostSync` — runs after all resources are healthy (smoke tests, notifications)
-- `SyncFail` — runs if sync fails (alert, rollback trigger)
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="presync" class="active">PreSync</button>
+    <button data-toggle-opt="sync">Sync</button>
+    <button data-toggle-opt="postsync" class="state-ok">PostSync</button>
+    <button data-toggle-opt="syncfail" class="state-bad">SyncFail</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="presync">
+    Runs before sync — migrations, backups.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="sync">
+    Runs during sync, alongside regular resources.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="postsync">
+    Runs after all resources are healthy — smoke tests, notifications.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="syncfail">
+    Runs if sync fails — alert, rollback trigger.
+  </div>
+</div>
+
+Put together, one sync's hooks and waves execute in this order:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Lowest sync-wave first.</strong> A <code>PreSync</code> hook at wave <code>-1</code> (like the <code>db-migrate</code> Job above) runs before anything else.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Hook cleanup.</strong> With <code>hook-delete-policy: HookSucceeded</code>, ArgoCD deletes the hook resource once it succeeds — it did its job.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Next wave applies.</strong> Wave <code>0</code> (the default) — the main Deployment in this example — gets applied next.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Sync hooks, if any.</strong> Run alongside the regular resources during the sync itself.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. PostSync or SyncFail.</strong> Once every resource is applied and healthy, <code>PostSync</code> hooks fire (smoke tests, notifications). If anything failed along the way, <code>SyncFail</code> hooks fire instead (alerting, rollback trigger).
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A hook has <code>argocd.argoproj.io/hook: PreSync</code> and <code>sync-wave: "-1"</code>; the main Deployment sits at the default wave <code>0</code>. Which runs first, and what happens to the hook resource once it succeeds (given <code>hook-delete-policy: HookSucceeded</code>)?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The PreSync hook at wave -1 runs first &mdash; lower wave numbers go earlier. Once it completes successfully, <code>HookSucceeded</code> deletes it automatically, so it doesn't linger in the cluster after doing its job.</div>
+</div>
 
 ---
 
@@ -191,6 +306,12 @@ clusters/prod/apps/
 ```
 
 **Why:** New applications are added by adding a new Application YAML to git — ArgoCD picks it up automatically. No manual ArgoCD configuration required.
+
+<div class="quiz-card">
+  <p class="quiz-q">You need to add a fifth application under the App of Apps setup above. What do you have to configure inside ArgoCD itself?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Nothing. Commit a new Application YAML into the directory the root app watches (e.g. <code>clusters/prod/apps/</code>) and ArgoCD picks it up on its own &mdash; there's no manual ArgoCD-side step.</div>
+</div>
 
 ---
 
@@ -248,6 +369,12 @@ spec:
         namespace: my-app
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">You already have an ApplicationSet using the <code>clusters</code> generator with no selector. You register a brand-new cluster with <code>argocd cluster add</code>. Do you need to write it a new Application manifest?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. The clusters generator produces one Application per registered cluster automatically &mdash; registering the cluster is enough, ApplicationSet generates its Application from the existing template.</div>
+</div>
+
 ---
 
 ## Rollback
@@ -266,6 +393,12 @@ git push origin main
 ```
 
 **Git revert is the preferred rollback** — it's auditable, goes through the same review process, and keeps a clean history. ArgoCD's built-in rollback is useful for emergency hotfixes.
+
+<div class="quiz-card">
+  <p class="quiz-q">Both <code>argocd app rollback</code> and <code>git revert</code> + push undo a bad deploy. Which one is preferred, and why?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>git revert</code> &mdash; it goes through the normal PR/review process and leaves a clean, auditable history in git, the actual source of truth. ArgoCD's built-in rollback is best treated as an emergency-hotfix tool, not the default path.</div>
+</div>
 
 ---
 
@@ -287,6 +420,38 @@ annotations:
 3. Updates the image tag in the git repo (via commit)
 4. ArgoCD detects the git change, syncs the cluster
 5. Full GitOps: no CI pipeline needs cluster credentials
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. CI builds.</strong> Pushes <code>my-app:v1.2.3</code> to ECR &mdash; that's the last thing CI does.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Image Updater polls.</strong> It watches ECR directly and notices the new tag on its own.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Commits to git.</strong> It updates the image tag in the git repo itself &mdash; not by touching the cluster.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. ArgoCD syncs.</strong> It sees that git change exactly like any other commit, and syncs the cluster to match.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Full GitOps, end to end.</strong> No CI pipeline ever needed cluster credentials &mdash; git stayed the single source of truth the whole way through.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">With <code>write-back-method: git</code> configured, does the CI pipeline that builds <code>my-app:v1.2.3</code> need cluster credentials to get that image deployed?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. CI only needs to push the image to the registry. Image Updater polls the registry and commits the new tag to git itself, then ArgoCD picks up that git change and syncs &mdash; cluster credentials never touch the CI pipeline.</div>
+</div>
 
 ---
 

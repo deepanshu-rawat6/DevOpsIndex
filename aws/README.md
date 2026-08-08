@@ -1,5 +1,12 @@
 # AWS Networking
 
+How traffic actually moves through a VPC — subnets, gateways, the two firewall layers, and the routing rules that tie all of it together. Most sections below end with a quick knowledge check; track your progress as you go.
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## VPC Architecture
@@ -65,6 +72,12 @@ graph TD
     NAT_B -->|outbound only| IGW
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">Looking at the diagram above: is a NAT Gateway attached directly to the VPC the way the Internet Gateway is, or does it live inside a specific subnet?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It lives inside a specific (public) subnet, with its own private IP and an Elastic IP &mdash; that's why you need one NAT Gateway per AZ. The IGW is different: it attaches to the VPC as a whole and is bidirectional, not tied to any one subnet.</div>
+</div>
+
 ---
 
 ## Public vs Private Subnets
@@ -128,6 +141,55 @@ sequenceDiagram
 ```
 
 Key insight: **The app server is never directly reachable from the internet**. Inbound goes through the ALB. Outbound is NAT'd — the external service sees the NAT Gateway's Elastic IP, not the app's private IP.
+
+Same outbound leg, one step at a time:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. App server sends the request.</strong> Its private route table has no route to an IGW at all &mdash; the only match for <code>0.0.0.0/0</code> is the local NAT Gateway.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. NAT Gateway rewrites the source.</strong> It swaps the app's private IP for its own Elastic IP and forwards the packet on toward the IGW.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. IGW hands it to the internet.</strong> The external API only ever sees the NAT Gateway's Elastic IP as the source &mdash; the app server's private IP never appears on the wire outside the VPC.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. External API replies to the NAT Gateway's Elastic IP.</strong> As far as the external service is concerned, that's who asked.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. NAT Gateway translates back.</strong> It maps the response back onto the app server's private IP and delivers it &mdash; the app server never had a public, internet-routable identity at any point in the exchange.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+The whole public/private split comes down to one property. Flip between the two:
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="pub" class="active state-ok">Public subnet</button>
+    <button data-toggle-opt="priv" class="state-warn">Private subnet</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="pub">
+    <strong>Route table sends <code>0.0.0.0/0</code> to the IGW.</strong> Combined with a public IP on the resource, this is what lets the internet initiate a connection in. Typical residents: ALB/NLB, NAT Gateways, bastion hosts &mdash; things that genuinely need to be reachable from outside.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="priv">
+    <strong>Route table sends <code>0.0.0.0/0</code> to a NAT Gateway instead.</strong> Resources can still initiate outbound connections, but nothing on the internet can initiate one in. Typical residents: EC2/EKS worker nodes, RDS, ElastiCache, internal services.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Every resource in a subnet has a public IPv4 address assigned. Its route table sends 0.0.0.0/0 to a NAT Gateway. Is this subnet public or private?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Private. Being public requires <em>both</em> a route to an Internet Gateway <em>and</em> a public IP &mdash; a public IP alone with no IGW route doesn't grant internet access. The route table target is what actually classifies the subnet.</div>
+</div>
 
 ---
 
@@ -223,6 +285,58 @@ graph LR
 
 Response travels the same path in reverse. SGs auto-allow the return; NACLs require explicit outbound rules for ephemeral ports.
 
+Walk the request through each checkpoint:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Internet → IGW.</strong> Bidirectional, attached to the VPC. No filtering happens here.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. IGW → public subnet NACL.</strong> First checkpoint. Stateless &mdash; the inbound rule list is checked in order by rule number, first match wins.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. NACL → ALB's Security Group.</strong> Stateful. If this rule allows the connection, the eventual reply is auto-allowed later &mdash; no separate outbound rule needed for it.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. ALB → private subnet NACL.</strong> A second, independent stateless checkpoint &mdash; its own rule list, separate from the public subnet's NACL.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. NACL → app server's Security Group.</strong> Stateful again, checked against the app's own SG rules.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. App processes, response retraces the path.</strong> Both SGs auto-allow the reply. Both NACLs don't &mdash; each one needs its own explicit outbound rule for the ephemeral port range, or the reply gets silently dropped at the subnet boundary.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+The one property that explains almost every SG-vs-NACL surprise:
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="sg" class="active">Security Group (stateful)</button>
+    <button data-toggle-opt="nacl">NACL (stateless)</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="sg">
+    Allow inbound on a port, and the return traffic is <strong>automatically permitted</strong> &mdash; the SG tracks the connection in a state table. You almost never need to think about outbound rules for replies.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="nacl">
+    Every packet is evaluated <strong>independently in both directions</strong>. Allow inbound TCP 443 and forget the outbound ephemeral-port rule (1024&ndash;65535), and the SYN-ACK can't leave the subnet &mdash; the connection just times out with no obvious error.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">You add a NACL rule allowing inbound TCP 443, but never add an outbound rule for ephemeral ports 1024-65535. What happens to connections that should otherwise succeed?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>They fail silently. NACLs are stateless, so the return packet (e.g. the SYN-ACK) is a separate packet that needs its own explicit outbound allow &mdash; without the ephemeral-port rule, it can't leave the subnet, and the client just sees a hang or timeout, not a clear rejection.</div>
+</div>
+
 **In practice:** NACLs are last-line-of-defense for blocking entire IP ranges at subnet level (useful in PCI-DSS/HIPAA). Security Groups are the primary day-to-day firewall for service-to-service rules. Most teams leave NACLs as "allow all" and do real access control in SGs.
 
 ---
@@ -259,6 +373,12 @@ pl-68a54001    vpce-s3-xxxx   ← S3 prefix list → stays on AWS backbone (free
 
 For EKS clusters pulling images from ECR or writing to S3 — add VPC endpoints first before diagnosing high NAT costs.
 
+<div class="quiz-card">
+  <p class="quiz-q">An EKS cluster's NAT Gateway costs are climbing, driven mostly by traffic to S3 and ECR. What's the fix, and why does it actually save money?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Add VPC Endpoints (a Gateway Endpoint for S3, Interface Endpoints for ECR). Traffic through an endpoint stays on the AWS backbone instead of being processed by the NAT Gateway &mdash; the Gateway Endpoint is free, and either way you stop paying NAT's ~$0.045/GB processing charge for that traffic.</div>
+</div>
+
 ---
 
 ## Route Tables
@@ -280,6 +400,12 @@ Result: routed to vpc-endpoint
 pl-68a54001    vpce-s3-xxxx   ← S3 prefix list to VPC endpoint
 0.0.0.0/0      nat-xyz789
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A route table lists 0.0.0.0/0 → igw-abc123 above 10.0.5.0/24 → vpc-endpoint. For a packet to 10.0.5.20, does the listing order matter, and which route wins?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Listing order never matters &mdash; AWS always evaluates by longest prefix match. The /24 route to the VPC endpoint wins because it's more specific than the /0 default route, regardless of which one appears first in the table.</div>
+</div>
 
 ---
 
@@ -345,6 +471,25 @@ Each VPC's route table only needs: `0.0.0.0/0 → tgw-abc123`. TGW route tables 
 
 **Rule of thumb:** 2 VPCs → use peering (free, lower latency). 3+ VPCs, cross-region, or on-prem hybrid → use Transit Gateway (centralized, transitive, worth the cost).
 
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="peering" class="active">VPC Peering</button>
+    <button data-toggle-opt="tgw">Transit Gateway</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="peering">
+    <strong>Point-to-point, no transitive routing.</strong> Each pair of VPCs that needs to talk needs its own peering connection &mdash; N VPCs means up to N*(N-1)/2 connections. Cheapest and lowest-latency option, but it doesn't scale past a handful of VPCs.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="tgw">
+    <strong>Hub-and-spoke, full transitive routing.</strong> Every VPC attaches once to the TGW and can reach every other attached VPC through it. Each VPC's route table collapses to a single <code>0.0.0.0/0 → tgw-abc123</code> entry. Costs an hourly per-attachment fee, but scales to thousands of attachments and on-prem hybrid setups.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">VPC A is peered with both VPC B and VPC C. Can traffic from VPC B reach VPC C by routing through VPC A?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. VPC Peering has no transitive routing &mdash; each pair needs its own direct peering connection. B and C would need to peer with each other directly, or all three would need to attach to a Transit Gateway instead.</div>
+</div>
+
 ---
 
 ## Route Tables — Deep Dive
@@ -368,6 +513,12 @@ The `local` route is why:
 - Cross-AZ communication within the same VPC is transparent
 
 **Important:** `local` routes cannot be replaced or overridden for the VPC CIDR itself. You cannot route VPC-internal traffic to a NAT GW or IGW.
+
+<div class="quiz-card">
+  <p class="quiz-q">Can you edit a route table to send traffic destined for the VPC's own CIDR block to a NAT Gateway instead of delivering it locally?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. The <code>local</code> route for the VPC CIDR can't be replaced or overridden &mdash; VPC-internal traffic always resolves via the local route, directly to the target ENI within AWS's network fabric, no gateway or NAT involved.</div>
+</div>
 
 ### Longest prefix match — concrete examples
 
@@ -396,6 +547,34 @@ Packet to 8.8.8.8:
   No specific match → 0.0.0.0/0  ← default route WINS
   Result: routed to NAT Gateway
 ```
+
+Same resolution, one step at a time, for the `10.0.5.20` packet above:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Packet arrives for 10.0.5.20.</strong> The router doesn't stop at the first route that matches &mdash; it checks the destination against every route in the table.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. 10.0.0.0/16 → local matches.</strong> A /16 covers this address. Candidate route #1.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. 10.0.5.0/24 → vpce-s3-xxxx also matches.</strong> And it's more specific &mdash; a /24 is a narrower, more precise match than a /16. Candidate route #2, currently winning.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. 0.0.0.0/0 → nat-xyz789 matches too</strong> &mdash; technically every address matches the default route &mdash; but it's the least specific of the three candidates.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Longest prefix wins.</strong> The /24 route to the VPC endpoint is chosen. The packet goes over the AWS backbone, free and fast &mdash; and this outcome doesn't depend on which order the three routes happened to be listed in.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ### Complete route table examples
 
@@ -493,6 +672,12 @@ Blackhole routes appear when:
 aws ec2 describe-route-tables --region us-east-1 \
   --query 'RouteTables[*].Routes[?State==`blackhole`]'
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A route table has a stale route pointing at a VPC peering connection that was deleted last week — it now shows target `blackhole`. What happens to traffic matching that route?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It's silently dropped &mdash; no ICMP unreachable, no TCP RST, nothing sent back to the source. The packet just disappears, which is exactly why stale blackhole routes left behind by deleted peering connections or gateways are worth actively auditing for.</div>
+</div>
 
 ### Troubleshooting route table issues
 
