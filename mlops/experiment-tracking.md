@@ -2,24 +2,45 @@
 
 Experiment tracking is structured logging for ML: instead of a test report, you record the hyperparameters, metrics, and model artifacts of every training run so you can reproduce and compare them.
 
+Most sections below end with a quick knowledge check — try to answer before revealing. Track how many you've cleared as you go:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## Core Concepts
 
-```
-Experiment  ←  named group  (e.g. "llama3-finetune-customer-support")
-  └── Run   ←  one execution (lr=0.001, batch=32, val_loss=0.23, model.pt)
-  └── Run
-  └── Run   ←  best run → register to Model Registry as version 3
+An **experiment** is a named group of runs; a **run** is one training execution with its own hyperparameters, metrics, and artifacts. The best run gets promoted into the **Model Registry**, which is a separate structure from the runs themselves — it tracks model versions and their deployment stage, not training history.
 
-Model Registry  ←  separate from runs
-  └── Model: "customer-support-llm"
-        └── Version 1  (Staging)
-        └── Version 2  (Staging)
-        └── Version 3  (Production)  ← promoted from best run
+```mermaid
+graph TD
+    EXP["Experiment<br/>llama3-finetune-customer-support"] --> R1["Run"]
+    EXP --> R2["Run"]
+    EXP --> R3["Run — best run<br/>lr=0.001, batch=32, val_loss=0.23, model.pt"]
+
+    R3 -.->|register| MODEL
+
+    subgraph REG["Model Registry (separate from runs)"]
+        MODEL["Model: customer-support-llm"]
+        MODEL --> V1["Version 1 (Staging)"]
+        MODEL --> V2["Version 2 (Staging)"]
+        MODEL --> V3["Version 3 (Production)<br/>promoted from best run"]
+    end
+
+    classDef prod fill:#4f8fcf,stroke:#274b6e,color:#fff;
+    class V3 prod;
 ```
 
 The **registry** is the gate to production. A run logs training results; the registry tracks what's deployed.
+
+<div class="quiz-card">
+  <p class="quiz-q">A run finishes with a great val_loss but is never registered. Is it in the Model Registry?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Runs and the registry are separate structures — a run only enters the registry once it's explicitly registered as a model version. A run logs training results; only the registry tracks what's deployed.</div>
+</div>
 
 ---
 
