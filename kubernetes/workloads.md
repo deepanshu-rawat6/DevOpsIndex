@@ -1,5 +1,12 @@
 # Kubernetes Workloads
 
+Each major section below ends with a quick knowledge check — try to answer before revealing. Track your progress as you go:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## Pod Lifecycle
@@ -34,6 +41,34 @@ graph LR
     RUNNING --> UNKNOWN
 ```
 
+Step through the phases one at a time:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Pending.</strong> The pod object exists but isn't running yet — the scheduler hasn't assigned a node, or a node is assigned and the kubelet is still pulling images. No containers are executing.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Running.</strong> The pod has been bound to a node and at least one container is executing. Init containers (if any) have already completed in order before this point.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Succeeded.</strong> Every container exited with code 0 and none will restart — a terminal phase. Normal for a Job's pod, not something you'd expect from a long-running service.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Failed.</strong> A container exited non-zero and <code>restartPolicy: Never</code> means kubelet won't try again — also terminal. Contrast with <code>restartPolicy: Always</code>, where the same crash keeps the pod phase at <code>Running</code> while the container itself cycles through CrashLoopBackOff.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Unknown.</strong> The node has stopped reporting — kubelet can't be reached, so the control plane has no current information about the pod's containers. Not the pod's fault; it's a node/network problem.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 **Container states within a Running pod:**
 
 | State | Meaning |
@@ -43,6 +78,12 @@ graph LR
 | `Terminated` | Process exited (check exitCode: 0=success, 137=OOMKilled, 1=error) |
 
 **CrashLoopBackOff** — container keeps crashing. Kubernetes applies exponential backoff (10s → 20s → 40s → 80s → 160s → 5min cap) between restart attempts. Not a stuck state — it will keep retrying. Check logs with `kubectl logs <pod> --previous`.
+
+<div class="quiz-card">
+  <p class="quiz-q">A container keeps crashing but the pod's <code>restartPolicy</code> is <code>Always</code>. Does the pod phase flip to <code>Failed</code>?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. With <code>restartPolicy: Always</code>, kubelet keeps restarting the container &mdash; the pod phase stays <code>Running</code> the whole time, even while a single container cycles through CrashLoopBackOff with growing backoff delays. <code>Failed</code> only happens when a container exits non-zero under <code>restartPolicy: Never</code>.</div>
+</div>
 
 ---
 
@@ -75,6 +116,34 @@ graph TD
         RP -->|"passes"| ADD["Pod IP added to Service endpoints Traffic flows to pod"]:::ok
     end
 ```
+
+Step through the evaluation order:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Startup probe (if defined) runs first.</strong> Liveness and readiness probes don't start yet — they're blocked until this one passes. Meant for slow-starting apps so a long boot isn't mistaken for a hang.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Startup probe passes.</strong> Liveness and readiness probes begin running, independently of each other, for the rest of the container's life.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Liveness probe fails <code>failureThreshold</code> times in a row.</strong> kubelet kills the container and restarts it per <code>restartPolicy</code>. The pod itself isn't removed — this is a container-level action.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Readiness probe fails.</strong> The pod's IP is pulled from the Service's endpoints — traffic stops routing to it. The container keeps running untouched; this is purely a traffic decision, not a restart.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Readiness probe passes again.</strong> The pod's IP is added back to the Service's endpoints and traffic resumes — no restart was ever needed for this path.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 **Probe implementation types:**
 
@@ -113,6 +182,12 @@ livenessProbe:
 - Readiness failure → pod removed from service endpoints (pod stays running, just gets no traffic)
 - Startup probe present → liveness and readiness are BLOCKED until startup passes
 
+<div class="quiz-card">
+  <p class="quiz-q">A container's readiness probe starts failing, but its liveness probe keeps passing. Does kubelet restart the container?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Readiness failing only pulls the pod's IP from the Service's endpoints so traffic stops flowing to it &mdash; the container keeps running exactly as it was. Only a failing <em>liveness</em> probe triggers a restart.</div>
+</div>
+
 ---
 
 ## QoS Classes
@@ -142,6 +217,12 @@ graph TD
 ```
 
 **Production recommendation:** Set both requests and limits for all containers. Use Guaranteed class for critical services (controllers, databases). Never run production workloads as BestEffort.
+
+<div class="quiz-card">
+  <p class="quiz-q">A container sets a memory <em>request</em> of 128Mi and a memory <em>limit</em> of 512Mi, with no CPU request/limit set at all. What QoS class does the pod get?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Burstable, not Guaranteed. Guaranteed requires requests to equal limits for <em>every</em> resource on <em>every</em> container &mdash; missing a CPU request/limit, or having request &lt; limit anywhere, drops it straight to Burstable.</div>
+</div>
 
 ---
 
@@ -207,6 +288,12 @@ kubectl rollout pause deployment/my-app                    # pause mid-rollout (
 kubectl rollout resume deployment/my-app                   # resume
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">After a Deployment rolls out v2, is the v1 ReplicaSet deleted?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No &mdash; it's scaled down to 0 replicas, not deleted. That's exactly what makes <code>kubectl rollout undo</code> fast: rollback just scales the old ReplicaSet back up and the new one back down, no pod specs need to be recreated from scratch.</div>
+</div>
+
 ---
 
 ## StatefulSet vs Deployment
@@ -251,6 +338,12 @@ graph TD
 | **Ordered shutdown** | Pods stop in reverse order: 2 → 1 → 0. |
 
 **When to use StatefulSet:** Databases (PostgreSQL, MySQL), distributed systems with leader election (Kafka, Zookeeper, etcd), any app that needs stable network identity or per-instance storage.
+
+<div class="quiz-card">
+  <p class="quiz-q">A StatefulSet pod <code>postgres-1</code> is deleted and recreated. Does it get a new PVC?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Its PVC (<code>postgres-data-postgres-1</code>) survives pod deletion and the recreated <code>postgres-1</code> reattaches to the exact same volume &mdash; that's the whole point of per-pod PVCs via <code>volumeClaimTemplates</code>. Deleting the PVC itself is a separate, manual action.</div>
+</div>
 
 ---
 
@@ -328,6 +421,12 @@ sequenceDiagram
 
 Why ordered? Databases need the primary (index 0) to be healthy before replicas join. Shutting down the replica before the primary prevents split-brain.
 
+<div class="quiz-card">
+  <p class="quiz-q">Scaling a StatefulSet down from 3 to 1, which pod is deleted first?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The highest-index pod &mdash; <code>postgres-2</code>, then <code>postgres-1</code>. Scale-down always proceeds in reverse order, opposite of scale-up, so the primary (index 0) is the last one standing and never the one torn down mid-shrink.</div>
+</div>
+
 ---
 
 ## Which Applications Use Which
@@ -386,6 +485,12 @@ NO  → StatefulSet
 **Redis Cluster** (sharded, data must persist): StatefulSet — each node owns data, must reconnect to cluster with same identity.
 
 **PostgreSQL primary**: StatefulSet — data on disk, WAL, per-node state. Restarting with a different name would break replication setup.
+
+<div class="quiz-card">
+  <p class="quiz-q">A worker pod deletes itself and a replacement starts with a completely different name and no data carried over from the old one. Does the app still work correctly?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>If yes, use a Deployment &mdash; that's exactly the interchangeable-pod assumption a Deployment makes. If the answer is no (the app needs its previous identity or on-disk state back), that's the signal to use a StatefulSet instead.</div>
+</div>
 
 ---
 
@@ -479,6 +584,12 @@ containers:
     mountPath: /etc/app   # reads rendered config written by init container
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">A pod has two init containers. The first succeeds, the second fails. Does the app container start?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Init containers run sequentially and every one of them must exit 0 before the next step proceeds &mdash; a failing init container stops the app container from ever starting, and the pod is restarted from the first init container per its restart policy.</div>
+</div>
+
 ---
 
 ## Ephemeral Containers — Debug Running Pods
@@ -520,6 +631,12 @@ graph LR
 - `kubectl exec` — needs a shell already in the container
 - `kubectl debug` — injects a new container with tools, works on distroless images
 
+<div class="quiz-card">
+  <p class="quiz-q">You inject an ephemeral debug container into a running pod with <code>kubectl debug</code>. Does the pod restart?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. The ephemeral container is added to the already-running pod without restarting it or any of its existing containers &mdash; that's the entire point, since a restart would be useless for debugging a container that has no shell to begin with.</div>
+</div>
+
 ---
 
 ## DaemonSet
@@ -549,6 +666,12 @@ graph LR
 **Common DaemonSet use cases:** Log collectors (Fluentd, Fluent Bit), metrics agents (node-exporter), security agents (Falco), network plugins (CNI DaemonSets like aws-node), storage drivers.
 
 DaemonSets can be constrained to specific nodes using `nodeSelector` or `affinity` — e.g., run GPU monitoring DaemonSet only on GPU nodes.
+
+<div class="quiz-card">
+  <p class="quiz-q">Does a DaemonSet have a <code>replicas</code> field you set to control how many pods run?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. A DaemonSet has no <code>replicas</code> field at all &mdash; the number of pods is implicitly one per matching node. Add a node and a pod appears there automatically; there's nothing to scale manually.</div>
+</div>
 
 ---
 
@@ -612,3 +735,38 @@ spec:
               image: my-app:v2
               command: ["/app/server", "report"]
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A CronJob's schedule fires while the previous run's Job is still active, and <code>concurrencyPolicy: Forbid</code> is set. What happens?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The new run is skipped entirely &mdash; <code>Forbid</code> means the CronJob controller won't create a new Job while the previous one is still running. It waits for the next scheduled trigger rather than queuing the missed run.</div>
+</div>
+
+---
+
+## Workload Types at a Glance
+
+Four workload kinds, one question each: what makes them different in practice.
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="deployment" class="active">Deployment</button>
+    <button data-tab="statefulset">StatefulSet</button>
+    <button data-tab="daemonset">DaemonSet</button>
+    <button data-tab="job">Job / CronJob</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="deployment">
+      <strong>N interchangeable replicas.</strong> Random pod names, no stable identity, shared or no persistent storage, load-balanced Service. Scales and updates in any order. Right for stateless APIs, workers, gateways — anything where a fresh pod with no memory of the old one is fine.
+    </div>
+    <div class="tab-panel" data-tab-panel="statefulset">
+      <strong>N pods with stable identity.</strong> Names <code>&lt;name&gt;-0</code>, <code>-1</code>, ... never change, each gets its own PVC that survives pod deletion, ordered startup/shutdown, Headless Service for per-pod DNS. Right for databases and quorum systems (Kafka, Zookeeper, etcd) — anything where "which pod" or "which disk" matters.
+    </div>
+    <div class="tab-panel" data-tab-panel="daemonset">
+      <strong>Exactly one pod per (matching) node.</strong> No <code>replicas</code> field — the node count <em>is</em> the pod count. A new node joining the cluster gets a pod scheduled on it automatically, no manual scaling. Right for node-level agents: log shippers, metrics exporters, CNI plugins, security agents.
+    </div>
+    <div class="tab-panel" data-tab-panel="job">
+      <strong>Run-to-completion, not long-running.</strong> Tracks <code>completions</code> and <code>parallelism</code> instead of a steady replica count, and retries failed pods up to <code>backoffLimit</code> before giving up. A CronJob is just a Job factory on a schedule — each trigger creates a brand-new Job object, it doesn't reuse the last one.
+    </div>
+  </div>
+</div>

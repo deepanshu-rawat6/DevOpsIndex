@@ -1,5 +1,12 @@
 # Kubernetes Networking
 
+Track how many of the knowledge checks below you've cleared as you go:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## Services — The Stable Endpoint Abstraction
@@ -40,6 +47,31 @@ Every worker node's kernel:
   Has iptables rule: "if dst=10.96.45.20:80, DNAT to one of [10.0.1.5, 10.0.2.7, 10.0.3.9]:8080"
   ← THIS is where the ClusterIP "lives"
 ```
+
+Step through how a Service goes from YAML to a live kernel rule:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Service object created.</strong> <code>kubectl apply -f service.yaml</code> writes the Service definition to etcd via the API server &mdash; <code>clusterIP: 10.96.45.20</code>, port, and selector. Nothing on the data path has changed yet.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Endpoints populate.</strong> <code>kube-controller-manager</code> watches for pods matching the selector and writes their IPs into an EndpointSlice &mdash; a separate object from the Service itself.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. kube-proxy programs the node.</strong> Every node's kube-proxy watches the API server for Service/EndpointSlice changes, then translates them into local iptables (or IPVS) rules.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. The rule lives in the kernel.</strong> <code>10.96.45.20:80 → DNAT → one of the pod IPs</code> is now a netfilter rule on every worker node's kernel &mdash; the only place the ClusterIP "exists" as something that actually does anything.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ```mermaid
 graph LR
@@ -101,6 +133,37 @@ Step 5 — Node 2 delivers to Pod 2 via its veth pair
 Step 6 — Response travels back; conntrack on Node 1 reverses the DNAT
   Pod A sees: src=10.96.45.20:80   dst=10.0.1.5:54321  ← looks like ClusterIP replied
 ```
+
+Click through each hop and watch the header change:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Pod A originates the request.</strong> <code>src: 10.0.1.5:54321 → dst: 10.96.45.20:80</code> &mdash; the ClusterIP, nothing listening there.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. iptables DNAT fires on Node 1</strong>, before the packet leaves the node. <code>dst</code> is rewritten to <code>10.0.2.7:8080</code> &mdash; Pod 2, picked at random from the EndpointSlice.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Kernel routing table lookup.</strong> Where is 10.0.2.7? The CNI told every node <code>10.0.2.0/24 → Node 2 (192.168.1.12)</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Packet travels to Node 2</strong> over the physical/overlay network. Outer header: <code>src=192.168.1.11 → dst=192.168.1.12</code>. Inner header (unchanged since step 2): <code>src=10.0.1.5:54321 → dst=10.0.2.7:8080</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Node 2 delivers to Pod 2</strong> via its veth pair. Pod 2 sees <code>src=10.0.1.5:54321 → dst=10.0.2.7:8080</code> &mdash; its own real IP, no rewriting from here.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Response reverses the DNAT.</strong> conntrack on Node 1 remembers the original mapping, so Pod A sees the reply as <code>src=10.96.45.20:80</code> &mdash; it looks like the ClusterIP itself answered.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ```mermaid
 sequenceDiagram
@@ -185,6 +248,38 @@ Special case: if DNAT had picked Pod A (also on Node A)
    packet never leaves Node A — CNI routes it via local veth only
 ```
 
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Request hits the Load Balancer.</strong> External traffic arrives at the AWS ALB/NLB.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. LB forwards to a NodePort.</strong> Say Node A, <code>192.168.1.11:30080</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Node A's kernel DNATs.</strong> <code>dst=10.96.45.20:80</code> is rewritten to Pod B, <code>10.0.2.7:8080</code> &mdash; which happens to live on Node B.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Routing table sends it to Node B.</strong> CNI route: <code>10.0.2.0/24 → Node B (192.168.1.12)</code>. The packet leaves Node A over the CNI network.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Node B delivers to Pod B</strong> via its veth pair.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Pod B responds</strong>, and the reply retraces the path back to Node B → Node A.
+    </div>
+    <div class="stepper-panel">
+      <strong>7. Node A un-DNATs via conntrack.</strong> The source is rewritten back to the ClusterIP so the caller sees a consistent response. (If DNAT had picked a pod also on Node A, the packet never leaves Node A at all &mdash; CNI routes it via the local veth only.)
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 ```mermaid
 sequenceDiagram
     participant LB as Load Balancer
@@ -204,6 +299,12 @@ sequenceDiagram
     Note over NA: conntrack un-DNAT<br/>src --> ClusterIP
     NA-->>LB: response to LB
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A packet is sent to a ClusterIP. Which node does the DNAT to a real pod IP happen on?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The <strong>same node that sent the packet</strong> &mdash; the iptables rule fires locally in the PREROUTING chain before the packet ever leaves the originating node. The packet never travels to a "Service node"; the ClusterIP is rewritten to a real pod IP first, then routed normally. Nothing is ever listening on the ClusterIP itself.</div>
+</div>
 
 ---
 
@@ -230,17 +331,30 @@ sequenceDiagram
 ```
 
 **iptables chain hierarchy:**
-```
-PREROUTING
-  └── KUBE-SERVICES
-        └── KUBE-SVC-XXXXXXXX  (per Service)
-              ├── KUBE-SEP-AAAA  (endpoint 1, 33% probability)
-              ├── KUBE-SEP-BBBB  (endpoint 2, 50% of remaining)
-              └── KUBE-SEP-CCCC  (endpoint 3, 100% of remaining)
-                    └── DNAT to pod IP:port
+
+```mermaid
+graph TD
+    classDef chain fill:#8e44ad,stroke:#6c3483,color:#fff,rx:6
+    classDef sep fill:#e67e22,stroke:#d35400,color:#fff,rx:6
+    classDef dnat fill:#2ecc71,stroke:#27ae60,color:#fff,rx:6
+
+    PRE["PREROUTING"]:::chain --> SVC["KUBE-SERVICES"]:::chain
+    SVC --> XXX["KUBE-SVC-XXXXXXXX (per Service)"]:::chain
+    XXX -->|"33% probability"| A["KUBE-SEP-AAAA (endpoint 1)"]:::sep
+    XXX -->|"50% of remaining"| B["KUBE-SEP-BBBB (endpoint 2)"]:::sep
+    XXX -->|"100% of remaining"| C["KUBE-SEP-CCCC (endpoint 3)"]:::sep
+    A --> DNAT["DNAT to pod IP:port"]:::dnat
+    B --> DNAT
+    C --> DNAT
 ```
 
 **IPVS mode** (alternative to iptables): creates a virtual server in the kernel's IPVS table instead. Scales better for large clusters (1000s of services) — O(1) lookup vs O(N) iptables scan.
+
+<div class="quiz-card">
+  <p class="quiz-q">In iptables mode, how does kube-proxy get a uniform random distribution across N backend pods using rules that must be evaluated in a fixed order?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Each <code>KUBE-SEP-*</code> jump gets a decreasing <code>--probability</code>: the first has a 1/N chance of matching, the second 1/(N-1) of whatever's left, and so on until the last rule matches 100% of whatever remains. Evaluated in order, that decreasing-probability chain works out to a uniform random pick across all N backends.</div>
+</div>
 
 ---
 
@@ -274,6 +388,35 @@ graph TD
 | `Headless` | DNS → pod IPs directly | StatefulSets, service discovery |
 | `ExternalName` | CNAME to external DNS | Database in RDS, external service aliasing |
 
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="svc-clusterip" class="active">ClusterIP</button>
+    <button data-tab="svc-nodeport">NodePort</button>
+    <button data-tab="svc-lb">LoadBalancer</button>
+    <button data-tab="svc-extname">ExternalName</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="svc-clusterip">
+      <strong>Default type.</strong> A virtual IP, reachable only from inside the cluster. No node port, no cloud LB. Used for almost all service-to-service traffic &mdash; the vast majority of Services in a cluster are this type.
+    </div>
+    <div class="tab-panel" data-tab-panel="svc-nodeport">
+      <strong>ClusterIP, plus a port opened on every node.</strong> Allocates a port in the 30000&ndash;32767 range and opens it on <em>every</em> node's IP, cluster-wide &mdash; even nodes with no matching pod forward the connection onward. Reachable from outside the cluster via <code>&lt;any-node-IP&gt;:&lt;nodePort&gt;</code>, mostly used for bare-metal/dev clusters with no cloud LB to provision.
+    </div>
+    <div class="tab-panel" data-tab-panel="svc-lb">
+      <strong>NodePort, plus a provisioned cloud load balancer.</strong> The cloud controller manager asks the cloud provider for a real ALB/NLB that targets the NodePort (or pod IPs directly, depending on the controller). This is the standard way production traffic enters the cluster from the internet.
+    </div>
+    <div class="tab-panel" data-tab-panel="svc-extname">
+      <strong>Not a proxy at all &mdash; a DNS alias.</strong> Returns a CNAME to an external hostname (e.g. an RDS endpoint). No ClusterIP, no selector, no pod backing it &mdash; kube-proxy never touches it. Purely a DNS-level indirection so in-cluster code can address an external dependency by a cluster-local name.
+    </div>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Does a NodePort Service replace the ClusterIP, or add to it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Adds to it. A NodePort Service still gets a ClusterIP &mdash; the NodePort is an additional entry point opened on every node. Traffic still flows NodePort &rarr; ClusterIP &rarr; pod, it doesn't bypass the ClusterIP layer.</div>
+</div>
+
 ---
 
 ## Traffic Policies: internalTrafficPolicy & externalTrafficPolicy
@@ -288,6 +431,19 @@ Applies to traffic arriving via a NodePort or cloud LoadBalancer.
 - **`Local`**: a node only forwards to pods **running on that same node**. No cross-node hop, **no SNAT**, so the pod sees the real **client source IP**. Downside: if a node has no local pod, traffic to that node is **dropped** (blackholed), and load is only as even as the LB's spread across nodes × pods-per-node.
 
 **healthCheckNodePort** — When `externalTrafficPolicy: Local` is set on a LoadBalancer, kube-proxy opens a dedicated health-check port (auto-assigned in the 30000–32767 range, visible in `.spec.healthCheckNodePort`) that returns HTTP 200 only on nodes that have ≥1 ready local endpoint, else 503. The cloud LB probes this port and **stops sending traffic to nodes with no local pod**, avoiding the blackhole. This is why `Local` needs a spread of pods (e.g. a DaemonSet or good anti-affinity) to keep load balanced.
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="etp-cluster" class="active">Cluster (default)</button>
+    <button data-toggle-opt="etp-local" class="state-warn">Local</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="etp-cluster">
+    Any node can forward to any pod. A node with no local pod DNATs to a remote one &mdash; extra network hop, and the source IP must be SNAT'd so the reply routes back through the same node, so the pod sees the <strong>node's IP, not the client's</strong>. Upside: traffic spreads evenly regardless of where pods happen to be scheduled.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="etp-local">
+    A node only forwards to pods running on itself. No cross-node hop, no SNAT, so the pod sees the <strong>real client IP</strong>. Downside: a node with no local pod would blackhole traffic &mdash; avoided by <code>healthCheckNodePort</code>, which tells the cloud LB to stop routing to nodes with zero local endpoints.
+  </div>
+</div>
 
 ### internalTrafficPolicy (ClusterIP)
 
@@ -346,6 +502,12 @@ spec:
 
 > Combine `externalTrafficPolicy: Local` with a DaemonSet (or pod anti-affinity) so every node that receives external traffic has a local endpoint — otherwise the healthCheckNodePort takes nodes out of rotation and load concentrates on the remaining nodes.
 
+<div class="quiz-card">
+  <p class="quiz-q">Why does externalTrafficPolicy: Local need a DaemonSet or good anti-affinity to work well, when Cluster doesn't?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Local only forwards to pods on the <em>same</em> node the traffic landed on &mdash; there's no fallback to a remote pod. If pods are clustered on a few nodes, the LB keeps sending traffic to nodes with no local pod (until healthCheckNodePort takes them out of rotation), and load concentrates unevenly on whichever nodes do have a pod. Spreading one pod per node removes that imbalance.</div>
+</div>
+
 ---
 
 ## DNS in Kubernetes
@@ -378,6 +540,12 @@ graph LR
 | `_http._tcp.my-svc.ns.svc.cluster.local` | SRV record | Port discovery |
 
 **ndots:5** — pods have `ndots:5` in resolv.conf. Names with fewer than 5 dots trigger search domain expansion before trying as-is. `api.example.com` (3 dots) tries `api.example.com.payments.svc.cluster.local` first, then falls through. Use FQDN with trailing dot for external names to skip search: `api.example.com.`
+
+<div class="quiz-card">
+  <p class="quiz-q">A pod looks up <code>api.example.com</code> (an external domain). Why is the first DNS query it actually sends not for that name?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>ndots:5</code> in resolv.conf means any name with fewer than 5 dots gets the search domains appended and tried first. <code>api.example.com</code> has only 2 dots, so CoreDNS first tries <code>api.example.com.payments.svc.cluster.local</code> (and the other search domains) before falling through to the bare name &mdash; wasted queries and latency. A trailing dot (<code>api.example.com.</code>) or a lower ndots skips this.</div>
+</div>
 
 ---
 
@@ -436,6 +604,12 @@ spec:
       secretName: api-tls-cert
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">You apply an Ingress resource but there's no Ingress Controller running in the cluster. What happens?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Nothing routes. The Ingress object is accepted by the API server and just sits there &mdash; it's a routing <em>spec</em>, not a running proxy. Something has to watch Ingress resources and actually configure a reverse proxy (nginx, the AWS ALB Controller, Traefik...) for the rules to do anything.</div>
+</div>
+
 ---
 
 ## NetworkPolicy — Pod-Level Firewall
@@ -493,6 +667,12 @@ spec:
 ```
 
 **Important:** If you apply a NetworkPolicy to a pod, ALL traffic not explicitly allowed is denied. Don't forget to allow DNS (port 53 UDP) in egress — pods will break without it.
+
+<div class="quiz-card">
+  <p class="quiz-q">You write a NetworkPolicy for the payments pod that only allows ingress from app=api and egress to app=postgres — no DNS rule. What happens to that pod's DNS lookups?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>They break. The moment a NetworkPolicy applies to a pod, everything not explicitly allowed is denied &mdash; and DNS (port 53) isn't in this policy's egress rules. You have to explicitly add a UDP/53 egress rule (usually to <code>namespaceSelector: {}</code>, since CoreDNS lives in another namespace) or the pod can't resolve any names, including the Service names it needs to reach.</div>
+</div>
 
 ---
 
@@ -579,6 +759,34 @@ Not involved during request handling"]:::note
     CNI --> POD3
 ```
 
+Same journey, one hop at a time:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Internet → ALB.</strong> User's HTTPS request hits the AWS ALB. TLS terminates here.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. ALB → Ingress Controller.</strong> With <code>target-type: ip</code>, the ALB forwards directly to an Ingress Controller pod's IP (via VPC CNI) &mdash; no iptables DNAT on this leg at all.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Ingress Controller → Service.</strong> The controller matches host + path rules and forwards to the matching Service's ClusterIP.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Kernel picks the pod.</strong> The packet hits the destination node's PREROUTING chain. iptables rules &mdash; already programmed by kube-proxy, not decided live &mdash; DNAT the ClusterIP to one specific pod IP, roughly uniformly at random.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Delivery.</strong> The kernel routes the now-rewritten packet to the chosen pod via the CNI-configured routes. CNI itself isn't running anywhere in this path &mdash; it only set up the plumbing when the pod started.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 ### What Happens if kube-proxy Crashes?
 
 ```mermaid
@@ -620,6 +828,11 @@ graph LR
 
 **Key insight:** kube-proxy writes rules into the kernel and steps aside. The kernel does the actual packet routing. Crashing kube-proxy removes the rule-updater, not the rules themselves — so existing traffic survives but the system can't adapt to changes.
 
+<div class="quiz-card">
+  <p class="quiz-q">Along the ALB → Ingress Controller → Service → Pod path, which single hop is the one where iptables DNAT actually happens?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Only the Ingress Controller → ClusterIP leg. The ALB → Ingress Controller hop targets a pod IP directly (no DNAT involved), and CNI only sets up plumbing at pod startup &mdash; it isn't in the live packet path either. iptables DNAT is specifically how the ClusterIP gets translated to a real backend pod IP.</div>
+</div>
 
 ---
 
@@ -663,6 +876,12 @@ dst: ClusterIP 10.96.45.20:80"]:::svc
 - **iptables mode:** `KUBE-SVC-XXX` chain has N `KUBE-SEP-*` jumps with decreasing probability: first rule has `1/N` probability (via `--probability`), second has `1/(N-1)`, last has 100%. Net result: uniform random selection. Stateless — no session affinity by default.
 - **IPVS mode:** Kernel's IPVS virtual server with configurable algorithms: round-robin, least-connections, source-hash (for session affinity). O(1) lookup vs O(N) iptables scan — scales better above ~1000 services.
 
+<div class="quiz-card">
+  <p class="quiz-q">If kube-proxy is fully stopped but its previously-written iptables rules are still in the kernel, who picks which pod a new connection goes to?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The Linux kernel still does &mdash; it evaluates the existing iptables rules on every packet regardless of whether kube-proxy is running. kube-proxy's job is only to <em>program</em> the rules ahead of time; the kernel is what actually applies them per-packet.</div>
+</div>
+
 ---
 
 ## What the CNI Plugin Does (and When)
@@ -699,6 +918,12 @@ CNI plugin itself is NOT running"]:::kernel
 ```
 
 **CNI is a one-shot setup tool, not a running daemon in the packet path.** (Exception: Cilium with eBPF bypasses iptables and does handle packets via its kernel programs, but that's a different architecture.)
+
+<div class="quiz-card">
+  <p class="quiz-q">A pod has been running and serving traffic for an hour. Is the CNI plugin doing anything for that pod's traffic right now?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No (with iptables/IPVS-based CNIs). CNI ran once at pod startup to create the veth pair, assign the pod IP, and program routes, then exited &mdash; it's not a daemon sitting in the packet path. The kernel forwards packets using the routes CNI already installed. (Cilium's eBPF mode is the exception: it does have kernel programs actively handling packets.)</div>
+</div>
 
 ---
 
@@ -743,6 +968,31 @@ kube-proxy recovers"]
     end
 ```
 
+Step through the timeline:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>t = 0. kube-proxy process dies.</strong> The DaemonSet pod crashes; Kubernetes schedules a restart per <code>restartPolicy: Always</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>t = 0 to ~30s: existing rules keep working.</strong> iptables/IPVS rules live in kernel memory, not in the kube-proxy process. Existing TCP connections are unaffected, and new connections to already-existing Services still succeed.
+    </div>
+    <div class="stepper-panel">
+      <strong>Meanwhile: silent degradation.</strong> A new Service gets no rules at all (unreachable). A scaled-down pod's stale IP stays in the rules (connections fail). A scaled-up pod's new IP is never programmed (gets no traffic). Nothing errors loudly &mdash; it just doesn't update.
+    </div>
+    <div class="stepper-panel">
+      <strong>t ≈ 30s: recovery.</strong> kube-proxy restarts, re-syncs full state from the API server, and applies every EndpointSlice update it missed while it was down. No manual intervention needed.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 **Why existing traffic survives:** iptables rules are programmed into the Linux kernel's netfilter tables — they live in kernel memory, not in the kube-proxy process. Killing kube-proxy removes the programmer, not the rules.
 
 **Why new things break:** kube-proxy watches the API Server for `EndpointSlice` and `Service` changes. While it's down, changes queue up unprocessed. The kernel has no way to know pods changed — it keeps routing to whatever IPs were last programmed.
@@ -752,6 +1002,12 @@ kube-proxy recovers"]
 **Summary:** kube-proxy crash ≠ immediate outage. The kernel rules persist. But the system degrades over time as pods churn — stale endpoints accumulate, new services are unreachable. In production, kube-proxy runs as a DaemonSet with `restartPolicy: Always` so it recovers in seconds.
 
 **Vanilla K8s vs EKS behavior is identical here** — both rely on the same kernel iptables/IPVS mechanism. EKS just manages the kube-proxy DaemonSet as a managed add-on that auto-heals.
+
+<div class="quiz-card">
+  <p class="quiz-q">kube-proxy has been crashed for 20 seconds. A pod that was already running when it crashed gets terminated during that window. What happens to traffic still being sent to that pod's old IP?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It keeps getting DNAT'd to the now-dead pod's IP and fails. kube-proxy isn't running to notice the EndpointSlice update and reprogram the iptables rule &mdash; the kernel has no way to know the pod is gone, so it keeps routing to whatever was last programmed until kube-proxy recovers and re-syncs.</div>
+</div>
 
 ---
 
@@ -851,6 +1107,12 @@ In EKS, CoreDNS is a **managed add-on**. AWS ensures it stays running and applie
 - Enable **NodeLocal DNSCache** — reduces CoreDNS load by ~60-80% and provides node-level fault tolerance
 - Set `minReplicas: 2` in the CoreDNS HPA (EKS auto-scales CoreDNS based on node count)
 - Use **PodDisruptionBudget** on CoreDNS to prevent both pods from being evicted simultaneously during node drains
+
+<div class="quiz-card">
+  <p class="quiz-q">CoreDNS is completely down. A pod holding an existing gRPC connection to another Service keeps working fine, but a script running fresh <code>curl</code> calls to that same Service name every time starts failing. Why the difference?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The gRPC connection is already established &mdash; it resolved the name once, and its persistent, multiplexed HTTP/2 connection doesn't need to re-resolve for each request. Fresh <code>curl</code> calls (especially short-lived HTTP/1.1 with <code>Connection: close</code>) do a new DNS lookup every time, and every one of those fails while CoreDNS is down.</div>
+</div>
 
 ---
 
@@ -974,6 +1236,12 @@ These annotations are nginx-specific. Switching to Traefik means rewriting all a
 | Cost | High (1 LB per service) | Low (1 LB total) | Low (1 LB total) |
 | Complexity | Low | Medium | Higher (newer, less tooling) |
 | Non-HTTP protocols | Yes (NLB for TCP/UDP) | HTTP/HTTPS only (mostly) | TCP/UDP via `TCPRoute` |
+
+<div class="quiz-card">
+  <p class="quiz-q">What two things does a plain LoadBalancer Service lack that Ingress provides?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Host/path-based routing and built-in TLS termination. A LoadBalancer Service gets its own external IP and cloud LB per Service with no routing logic &mdash; Ingress lets many host/path rules share a single LB and terminates TLS in one place, which is also why it's cheaper at scale (one LB instead of one per Service).</div>
+</div>
 
 ---
 
@@ -1147,6 +1415,12 @@ No annotation mess, team isolation built-in"]:::note
 
 **Summary:** IngressGroup is AWS LBC-specific because only AWS LBC creates real external ALBs per Ingress. nginx/Traefik already share infrastructure naturally. Gateway API solves the same multi-team sharing problem in a standardized, controller-agnostic way — which is why it's the future direction.
 
+<div class="quiz-card">
+  <p class="quiz-q">Why does IngressGroup exist as an AWS Load Balancer Controller-specific annotation, but nginx/Traefik never needed an equivalent?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>AWS LBC provisions one real ALB per Ingress resource by default, so sharing one ALB across teams/namespaces needs an explicit opt-in (<code>group.name</code>). nginx/Traefik work the opposite way: all Ingress resources are already handled by one running controller process behind one external LB &mdash; the sharing is automatic, nothing extra needed.</div>
+</div>
+
 ---
 
 ## Good to Know
@@ -1189,13 +1463,24 @@ Node 3: 10.0.3.0/24   → pods on Node 3 get IPs from here
 
 Inside each node, CNI creates a virtual bridge (`cni0`):
 
-```
-Node 1
-├── eth0: 192.168.1.11       ← physical NIC (talks to other nodes)
-└── cni0 bridge: 10.0.1.1   ← virtual switch for local pods
-    ├── veth ──── Pod A: 10.0.1.5
-    ├── veth ──── Pod B: 10.0.1.6
-    └── veth ──── Pod C: 10.0.1.7
+```mermaid
+graph TD
+    classDef nic fill:#e67e22,stroke:#d35400,color:#fff,rx:6
+    classDef bridge fill:#3498db,stroke:#2980b9,color:#fff,rx:6
+    classDef pod fill:#2ecc71,stroke:#27ae60,color:#fff,rx:6
+
+    NODE["Node 1"]
+    ETH["eth0: 192.168.1.11 (physical NIC, talks to other nodes)"]:::nic
+    BR["cni0 bridge: 10.0.1.1 (virtual switch for local pods)"]:::bridge
+    PA["Pod A: 10.0.1.5"]:::pod
+    PB["Pod B: 10.0.1.6"]:::pod
+    PC["Pod C: 10.0.1.7"]:::pod
+
+    NODE --> ETH
+    NODE --> BR
+    BR -->|"veth"| PA
+    BR -->|"veth"| PB
+    BR -->|"veth"| PC
 ```
 
 Each pod gets a `veth` pair — one end inside the pod's network namespace, the other plugged into the bridge. Pods on the same node talk via the bridge without leaving the host.
@@ -1236,6 +1521,12 @@ graph LR
 
 Pod A → Pod C: `cni0 bridge → eth0 → CNI network → eth0 (Node 2) → cni0 bridge → Pod C`. From Pod A's perspective it's just a direct IP connection to `10.0.2.5`.
 
+<div class="quiz-card">
+  <p class="quiz-q">Why does Kubernetes use three non-overlapping IP ranges (node, pod, ClusterIP) instead of just handing pods addresses from the node's own subnet?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Non-overlapping ranges let the kernel tell "this is a pod / this is a node / this is a virtual service" apart purely from the IP prefix, and let physical routers stay ignorant of individual pods. If pods shared the node's subnet, routing pod traffic would require every router to know exactly which pod lives on which node, clashing with the existing network.</div>
+</div>
+
 ---
 
 ## NetworkPolicy — Advanced Patterns
@@ -1244,8 +1535,14 @@ Pod A → Pod C: `cni0 bridge → eth0 → CNI network → eth0 (Node 2) → cni
 
 The most common NetworkPolicy bug: accidentally writing OR when you mean AND.
 
-```yaml
-# OR — either condition grants access (two separate list items)
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="np-or" class="active">OR (two list items)</button>
+    <button data-tab="np-and">AND (same list item)</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="np-or">
+      <pre><code># OR — either condition grants access (two separate list items)
 ingress:
   - from:
     - namespaceSelector:
@@ -1253,9 +1550,10 @@ ingress:
           env: prod        # any pod in the prod namespace
     - podSelector:         # OR any pod with app=api in ANY namespace
         matchLabels:
-          app: api
-
-# AND — pod must satisfy BOTH conditions (same list item, same indent)
+          app: api</code></pre>
+    </div>
+    <div class="tab-panel" data-tab-panel="np-and">
+      <pre><code># AND — pod must satisfy BOTH conditions (same list item, same indent)
 ingress:
   - from:
     - namespaceSelector:
@@ -1263,15 +1561,32 @@ ingress:
           env: prod        # pod must be in prod namespace
       podSelector:         # AND must have app=api label
         matchLabels:
-          app: api
-```
+          app: api</code></pre>
+    </div>
+  </div>
+</div>
 
 The YAML indentation is the semantic difference. `namespaceSelector` + `podSelector` at the same indent level under the same `- {}` block = AND. Separate `- {}` items = OR.
 
+<div class="quiz-card">
+  <p class="quiz-q">In a NetworkPolicy ingress rule, you need "from prod namespace AND app=api" but you put namespaceSelector and podSelector as two separate items in the `from` list instead of the same item. What did you actually write?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>OR, not AND &mdash; a much more permissive rule than intended. Separate <code>- {}</code> list items under <code>from</code> are independent alternatives (any pod in prod namespace, OR any app=api pod anywhere). Only putting both selectors at the same indent level inside the same list item makes them a combined AND condition.</div>
+</div>
+
 ### Deny-all templates
 
-```yaml
-# Deny all ingress to all pods in namespace
+Three common patterns, from strictest to most usable:
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="deny-ingress" class="active">Deny ingress</button>
+    <button data-tab="deny-egress">Deny egress</button>
+    <button data-tab="deny-dns">Deny-all + DNS (recommended)</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="deny-ingress">
+      <pre><code># Deny all ingress to all pods in namespace
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -1280,10 +1595,10 @@ metadata:
 spec:
   podSelector: {}      # {} = all pods
   policyTypes: [Ingress]
-  # No ingress rules = deny all
-
----
-# Deny all egress from all pods in namespace
+  # No ingress rules = deny all</code></pre>
+    </div>
+    <div class="tab-panel" data-tab-panel="deny-egress">
+      <pre><code># Deny all egress from all pods in namespace
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -1292,10 +1607,10 @@ metadata:
 spec:
   podSelector: {}
   policyTypes: [Egress]
-  # No egress rules = deny all (note: also blocks DNS — add port 53 exception)
-
----
-# Recommended default-deny with DNS allowed
+  # No egress rules = deny all (note: also blocks DNS — add port 53 exception)</code></pre>
+    </div>
+    <div class="tab-panel" data-tab-panel="deny-dns">
+      <pre><code># Recommended default-deny with DNS allowed
 apiVersion: networking.k8s.io/v1
 kind: NetworkPolicy
 metadata:
@@ -1309,8 +1624,10 @@ spec:
         - port: 53
           protocol: UDP
         - port: 53
-          protocol: TCP   # TCP fallback for large DNS responses
-```
+          protocol: TCP   # TCP fallback for large DNS responses</code></pre>
+    </div>
+  </div>
+</div>
 
 ### Egress to Kubernetes API server
 

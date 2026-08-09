@@ -7,6 +7,38 @@ The Kubernetes networking model has three rules:
 
 How this is implemented depends on the CNI plugin. Three patterns: overlay, direct routing, flat (VPC CNI).
 
+Each mode below gets a quick knowledge check — track how many you've cleared as you go:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
+Before going mode-by-mode, here's how the four stack up side by side:
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="samenode" class="active">Same-node</button>
+    <button data-tab="vxlan">VXLAN overlay</button>
+    <button data-tab="bgp">Calico BGP</button>
+    <button data-tab="vpccni">VPC CNI (AWS)</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="samenode">
+      <strong>Pod-to-pod, same node.</strong> No encapsulation, no routing decision at all &mdash; a Linux bridge (<code>cbr0</code>/<code>docker0</code>) forwards frames between each pod's veth pair based on its MAC table. Doesn't apply once pods land on different nodes.
+    </div>
+    <div class="tab-panel" data-tab-panel="vxlan">
+      <strong>Overlay (Flannel).</strong> Cross-node packets get wrapped in an outer Ethernet/IP/UDP header (VXLAN, port 4789) so they can ride an underlay that has no idea what a pod CIDR is. Costs 50 bytes of overhead per packet &mdash; pod MTU has to shrink to compensate.
+    </div>
+    <div class="tab-panel" data-tab-panel="bgp">
+      <strong>Direct routing (Calico BGP).</strong> Each node announces its own pod CIDR to the rest of the fabric over BGP, so the underlay's own routing table sends packets straight to the right node &mdash; zero encapsulation, full MTU. Needs a BGP-capable underlay or route injection.
+    </div>
+    <div class="tab-panel" data-tab-panel="vpccni">
+      <strong>Flat network (AWS VPC CNI).</strong> Every pod gets a real ENI secondary IP straight from the VPC subnet &mdash; no overlay, no BGP, pods are first-class VPC citizens. Zero overhead, but capped by how many secondary IPs an instance's ENIs can hold.
+    </div>
+  </div>
+</div>
+
 ---
 
 ## 1. Same-Node: Pod-to-Pod
@@ -25,12 +57,43 @@ flowchart LR
 3. Linux bridge (`cbr0`) sees the packet, looks up MAC table → forwards to `vethBBB`
 4. Packet enters Pod B's netns through `vethBBB` → arrives at Pod B's `eth0`
 
+Step through it:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Pod A sends.</strong> App inside Pod A sends to <code>10.0.1.3</code>. The kernel checks Pod A's own routing table &mdash; default route is via its <code>eth0</code>, the pod-side end of the veth pair.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Exit through the veth pair.</strong> The packet leaves Pod A's network namespace through the veth pair and shows up on the host side as <code>vethAAA</code> &mdash; an ordinary host-side network interface.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Bridge forwards.</strong> The Linux bridge (<code>cbr0</code>/<code>docker0</code>) receives it, checks its MAC table, and forwards straight to <code>vethBBB</code>. No L3 routing decision happens here &mdash; it's a plain L2 bridge lookup.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Delivery.</strong> The packet enters Pod B's netns through <code>vethBBB</code> and arrives at Pod B's <code>eth0</code>.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 ```bash
 # Inspect on a node
 ip link show type veth          # list all veth pairs
 brctl show cbr0                 # list bridge + attached veths
 ip route                        # node routing table
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">On the same node, does traffic between two pods get an L3 routing decision made about it anywhere on the node?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No &mdash; once the packet leaves Pod A's netns via the veth pair, the Linux bridge (<code>cbr0</code>/<code>docker0</code>) forwards it to Pod B's veth purely by MAC table lookup. That's an L2 bridging decision, not a routed one; same-node pod traffic never touches the node's IP routing table.</div>
+</div>
 
 ---
 
@@ -60,6 +123,31 @@ flowchart LR
 
 **MTU implication:** If the underlay MTU is 1500, pod MTU must be set to **1450** (1500 - 50). Flannel sets this automatically on the `flannel.1` interface. Wrong MTU → packets silently fragmented or dropped.
 
+Step through it:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Pod A sends.</strong> A normal packet, Pod A (<code>10.0.1.2</code>) to Pod B (<code>10.0.2.3</code>), leaves via the veth pair and hits Node 1's <code>flannel.1</code> VXLAN device.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Encapsulation.</strong> <code>flannel.1</code> wraps the whole original packet in a new outer header: outer src=Node 1's IP, outer dst=Node 2's IP, UDP port 4789 &mdash; 50 bytes of added overhead.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Underlay transit.</strong> The encapsulated packet crosses the physical network as an ordinary UDP packet between two node IPs. The underlay never has to know a pod CIDR exists.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Decapsulation &amp; delivery.</strong> Node 2's <code>flannel.1</code> strips the outer header, recovers the original inner packet, and forwards it over the veth pair to Pod B.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 ```bash
 # Check pod MTU
 kubectl exec <pod> -- ip link show eth0 | grep mtu
@@ -71,6 +159,12 @@ ip route | grep flannel    # routes for each remote node's pod CIDR
 # Test MTU: ping with DF bit set and large payload
 ping -M do -s 1450 10.0.2.3   # if fails → MTU problem
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">The underlay network MTU is 1500. What pod MTU should Flannel VXLAN use, and why?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>1450. VXLAN encapsulation adds 50 bytes of overhead (outer Ethernet + IP + UDP + VXLAN headers), so the inner pod packet has to be 50 bytes smaller than the underlay's MTU &mdash; otherwise the encapsulated packet exceeds 1500 bytes and gets silently fragmented or dropped.</div>
+</div>
 
 ---
 
@@ -99,6 +193,31 @@ flowchart LR
 3. Packet sent to Node 2's IP — **no encapsulation, full MTU available**
 4. Node 2 routing table: `10.0.2.3 via vethXXX` → forwarded to Pod B
 
+Step through it:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Pod A sends.</strong> App inside Pod A sends to <code>10.0.2.3</code>, an IP on Node 2's pod CIDR.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Local route lookup.</strong> Node 1's routing table already has <code>10.0.2.0/24 via 10.1.2.1</code> &mdash; learned from BGP, not configured by hand.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Direct node-to-node delivery.</strong> The packet goes straight to Node 2's IP, unmodified &mdash; no encapsulation, no extra headers, full MTU available the whole way.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Node 2 delivers.</strong> Node 2's own routing table sends it to <code>vethXXX</code>, which hands it to Pod B.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 **Requirement:** The underlay network must either:
 - Support BGP (ToR switches in bare metal)
 - Allow route injection (AWS VPC with `--disable-pod-vpc-route-table-management=false`)
@@ -113,6 +232,12 @@ ip route | grep bird   # Bird is the BGP daemon Calico uses
 # Check encapsulation mode
 calicoctl get felixconfiguration default -o yaml | grep encapsulation
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">True or false: Calico BGP mode works unmodified on any network, the same way a VXLAN overlay does.</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>False. BGP direct routing needs the underlay to either speak BGP itself (ToR switches in bare metal) or allow route injection (as with AWS VPC route tables) &mdash; it depends on the underlay actually learning and honoring pod-CIDR routes. A VXLAN overlay doesn't need any of that, which is exactly why overlays exist for underlays that can't or won't cooperate.</div>
+</div>
 
 ---
 
@@ -142,6 +267,31 @@ flowchart LR
 2. It pre-allocates **secondary IPs** on the node's ENIs (or creates additional ENIs)
 3. When a pod is created, the CNI plugin assigns one of the pre-allocated IPs to the pod
 4. VPC routing table already knows these IPs belong to this EC2 instance
+
+Step through a packet's actual cross-node journey (not the setup steps above):
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Pod A sends.</strong> Pod A addresses the packet straight to Pod C's IP (<code>10.0.2.30</code>) &mdash; a real VPC address, not something translated later.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Kernel routes via the ENI.</strong> Node 1's routing table sends the packet straight out its ENI, unmodified, addressed to Pod C's IP.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. VPC routing table forwards.</strong> The subnet's route table already knows <code>10.0.2.30</code> belongs to EC2 Node 2's ENI, and delivers it there directly &mdash; ordinary EC2-to-EC2 routing, no CNI-specific handling in the fabric at all.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Delivery.</strong> Node 2 recognizes the destination as one of its own ENI secondary IPs (bound to Pod C) and hands the packet to Pod C's veth.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 **Benefits:**
 - Zero encapsulation overhead — same performance as EC2-to-EC2
@@ -178,6 +328,12 @@ kubectl get node <node> -o json | jq '.metadata.annotations["vpc.amazonaws.com/n
 kubectl logs -n kube-system -l k8s-app=aws-node --tail=50
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">Why does enabling prefix delegation let a node run far more pods without adding a single ENI?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Each ENI slot that used to hold one secondary IP now holds a whole /28 prefix &mdash; 16 IPs &mdash; instead. Same number of ENIs and slots, 16x more usable addresses per slot, so the pod ceiling per node jumps accordingly (e.g. an m5.large goes from 27 pods to 432).</div>
+</div>
+
 ---
 
 ## 5. MTU Summary
@@ -202,6 +358,12 @@ kubectl exec <pod> -- ping -M do -s 1440 <other-pod-ip>
 # Check CNI's configured MTU
 cat /etc/cni/net.d/10-flannel.conflist | jq '.plugins[0].mtu'
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A pod's MTU is left higher than what its CNI's encapsulation can actually deliver end to end. What's the typical symptom?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Packets get silently fragmented or dropped &mdash; not a clean, visible error. This is exactly why the recommended pod MTU in the table above has to account for each CNI's encapsulation overhead rather than just matching the underlay's MTU.</div>
+</div>
 
 ---
 

@@ -1,5 +1,12 @@
 # Resource Requests and Limits
 
+Each major section below ends with a quick knowledge check — try to answer before revealing. Track how many you've cleared:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ## 1. Requests vs Limits
 
 ```mermaid
@@ -28,6 +35,12 @@ resources:
     cpu: "1"          # throttled above this
     memory: "512Mi"   # OOMKilled above this
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A container exceeds its CPU limit vs exceeds its memory limit — what happens in each case?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Exceeding the <strong>CPU</strong> limit gets you <strong>throttled</strong> &mdash; the CFS quota runs out and the container is paused until the next period, but nothing crashes. Exceeding the <strong>memory</strong> limit gets the container <strong>OOMKilled</strong> &mdash; it's terminated and restarted. CPU is a soft, compressible ceiling; memory is a hard, incompressible one.</div>
+</div>
 
 ---
 
@@ -70,6 +83,12 @@ container_cpu_cfs_throttled_periods_total
 container_cpu_cfs_periods_total
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">A container averages just 0.1 CPU of actual usage but has a 2 CPU limit. Can it still get throttled?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Yes. Throttling is decided per 100ms CFS period, not on a long-run average &mdash; a single burst can consume the entire 2-CPU quota in the first few milliseconds of a period, stalling the container for the rest of it. Low average CPU tells you nothing about whether a burst inside any given period exhausted the quota.</div>
+</div>
+
 ---
 
 ## 3. Memory Eviction Hierarchy
@@ -86,6 +105,37 @@ flowchart TD
     EV3 --> NE[Node eviction<br/>kubelet drains node]
 ```
 
+Step through the escalation in order — it's two separate mechanisms chained together, not one:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Container exceeds its own limit.</strong> If the container's memory usage crosses its own <code>limits.memory</code>, it's OOMKilled immediately &mdash; regardless of how much memory the rest of the node has free. Only that container restarts.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Node comes under memory pressure.</strong> Separately from any single container's limit, the kubelet watches overall node memory. Once it crosses the configured eviction threshold, it starts reclaiming by evicting whole pods.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. BestEffort pods evicted first.</strong> Pods with no requests or limits at all have nothing reserved and no protection &mdash; they're the first to go.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Burstable pods exceeding their requests, next.</strong> If evicting BestEffort pods didn't free enough memory, the kubelet moves on to Burstable pods using more than they requested.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Guaranteed pods, last resort.</strong> Only if the node is still critically short does the kubelet touch Guaranteed pods &mdash; the class it protects the longest.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Node eviction.</strong> If reclaiming pod-by-pod still isn't enough, the kubelet drains the node entirely and everything left gets rescheduled elsewhere.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 **OOMKilled** = container-level, only that container restarts.  
 **Node eviction** = pod-level, entire pod rescheduled elsewhere.
 
@@ -100,6 +150,12 @@ evictionSoft:
 evictionSoftGracePeriod:
   memory.available: "30s"
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A container hits its own memory limit while the node as a whole has plenty of free memory. Is it OOMKilled?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Yes &mdash; OOMKill is enforced per-container against that container's own limit, completely independent of node-wide memory pressure. Node-level eviction (BestEffort &rarr; Burstable &rarr; Guaranteed) is a separate mechanism that only kicks in when the <em>node</em> is short on memory, and it removes whole pods, not just one container.</div>
+</div>
 
 ---
 
@@ -122,6 +178,25 @@ flowchart TD
 | Burstable | Any `requests` set, `requests < limits` | 2–999 (proportional to usage) | Middle |
 | BestEffort | No `requests` or `limits` set | 1000 (first to be killed) | First |
 
+The table above is the reference; flip through the classes to see what each one actually means in practice:
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="guaranteed" class="active state-ok">Guaranteed</button>
+    <button data-toggle-opt="burstable" class="state-warn">Burstable</button>
+    <button data-toggle-opt="besteffort" class="state-bad">BestEffort</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="guaranteed">
+    <strong>requests == limits, for every container, for both CPU and memory.</strong> Highest priority class &mdash; <code>oomScoreAdj</code> of <code>-998</code>, last to be killed under memory pressure. The tradeoff: you're hard-throttled at exactly <code>limits.cpu</code>, with zero burst headroom for GC pauses or request spikes.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="burstable">
+    <strong>At least one container has a request set, and requests &lt; limits.</strong> Middle priority &mdash; <code>oomScoreAdj</code> somewhere in 2&ndash;999, roughly proportional to how far over its request the container is using. Can burst above its request when the node has spare capacity, but is the second class evicted when the node runs short.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="besteffort">
+    <strong>No requests or limits set at all, for any container.</strong> Lowest priority &mdash; <code>oomScoreAdj</code> of <code>1000</code>, first to be killed the moment the node comes under memory pressure. Nothing is reserved for it and nothing caps it either.
+  </div>
+</div>
+
 ```yaml
 # Guaranteed example
 resources:
@@ -132,6 +207,12 @@ resources:
     cpu: "500m"      # must equal request
     memory: "256Mi"  # must equal request
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A pod sets requests == limits for CPU, but leaves memory with no limit at all. What QoS class is it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Burstable, not Guaranteed. Guaranteed requires requests == limits for <em>every</em> container and <em>every</em> resource (both CPU and memory) &mdash; matching on just one resource still leaves it in the middle tier, evicted before any truly Guaranteed pod.</div>
+</div>
 
 ---
 
@@ -243,19 +324,17 @@ spec:
 
 **VPA + HPA conflict:** Don't use both targeting CPU/memory on the same deployment. Use VPA for right-sizing, HPA on custom metrics (RPS, queue depth).
 
+<div class="quiz-card">
+  <p class="quiz-q">Should VPA in Auto mode and HPA both target CPU/memory on the same deployment?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. VPA changes a pod's requests/limits while HPA scales replica count off the same metrics &mdash; running both against CPU/memory on the same deployment means they fight each other. Use VPA for right-sizing and point HPA at a custom metric like RPS or queue depth instead.</div>
+</div>
+
 ---
 
 ## 8. Node Allocatable Chain
 
 Not all node capacity is available to pods. The chain from raw capacity to schedulable capacity:
-
-```
-Node Capacity (total hardware)
-  └─ kube-reserved  (CPU/memory reserved for kubelet, container runtime)
-  └─ system-reserved (CPU/memory reserved for OS processes)
-  └─ eviction-threshold (kubelet won't schedule here — kept as safety buffer)
-  └─ Allocatable (what the scheduler sees — what your pod requests count against)
-```
 
 ```mermaid
 flowchart TD
@@ -265,6 +344,34 @@ flowchart TD
     ET["- eviction threshold<br>e.g. 200Mi RAM"] --> ALLOC
     ALLOC["= Allocatable<br>what scheduler uses for bin-packing<br>e.g. 15.6 CPU, 62.3Gi RAM"]
 ```
+
+Step through the same chain one deduction at a time:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Start with Node Capacity.</strong> The raw hardware total &mdash; e.g. 16 CPU, 64Gi RAM. This is what <code>kubectl describe node</code> shows under <code>Capacity:</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Subtract kube-reserved.</strong> CPU and memory carved out for the kubelet and container runtime itself, so they always have room to run.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Subtract system-reserved.</strong> CPU and memory carved out for OS-level processes running outside Kubernetes entirely (sshd, systemd, etc).
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Subtract the eviction threshold.</strong> A safety buffer the kubelet keeps free and refuses to schedule into, so a node doesn't hit hard memory pressure the instant pods fill it up.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. What's left is Allocatable.</strong> The only number the scheduler actually bin-packs pod <code>requests</code> against &mdash; shown under <code>Allocatable:</code> in <code>kubectl describe node</code>.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ```bash
 # Check allocatable vs capacity on a node
@@ -311,6 +418,12 @@ evictionHard:
   memory.available: "200Mi"
   nodefs.available: "10%"
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q"><code>kubectl top nodes</code> shows a node at 10% actual utilization. Can new pods still fail to schedule there?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Yes. The scheduler bin-packs on <strong>requests</strong>, not on what <code>top</code> reports as actual usage. A node can be nearly idle in practice but already 100% requested &mdash; at that point every new pod pends, no matter how much real headroom exists.</div>
+</div>
 
 ---
 
@@ -373,6 +486,31 @@ Timeline:
   100ms  New period begins → quota refilled
   150ms  Quota exhausted again → throttled
 ```
+
+Step through that same 150ms window:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. 0ms — period starts.</strong> A fresh CFS period begins. The container has its full quota available &mdash; 50ms of CPU time, for a 500m limit.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. 50ms — quota exhausted, throttled.</strong> The container has burned through its entire 50ms allowance. The kernel stops scheduling it &mdash; sleeping &mdash; for the rest of the period, even if the node has idle CPU sitting right there.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. 100ms — new period, quota refilled.</strong> The container gets a fresh 50ms to spend, and resumes running.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. 150ms — throttled again.</strong> If the workload is still busy, it burns through the fresh quota just as fast and gets throttled a second time. This cycle repeats every period for as long as the burst lasts.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 A container with a spiky workload (GC pause, request burst) hits the quota immediately, introducing 50ms latency spikes that don't show up in average CPU metrics.
 
@@ -476,18 +614,50 @@ kubectl describe vpa payments-vpa -n payments
 # If using HPA, use VPA in Off or Recommender-only mode
 ```
 
+Step through the rollout instead of reading it as one block of bash comments:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Install VPA.</strong> Apply the VPA CRDs and controller components to the cluster.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Create the VPA in Off mode.</strong> <code>updateMode: "Off"</code> means recommendations only &mdash; no pod is touched or restarted yet.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Wait 24–48h, then read the recommendation.</strong> <code>kubectl describe vpa</code> gives a Lower Bound, Target, and Upper Bound per container, built from observed usage.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Apply the Target as your new requests.</strong> Update the deployment's <code>requests</code> to match the recommendation, and adjust or drop the CPU limit accordingly.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Switch to Auto mode for ongoing right-sizing.</strong> VPA now evicts and recreates pods on its own as recommendations drift &mdash; but only if nothing else (like HPA on the same CPU/memory metric) is also trying to resize the same deployment.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 ### CPU limit decision matrix
 
-```
-Is the workload latency-sensitive (API, gRPC, real-time)?
-  └── Yes → Remove CPU limit; set accurate requests; use throttling alert
-  └── No  → Set CPU limit; use Guaranteed QoS if memory predictable
+```mermaid
+flowchart TD
+    Q1{"Latency-sensitive?<br/>(API, gRPC, real-time)"} -->|Yes| A1["Remove CPU limit<br/>set accurate requests<br/>alert on throttling"]
+    Q1 -->|No| A2["Set CPU limit<br/>use Guaranteed QoS if<br/>memory predictable"]
 
-Does the workload have GC-heavy language (Java, Go)?
-  └── Yes → GC causes burst; remove limit or set limit to 3-5x requests
-  └── No  → Set limit closer to requests
+    Q2{"GC-heavy language?<br/>(Java, Go)"} -->|Yes| B1["GC causes bursts<br/>remove limit, or set<br/>limit to 3-5x requests"]
+    Q2 -->|No| B2["Set limit closer<br/>to requests"]
 
-Is the node shared with untrusted/noisy tenants?
-  └── Yes → Keep CPU limit for isolation; accept some throttling
-  └── No  → Remove limit; rely on requests for fair scheduling
+    Q3{"Shared with untrusted<br/>or noisy tenants?"} -->|Yes| C1["Keep CPU limit for isolation<br/>accept some throttling"]
+    Q3 -->|No| C2["Remove limit<br/>rely on requests for<br/>fair scheduling"]
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q"><code>kubectl top</code> shows a container comfortably under its CPU limit. Does that rule out throttling?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Throttling is decided inside individual 100ms CFS periods &mdash; a burst can exhaust the quota and get throttled even though the usage <code>top</code> reports, averaged over seconds, looks well under the limit. That gap is exactly why it's the "invisible" performance killer &mdash; check <code>container_cpu_cfs_throttled_periods_total</code> directly instead of trusting average usage.</div>
+</div>

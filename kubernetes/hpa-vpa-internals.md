@@ -1,5 +1,12 @@
 # HPA and VPA — Deep Internals
 
+Every major section below ends with a quick knowledge check — try to answer before revealing.
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ## HPA — Horizontal Pod Autoscaler
 
 ### Every Stage Internals
@@ -43,6 +50,49 @@ sequenceDiagram
     CA->>SCHED: new node joins, pod gets scheduled
 ```
 
+Same flow, one stage at a time:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Metrics exposed.</strong> Every pod exposes CPU/memory via cAdvisor on its kubelet. This happens continuously, independent of HPA.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Metrics Server scrapes and aggregates.</strong> Every 15s (scrape interval) it collects per-pod CPU/memory and serves it at <code>metrics.k8s.io</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. HPA polls.</strong> Every <code>--horizontal-pod-autoscaler-sync-period</code> (default 15s), the HPA controller calls <code>GET /apis/metrics.k8s.io/v1beta1/.../pods</code> against Metrics Server.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. HPA computes desired replicas.</strong> <code>desiredReplicas = ceil(currentReplicas &times; (currentMetric/targetMetric))</code> &mdash; e.g. <code>ceil(2 &times; (87.5/70)) = 3</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. HPA patches the Deployment.</strong> It <code>PATCH</code>es <code>spec.replicas</code> via the API server. HPA never creates a Pod itself &mdash; it only ever changes a number on the scale target.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. ReplicaSet controller reacts.</strong> It sees fewer running pods than <code>spec.replicas</code> asks for and creates the missing Pod objects &mdash; <code>Pending</code>, unscheduled.
+    </div>
+    <div class="stepper-panel">
+      <strong>7. Scheduler binds.</strong> Filter &rarr; Score &rarr; Bind assigns the new Pod to a node with enough free capacity.
+    </div>
+    <div class="stepper-panel">
+      <strong>8. kubelet starts it &mdash; or Cluster Autoscaler steps in.</strong> If a node was bound, kubelet pulls the image and starts the container. If Filter found no eligible node, the Pod stays <code>Pending</code> until Cluster Autoscaler provisions one.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Does the HPA controller create Pods directly when it scales up?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. HPA only <code>PATCH</code>es <code>spec.replicas</code> on the scale target (a Deployment, typically). The ReplicaSet controller is what actually notices the new replica count and creates the Pod objects &mdash; HPA's job ends the moment it writes that one number.</div>
+</div>
+
 ### The Math
 
 ```
@@ -56,6 +106,12 @@ desiredReplicas = ceil(4 × 20/70) = ceil(1.14) = 2
 BUT: scale-down waits stabilizationWindowSeconds (default 300s)
 to avoid flapping
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">The formula says 4 pods at 20% CPU should scale down to 2 right now. Does HPA apply that immediately?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No &mdash; scale-down is gated behind <code>stabilizationWindowSeconds</code> (300s by default). Instead of reacting to the single latest computation, HPA takes the highest recommended replica count seen over that whole window before actually scaling down. Scale-up has no such default delay; scale-down does, specifically to avoid flapping on a brief dip.</div>
+</div>
 
 ### HPA QoS Classes and Behaviour
 
@@ -97,6 +153,12 @@ spec:
         periodSeconds: 60
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q"><code>scaleUp.selectPolicy: Max</code> is set with two policies: add 4 pods/60s, or double pods/60s. Does <code>Max</code> pick whichever policy produces the larger replica count, or the smaller?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The larger. <code>selectPolicy: Max</code> applies whichever policy allows the biggest change &mdash; here, whichever of "+4 pods" or "double" adds more replicas wins. <code>Min</code> would do the opposite, capping growth to the smaller of the two.</div>
+</div>
+
 ### What Happens When No Node is Available
 
 ```mermaid
@@ -111,6 +173,12 @@ flowchart TD
     SCHED2 --> KUBELET["kubelet: pull image<br>start container"]
     KUBELET --> RUNNING["Pod: Running"]
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">HPA scales a Deployment to 5 replicas, but no node has enough free CPU to schedule the new Pod. What happens to HPA's desired replica count?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Nothing reverts. The desired count stays at 5 &mdash; the new Pod just sits <code>Pending</code> with a <code>FailedScheduling</code> / "Insufficient cpu" event until Cluster Autoscaler notices it and provisions a new node. HPA doesn't retry or back off; it already did its job by writing the replica count.</div>
+</div>
 
 ### Debugging HPA
 
@@ -147,6 +215,12 @@ HPA adds more pods. VPA makes each pod bigger (more CPU/memory). Use when:
 - **Memory-bound** workloads — memory doesn't decrease with more replicas (ML model loaded in memory)
 - **Right-sizing** — you don't know the right requests/limits; start with VPA in `Off` mode for recommendations
 
+<div class="quiz-card">
+  <p class="quiz-q">Why doesn't HPA help a singleton, memory-bound workload (e.g. a leader-elected service holding a large in-memory model)?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>HPA's only lever is adding more pods, but a singleton by definition can only run one instance &mdash; there's nobody to add. And memory usage per instance doesn't shrink just because more replicas exist elsewhere; each one still needs the whole model loaded. Making that one pod bigger (VPA) is the only lever left.</div>
+</div>
+
 ### VPA Architecture
 
 ```mermaid
@@ -161,6 +235,37 @@ Three components:
 1. **Recommender** — watches pod resource usage history, computes `lowerBound`, `target`, `upperBound`
 2. **Updater** — evicts pods that are too far from target (so Admission Controller can inject new values on restart)
 3. **Admission Controller** — patches `resources` on pod creation (Mutating webhook)
+
+The three components as one cycle:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Metrics collected.</strong> Metrics Server / Prometheus records each container's historical CPU and memory usage over time.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Recommender computes bounds.</strong> It watches that history and writes <code>lowerBound</code>, <code>target</code>, and <code>upperBound</code> per container into the VPA object's status.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Updater compares to target.</strong> If the running pod's current resources are too far from the recommended target, the Updater evicts it &mdash; only in <code>Recreate</code>/<code>Auto</code> mode.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Admission Controller patches on restart.</strong> When the evicted pod's replacement is created, the MutatingWebhook injects the new <code>resources.cpu</code>/<code>memory</code> before it starts. The running pod itself is never edited in place.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Which VPA component actually restarts a running pod, and which one sets its new CPU/memory values?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The <strong>Updater</strong> triggers the restart, by evicting the pod once its resources are too far from the Recommender's target. The <strong>Admission Controller</strong> is what actually sets the new values, by patching <code>resources</code> on the replacement pod at creation time &mdash; the Updater itself never edits a pod's resources, it only evicts.</div>
+</div>
 
 ### VPA Update Modes
 
@@ -195,6 +300,12 @@ spec:
 | `Recreate` | Evicts pods to apply new recommendations (causes restart) |
 | `Auto` | Same as Recreate today; future: in-place update |
 
+<div class="quiz-card">
+  <p class="quiz-q">In <code>Off</code> mode, does the VPA Recommender still run and calculate target CPU/memory?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Yes. <code>Off</code> only stops changes being <em>applied</em> &mdash; the Recommender keeps computing lower/target/upper bounds the whole time. That's exactly why <code>Off</code> is the recommended first step: you get real recommendations to eyeball before ever letting <code>Recreate</code>/<code>Auto</code> touch a running pod.</div>
+</div>
+
 ### VPA for Singleton Applications
 
 ```mermaid
@@ -222,6 +333,12 @@ sequenceDiagram
 2. Use `updateMode: Off` + manually apply recommendations during maintenance window
 3. Use `minAvailable: 0` in PDB to allow the eviction but schedule the restart yourself
 
+<div class="quiz-card">
+  <p class="quiz-q">For a singleton pod, what's the practical effect every time the VPA Updater evicts it to apply a new recommendation?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Downtime. A normal Deployment has other replicas to absorb traffic during an eviction; a singleton has none, so every Updater-triggered eviction is a real outage window until the pod restarts and the Admission Controller re-injects its resources. That's why singleton + VPA calls for <code>updateMode: Initial</code>/<code>Off</code> or a PDB with <code>minAvailable: 0</code>, not plain <code>Auto</code>.</div>
+</div>
+
 ### Checking VPA Recommendations
 
 ```bash
@@ -246,9 +363,23 @@ kubectl describe vpa api-vpa
 
 ### HPA + VPA: Can You Use Both?
 
-**Not on the same metric.** If both target CPU:
-- VPA increases pod CPU → pods use less CPU → HPA scales in → fewer pods → more load per pod → VPA increases again → loop
+**Not on the same metric.** Whether combining them works or fights itself comes down entirely to what each one is watching. Flip between the two states:
 
-**Safe combination:**
-- HPA on custom metric (RPS, queue depth) + VPA on CPU/memory
-- Or: VPA in `Off` mode (recommendations only) + HPA on CPU (you apply VPA recommendations manually)
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="conflict" class="active state-bad">Conflicting</button>
+    <button data-toggle-opt="together" class="state-ok">Working together</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="conflict">
+    <strong>Both target CPU.</strong> VPA increases pod CPU &rarr; pods use less CPU &rarr; HPA reads that as under target and scales in (fewer pods) &rarr; more load lands on each surviving pod &rarr; VPA increases CPU again &rarr; loop. Two controllers reacting to the same signal from opposite directions, each one's action becoming the other's next trigger.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="together">
+    <strong>Different signals, or one side passive.</strong> HPA on a custom metric (RPS, queue depth) + VPA on CPU/memory &mdash; they're no longer watching the same number, so one's correction doesn't retrigger the other. Or: VPA in <code>Off</code> mode (recommendations only) + HPA on CPU &mdash; VPA never actually changes anything, you apply its recommendations manually, so there's nothing for HPA to react to.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">HPA and VPA are both configured against CPU utilization on the same Deployment. Why does this create a feedback loop instead of just working extra well?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>VPA raises each pod's CPU allocation, so the same total load now shows up as a lower utilization percentage per pod. HPA reads that drop as being under target and scales in, removing pods. Fewer pods means more load per survivor, so VPA raises CPU again &mdash; repeat indefinitely. They're both reacting to the exact same signal from opposite directions rather than covering different dimensions.</div>
+</div>

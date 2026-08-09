@@ -21,6 +21,13 @@
 | [policy-security.md](./policy-security.md) | OPA/Gatekeeper, Kyverno, multi-tenancy, ResourceQuota, NetworkPolicy isolation, PSA, seccomp, AppArmor |
 | [node-shutdown.md](./node-shutdown.md) | Graceful shutdown (systemd inhibitor), pod eviction ordering, node drain, non-graceful shutdown, lifecycle taints |
 
+Most major sections below end with a quick knowledge check — track how many you've cleared as you go:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## Architecture
@@ -84,6 +91,12 @@ graph TD
 | **CNI Plugin** | Called by kubelet on pod creation. Sets up veth pair, assigns pod IP, configures routes. |
 | **CSI Driver** | Called by kubelet to attach/mount persistent volumes into pod filesystem. |
 
+<div class="quiz-card">
+  <p class="quiz-q">Does kube-proxy actually proxy (forward) Service traffic itself?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Despite the name, kube-proxy does not sit in the data path forwarding packets. It only programs iptables/IPVS rules in the kernel — the kernel's own NAT logic does the actual traffic routing for Service ClusterIPs.</div>
+</div>
+
 ---
 
 ## `kubectl apply -f deployment.yaml` — End-to-End Flow
@@ -142,6 +155,40 @@ Key insights:
 - Scheduler only writes `spec.nodeName` — it does not start containers. kubelet is the one that actually runs the container
 - **Nothing communicates directly** — every component watches the API Server and reacts to state changes. This is the level-triggered reconciliation model
 
+Step through the same flow at the phase level, ignoring the individual API calls:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Submit.</strong> <code>kubectl</code> PATCHes the Deployment to the API Server via server-side apply. AuthN, AuthZ (RBAC), and Admission Controllers run, then the object is written to etcd.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Deployment controller reconciles.</strong> It watches Deployment objects, notices the create/update, and creates or updates a ReplicaSet (hashed from the pod template) — it never creates Pods itself.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. ReplicaSet controller reconciles.</strong> It sees the ReplicaSet wants 3 pods and 0 exist, so it creates 3 Pod objects with <code>nodeName</code> left empty.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Scheduler binds.</strong> It watches for pods with empty <code>nodeName</code>, runs Filter then Score, and writes the winning node into <code>pod.spec.nodeName</code> via the API Server.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. kubelet runs it.</strong> The kubelet on the bound node pulls the image, starts the container via the CRI, runs the readiness probe, and flips the pod to <code>ready=true</code> — at which point the EndpointSlice controller adds its IP to the Service.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Why does rolling back a Deployment to a previous version work so cleanly?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Because the Deployment controller never creates Pods directly — it only ever manages ReplicaSets, and each ReplicaSet is an immutable hash of one pod template. A rollback is just pointing the Deployment back at an older ReplicaSet that's still sitting there (scaled to 0); the ReplicaSet controller then scales it back up and scales the current one down.</div>
+</div>
+
 ---
 
 ## Scheduler Internals
@@ -175,6 +222,34 @@ graph TD
     WINNER --> BIND["Scheduler writes pod.spec.nodeName via API Server"]
 ```
 
+Walk the same pipeline one stage at a time:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Priority queue.</strong> Unscheduled pods (<code>nodeName=""</code>) are sorted by priority class before anything else happens — higher-priority pods get a scheduling attempt first.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Filter phase.</strong> Every node runs through <code>NodeUnschedulable</code> → <code>NodeResourcesFit</code> → <code>TaintToleration</code> → <code>NodeAffinity</code> (required) → <code>PodTopologySpread</code> → <code>PodAntiAffinity</code> (required) → <code>VolumeBinding</code>. Failing any single plugin eliminates that node — this phase only ever removes nodes, never ranks them.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Feasible nodes.</strong> If zero nodes survive Filter, the pod goes <code>Pending</code> and a <code>FailedScheduling</code> event is emitted — Score never runs. Otherwise every surviving node moves on.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Score phase.</strong> Each surviving node gets a 0–100 score from every scoring plugin (<code>LeastRequestedPriority</code>, <code>BalancedResourceAllocation</code>, <code>ImageLocality</code>, preferred <code>NodeAffinity</code>, <code>InterPodAffinity</code>). The scheduler sums the weighted scores per node.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Bind.</strong> The highest total score wins. The scheduler writes that node's name into <code>pod.spec.nodeName</code> via the API Server — it still hasn't started a single container.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 ### Filter Phase (Predicates)
 
 | Plugin | What it checks |
@@ -206,6 +281,12 @@ A node with MORE free resources scores HIGHER. This spreads pods across nodes.
 **BalancedResourceAllocation**: penalizes nodes where CPU and memory utilization are imbalanced (e.g., 90% CPU but 10% memory used). Encourages balanced consumption.
 
 **ImageLocality**: adds a small bonus if the container image is already cached on the node, reducing pull latency.
+
+<div class="quiz-card">
+  <p class="quiz-q">A pod fails the Filter phase on every node in the cluster. Does the Score phase still run to pick the "least bad" node?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Filter only eliminates infeasible nodes — if zero nodes remain feasible, there's nothing left to score. The pod goes Pending and a FailedScheduling event is emitted. Score never runs on a node that Filter already rejected.</div>
+</div>
 
 ---
 
@@ -260,6 +341,12 @@ Node Beta after placement: 2/8 CPU used (25%), 6/16 GB used (37.5%). High remain
 
 If you need the pod to land on Node Alpha instead, use `nodeSelector`, `nodeAffinity`, or a `PodTopologySpread` constraint with `maxSkew`.
 
+<div class="quiz-card">
+  <p class="quiz-q">Our pod requests 1 CPU / 4Gi but sets limits of 2 CPU / 6Gi. Does the scheduler's LeastRequestedPriority score use the requests or the limits?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Requests only. Limits are irrelevant to scheduling — they're enforced by cgroups at runtime (CPU throttling, OOM-kill on memory), not by the scheduler. The scheduler treats a pod's requests as the capacity it reserves on a node, full stop.</div>
+</div>
+
 ---
 
 ## etcd — The Brain's Memory
@@ -293,6 +380,12 @@ graph LR
 ```
 
 **Key insight:** Running workloads continue even when etcd is down. The cluster can't be changed (no new pods, no reschedules), but existing pods keep running.
+
+<div class="quiz-card">
+  <p class="quiz-q">etcd goes completely down for 10 minutes. What happens to Pods that were already Running before the outage started?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>They keep running. kubelet operates independently of etcd — it doesn't need to read/write etcd to keep containers alive on its own node. Only the control plane is affected: no new pods can be scheduled, no reschedules happen, and status updates queue up until etcd comes back. The cluster looks broken from the API, but existing workloads are unaffected.</div>
+</div>
 
 ### etcd Capacity — What Fills It Up
 
@@ -361,6 +454,12 @@ etcd uses Raft consensus. A cluster needs a **majority** (quorum) of nodes avail
 
 **Always run 3 or 5 etcd nodes in production.** Odd numbers minimize wasted fault tolerance. 4 nodes tolerate only 1 failure (same as 3) but has higher write latency.
 
+<div class="quiz-card">
+  <p class="quiz-q">Why does a 5-node etcd cluster tolerate 2 failures instead of the naive-seeming "more than half must die" giving you 3?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Raft needs a strict majority (quorum) of the original cluster size alive at all times to keep making progress. For 5 nodes, quorum is 3 — so you can lose at most 2 before the remaining 3 can no longer out-vote the missing members. Lose a 3rd and there's no majority left to elect a leader or commit writes.</div>
+</div>
+
 ---
 
 ## Taints, Tolerations & Node Affinity
@@ -412,6 +511,12 @@ kubectl label node gpu-node-1 hardware=gpu zone=us-east-1a
 
 **Limitation:** AND-only logic, no OR, no `NotIn`, no expressions. That's why `nodeAffinity` exists.
 
+<div class="quiz-card">
+  <p class="quiz-q">You add a toleration for a GPU taint to a regular (non-ML) pod. Does that pod now get scheduled onto GPU nodes preferentially?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. A toleration only removes a barrier — it lets the pod be considered for that node, it does not attract the pod there. Without a nodeAffinity or nodeSelector actively pulling it toward GPU nodes, the pod is just as likely to land on any other untainted node. Repelling and attracting are two separate mechanisms.</div>
+</div>
+
 ---
 
 ### Node Affinity (pod-side attraction)
@@ -425,10 +530,17 @@ kubectl label node gpu-node-1 hardware=gpu zone=us-east-1a
 
 `IgnoredDuringExecution` — if the node's labels change after the pod is running, the pod is **not** evicted.
 
-#### Hard affinity (must match)
+Same mode split shows up as two tabs below — flip between them:
 
-```yaml
-affinity:
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="hardaff" class="active">Hard (required)</button>
+    <button data-tab="softaff">Soft (preferred)</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="hardaff">
+      <strong>Must match, or the pod won't schedule at all.</strong> Multiple <code>matchExpressions</code> in the same term = AND. Multiple <code>nodeSelectorTerms</code> = OR (any term can match).
+      <pre><code class="language-yaml">affinity:
   nodeAffinity:
     requiredDuringSchedulingIgnoredDuringExecution:
       nodeSelectorTerms:
@@ -438,15 +550,11 @@ affinity:
           values: ["gpu", "gpu-high"]
         - key: zone
           operator: In
-          values: ["us-east-1a", "us-east-1b"]
-```
-
-Multiple `matchExpressions` in the same term = AND. Multiple `nodeSelectorTerms` = OR (any term can match).
-
-#### Soft affinity (prefer, but not required)
-
-```yaml
-affinity:
+          values: ["us-east-1a", "us-east-1b"]</code></pre>
+    </div>
+    <div class="tab-panel" data-tab-panel="softaff">
+      <strong>Scheduler tries to match, falls back if it can't.</strong> Each preference carries a weight (1&ndash;100); the scheduler adds the weights of matching preferences to a node's score. The highest-scoring node wins &mdash; but any node can still be chosen if none match.
+      <pre><code class="language-yaml">affinity:
   nodeAffinity:
     preferredDuringSchedulingIgnoredDuringExecution:
     - weight: 80              # higher weight = stronger preference (1-100)
@@ -460,10 +568,10 @@ affinity:
         matchExpressions:
         - key: hardware
           operator: In
-          values: ["ssd"]          # also prefer SSD nodes, but less important
-```
-
-The scheduler adds the weights of matching preferences to a node's score. The highest-scoring node wins — but any node can still be chosen if none match.
+          values: ["ssd"]          # also prefer SSD nodes, but less important</code></pre>
+    </div>
+  </div>
+</div>
 
 #### Combining hard + soft
 
@@ -484,6 +592,12 @@ affinity:
           operator: In
           values: ["us-east-1a"]
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A pod schedules onto a node via required nodeAffinity. Later, someone changes that node's labels so it no longer matches. Is the running pod evicted?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. That's exactly what "IgnoredDuringExecution" means — the affinity rule is only checked at scheduling time. Once the pod is bound and running, later label changes on the node are ignored; the pod keeps running right where it is.</div>
+</div>
 
 ---
 
@@ -555,6 +669,25 @@ While `nodeAffinity` attracts/repels pods to/from **nodes**, `podAffinity` and `
 
 The scheduler checks the labels of **existing pods** on nodes to decide placement.
 
+Three mechanisms, three different things they key off — flip through them:
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="nodeaff" class="active">nodeAffinity</button>
+    <button data-toggle-opt="podaff">podAffinity</button>
+    <button data-toggle-opt="podantiaff">podAntiAffinity</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="nodeaff">
+    Keys off <strong>node labels</strong>. Attracts or requires the pod onto nodes that carry specific labels (<code>hardware=gpu</code>, <code>zone=us-east-1a</code>). Has nothing to do with what else is running there.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="podaff">
+    Keys off <strong>other pods' labels</strong>. Attracts this pod onto a node (or topology zone) that already has pods matching a given label selector — used to co-locate, e.g. an app next to its cache.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="podantiaff">
+    Also keys off <strong>other pods' labels</strong>, but repels instead of attracts — keeps this pod away from nodes/zones that already have a matching pod. Used to spread replicas for HA.
+  </div>
+</div>
+
 ### podAffinity — co-locate with other pods
 
 **Use case:** Place a caching sidecar or a latency-sensitive service on the same node as the pods it serves.
@@ -624,6 +757,12 @@ If no other AZ is available, pods still schedule — no Pending.
 | **AntiAffinity** | Must spread, else Pending | Prefer spread, stacking allowed |
 | **Risk** | Pods stuck Pending if unsatisfiable | Safe fallback |
 | **Use for** | Security isolation, strict HA | Best-effort AZ spread, latency opt |
+
+<div class="quiz-card">
+  <p class="quiz-q">You set hard (required) podAntiAffinity to guarantee one replica per node, but the cluster only has as many nodes as you have running replicas already. A new replica needs to schedule. What happens?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It stays Pending. Hard anti-affinity is a filter, not a preference — if every available node already has a matching pod, there's no feasible node left and the scheduler can't place it, guarantee or no guarantee. This is exactly why hard anti-affinity needs at least as many nodes as replicas, and why the soft (preferred) version exists for cases where a safe fallback matters more than a strict guarantee.</div>
+</div>
 
 ### Common patterns
 
@@ -1049,3 +1188,9 @@ graph TD
     ML -->|"Toleration passes, Affinity matches"| GPU1
     ML --> GPU2
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">In this scenario, suppose the ML pod spec keeps its toleration for the GPU taint but you forget to add the required nodeAffinity. Could it end up on a cpu-pool node?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Yes. Taints and tolerations only control the gpu-pool side — cpu-pool nodes have no taint at all, so nothing blocks the ML pod from landing there. The toleration removes the GPU-node barrier but doesn't attract the pod to GPU nodes, and without nodeAffinity there's nothing pulling it away from the untainted cpu-pool either. All three pieces (taint + toleration + nodeAffinity) are needed together, exactly as the strategy above states.</div>
+</div>

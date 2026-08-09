@@ -1,5 +1,10 @@
 # Linux Boot Process
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## BIOS/UEFI to Userspace
@@ -47,6 +52,49 @@ graph TD
     SERVICES --> LOGIN
 ```
 
+The same sequence, one stage at a time:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Power ON &rarr; POST.</strong> Power-On Self Test checks RAM, CPU, and devices before anything disk-related happens.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Firmware hands off.</strong> BIOS reads the MBR (first 512 bytes of disk) and hands off to the bootloader; UEFI reads the EFI System Partition directly instead &mdash; faster, and with Secure Boot support.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. GRUB2 bootloader.</strong> Reads <code>/boot/grub2/grub.cfg</code>, shows the OS selection menu, and loads the kernel + initramfs into RAM.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Kernel starts.</strong> Decompresses itself, initializes CPU, memory, and devices, then mounts initramfs as a temporary root <code>/</code> &mdash; it has no drivers for the real disk yet.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. initramfs takes over.</strong> A minimal RAM filesystem &mdash; busybox, dracut scripts, disk drivers as kernel modules, <code>cryptsetup</code> &mdash; carries just enough to reach the real root: load disk drivers, decrypt LUKS, assemble LVM/RAID.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Real root mounted.</strong> The real filesystem (ext4/xfs on <code>/dev/sda1</code> or an LVM volume) is mounted, <code>switch_root</code> runs, and initramfs is discarded from RAM.
+    </div>
+    <div class="stepper-panel">
+      <strong>7. PID 1: systemd.</strong> The first userspace process starts. Everything before this point ran in kernel space or a throwaway RAM filesystem &mdash; this is where "the system" actually begins.
+    </div>
+    <div class="stepper-panel">
+      <strong>8. Targets resolve.</strong> systemd walks the dependency chain down from <code>default.target</code> (usually <code>multi-user</code> or <code>graphical</code>) through <code>basic.target</code> to <code>sysinit.target</code>, mounting filesystems, swap, and setting the hostname along the way.
+    </div>
+    <div class="stepper-panel">
+      <strong>9. Services start in parallel.</strong> <code>sshd</code>, <code>networkd</code>, <code>nginx</code>, <code>docker</code>, and anything else wanted by the active target &mdash; unlike SysVinit's serial startup, systemd starts what it can at once and lets <code>After=</code>/<code>Requires=</code> ordering handle the rest.
+    </div>
+    <div class="stepper-panel">
+      <strong>10. Login prompt.</strong> <code>getty</code> hands control to a human (or the display manager, for a graphical target).
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 **BIOS vs UEFI:**
 | | BIOS | UEFI |
 |--|------|------|
@@ -55,6 +103,12 @@ graph TD
 | Secure Boot | No | Yes (verifies bootloader signature) |
 | Speed | Slower | Faster (parallel init) |
 | Common on | Pre-2012 hardware | All modern hardware |
+
+<div class="quiz-card">
+  <p class="quiz-q">A GRUB2 bootloader loads two things into RAM before handing off to the kernel. What are they?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The kernel itself, and the initramfs image. GRUB doesn't hand off to a bare kernel &mdash; it loads both together, so the kernel has an initramfs ready to mount as its temporary root the moment it initializes.</div>
+</div>
 
 ---
 

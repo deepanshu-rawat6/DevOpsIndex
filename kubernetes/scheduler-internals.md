@@ -1,5 +1,14 @@
 # Kubernetes Scheduler — Deep Internals
 
+A pod that comes in without a `nodeName` doesn't get scheduled by magic — it moves through a strict two-phase pipeline (Filter, then Score), gets bound to whichever node wins, and only then does that node's kubelet take over and actually start it. This guide walks through that whole pipeline, what happens when no node fits, and the taint/toleration/affinity/topology-spread mechanics that feed into it.
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
+---
+
 ## How the Scheduler Works
 
 The scheduler has one job: assign a `nodeName` to a Pod that has none. It runs a two-phase algorithm for every unscheduled pod.
@@ -14,6 +23,12 @@ flowchart TD
     BIND["Bind: write nodeName to pod<br>via API Server"] --> KUBELET
     KUBELET["kubelet on that node<br>watches for its pods, starts container"]
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">What's the key difference between what the Filter phase does and what the Score phase does?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Filter is a hard yes/no per node &mdash; it eliminates any node that <em>cannot</em> run the pod at all, and a node only needs to fail one filter plugin to be dropped entirely. Score never eliminates anything; it only ranks the nodes that already survived Filter, 0-100 each, to pick the best of whatever's left.</div>
+</div>
 
 ---
 
@@ -44,6 +59,12 @@ Key filter plugins:
 | `VolumeBinding` | PVC's storageClass zone matches node's zone |
 | `NodeUnschedulable` | Node is not cordoned |
 
+<div class="quiz-card">
+  <p class="quiz-q">A node passes 5 of the 6 filter plugins above but fails <code>NodeResourcesFit</code>. Does it proceed to the Score phase?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. A node is eliminated the moment <em>any</em> filter plugin returns false &mdash; it doesn't matter how many others it would have passed. Every filter has to pass for a node to reach Score.</div>
+</div>
+
 ---
 
 ## Phase 2: Score Plugins
@@ -66,6 +87,12 @@ graph LR
 | `NodeAffinity` | Honour preferred affinity rules |
 | `ImageLocality` | Prefer nodes that already pulled the image (faster start) |
 | `TaintToleration` | Nodes with matching tolerations get higher score |
+
+<div class="quiz-card">
+  <p class="quiz-q">If both <code>MostAllocated</code> and <code>LeastAllocated</code> were enabled as score plugins at real weight for the same cluster, would they push scheduling decisions in the same direction?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No &mdash; they're opposites. <code>LeastAllocated</code> favors the node with the most free capacity (spread load out); <code>MostAllocated</code> favors the node that's already more full (bin-pack, to free up whole nodes elsewhere). The final score is a weighted sum across every enabled plugin, so running both with meaningful weight would just fight each other rather than push toward one clear strategy.</div>
+</div>
 
 ---
 
@@ -103,6 +130,12 @@ kubectl describe pod <pod> -n <namespace>
 #     3 node(s) didn't match topology       → spread constraints impossible
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">A pod shows FailedScheduling due to insufficient CPU on all 3 nodes, and there's no Cluster Autoscaler in the cluster. Does the pod eventually get scheduled on its own?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. It stays Pending indefinitely &mdash; the scheduler keeps retrying roughly every second, but retrying doesn't create capacity. Without something that adds nodes (an autoscaler) or something that changes the constraint (requests lowered, a node uncordoned, etc.), the same nodes fail the same filter forever.</div>
+</div>
+
 ---
 
 ## Full Flow: Pod Scheduled to a Node
@@ -137,6 +170,46 @@ sequenceDiagram
     Note over POD: traffic now routes to this pod
 ```
 
+Same sequence, one step at a time:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Pod submitted.</strong> <code>kubectl apply</code> POSTs the pod spec to the API server with <code>nodeName=''</code>. It lands in etcd with <code>status=Pending</code> &mdash; nothing is running yet.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Scheduler picks it up.</strong> kube-scheduler is watching the API server for exactly this &mdash; pods with no <code>nodeName</code> &mdash; and drops it into its priority queue, sorted by <code>PriorityClass</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Filter phase.</strong> Every filter plugin runs against every node. A node is eliminated the moment any single filter returns false &mdash; <code>NodeResourcesFit</code>, <code>NodeAffinity</code>, <code>TaintToleration</code>, <code>PodTopologySpread</code>, <code>VolumeBinding</code>, and <code>NodeUnschedulable</code> all get a vote.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Score phase.</strong> Only nodes that survived Filter get scored, 0-100, by each score plugin (<code>LeastAllocated</code>, <code>NodeAffinity</code>, <code>InterPodAffinity</code>, <code>ImageLocality</code>, ...). A node's final score is the weighted sum across every enabled plugin.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Bind.</strong> The highest-scoring node wins, ties broken randomly. The scheduler doesn't contact the node directly &mdash; it POSTs a <code>Binding</code> object to the API server, which writes <code>nodeName</code> onto the pod.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. kubelet takes over.</strong> The kubelet on the winning node is watching for pods assigned to it. It calls containerd's <code>RunPodSandbox</code>, the CNI plugin sets up the network namespace and assigns a pod IP, the image is pulled if it isn't cached, and the container starts. Pod status flips to <code>Running</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>7. Service wiring catches up.</strong> Only now does the API server update the relevant <code>EndpointSlice</code> with the new pod IP, and kube-proxy rewrites its iptables rules on every node. Traffic doesn't reach the pod until this last step completes.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Once the scheduler binds a pod to node-2, does traffic immediately start routing to it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Binding only writes <code>nodeName</code> &mdash; the kubelet still has to pull/start the container and get its IP from the CNI plugin, and only after the pod is <code>Running</code> does the API server propagate that IP into an EndpointSlice, which kube-proxy then turns into iptables rules. Traffic flows only after that last step.</div>
+</div>
+
 ---
 
 ## Taints, Tolerations, and Affinity
@@ -149,6 +222,25 @@ kubectl taint node gpu-node-1 nvidia.com/gpu=present:NoSchedule
 #                             key=value:effect
 # Effects: NoSchedule | PreferNoSchedule | NoExecute
 ```
+
+The three effects aren't interchangeable severity levels of the same thing — flip through what each actually does:
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="prefernoschedule" class="active state-ok">PreferNoSchedule</button>
+    <button data-toggle-opt="noschedule" class="state-warn">NoSchedule</button>
+    <button data-toggle-opt="noexecute" class="state-bad">NoExecute</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="prefernoschedule">
+    <strong>Soft block, new pods only.</strong> The scheduler tries to avoid placing untolerated pods here, but it's not a hard rule &mdash; if nothing else fits, the pod can still land on this node.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="noschedule">
+    <strong>Hard block, new pods only.</strong> A pod without a matching toleration will not be scheduled onto this node, full stop &mdash; but pods already running here before the taint was added are left alone.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="noexecute">
+    <strong>Evicts, doesn't just block.</strong> Untolerated pods already running on this node get evicted, not merely kept off it going forward. A toleration can add <code>tolerationSeconds</code> to delay that eviction instead of tolerating it forever.
+  </div>
+</div>
 
 ### Tolerations — allow pods onto tainted nodes
 
@@ -184,6 +276,23 @@ spec:
             values: ["m5.2xlarge"]
 ```
 
+These two blocks behave like the Filter/Score split from earlier — one is a hard eligibility rule, the other is only a scoring hint:
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="required" class="active">Required (hard)</button>
+    <button data-tab="preferred">Preferred (soft)</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="required">
+      <strong><code>requiredDuringSchedulingIgnoredDuringExecution</code></strong> acts like an extra Filter plugin: the pod <em>must</em> land on a node matching one of the <code>nodeSelectorTerms</code>. No match on any node means the pod stays unscheduled, same as failing any other filter.
+    </div>
+    <div class="tab-panel" data-tab-panel="preferred">
+      <strong><code>preferredDuringSchedulingIgnoredDuringExecution</code></strong> acts like an extra Score plugin: matching nodes get a score boost proportional to <code>weight</code>, but a non-matching node is still eligible &mdash; it just ranks lower and can still win if nothing else beats it.
+    </div>
+  </div>
+</div>
+
 ### Topology Spread Constraints — spread across zones
 
 ```yaml
@@ -196,3 +305,9 @@ spec:
       matchLabels:
         app: api
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A pod has a toleration that matches a node's taint. Does that mean the scheduler will prefer to place the pod on that node?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. A toleration only removes the block &mdash; it makes the node eligible again, the same way passing a filter does. It doesn't attract or score the pod toward that node. Actually pulling a pod toward a specific node needs a separate mechanism, like node affinity's preferred rules.</div>
+</div>

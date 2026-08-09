@@ -2,6 +2,11 @@
 
 Amazon EKS (Elastic Kubernetes Service) runs Kubernetes with AWS managing the control plane. Understanding where the boundary is between what AWS owns and what you own is critical for networking, security, and debugging.
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## EKS vs Vanilla Kubernetes
@@ -17,6 +22,12 @@ Amazon EKS (Elastic Kubernetes Service) runs Kubernetes with AWS managing the co
 | Cluster auth | `kubeconfig` + certs | AWS IAM → `aws eks get-token` → K8s RBAC |
 | Networking | CNI of your choice | AWS VPC CNI (pods get real VPC IPs) |
 | Load balancers | Cloud controller manager | AWS Load Balancer Controller (ALB/NLB) |
+
+<div class="quiz-card">
+  <p class="quiz-q">On EKS, if a control-plane object looks corrupted, can you open a shell on the API Server box and inspect etcd directly the way you might on a self-hosted cluster?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. AWS owns and runs the entire control plane &mdash; API Server, etcd, scheduler, controller-manager &mdash; in its own account, encrypted and backed up, and it's not visible or reachable from yours at all. You debug through the K8s API and CloudWatch control-plane logs, never by touching etcd directly.</div>
+</div>
 
 ---
 
@@ -100,6 +111,12 @@ When the API Server needs to reach `kubelet` on `10.0.10.15:10250`, it goes thro
 | Private | Within your VPC only (via ENI) | Production — never expose to internet |
 | Public + Private | Both | Transition/hybrid |
 
+<div class="quiz-card">
+  <p class="quiz-q">The API Server's traffic to a node's kubelet crosses from AWS's account/VPC into yours via the cross-account ENI. Does that traffic ever touch the public internet?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. The ENI AWS injects into your subnet lets the API Server reach kubelet entirely over AWS's internal network &mdash; it crosses an account/VPC boundary, not a network boundary. That's true even when the cluster endpoint access mode is "Private," since this path never depended on the public endpoint in the first place.</div>
+</div>
+
 ---
 
 ## VPC CNI — Why EKS Pods Get Real VPC IPs
@@ -138,7 +155,38 @@ How VPC CNI works:
 3. When a pod is created, `aws-node` assigns one of these secondary IPs directly to the pod's `eth0`
 4. Because these are real VPC IPs, pod-to-pod traffic across nodes uses normal VPC routing — no overlay, no encapsulation
 
+Step through the same sequence one stage at a time:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Secondary ENIs attached.</strong> The <code>aws-node</code> DaemonSet on each EC2 node attaches secondary ENIs, up to the limit for that instance type (<code>max_ENIs</code>).
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Secondary IPs allocated.</strong> Each secondary ENI is given multiple secondary private IPs, pulled from the node's subnet.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Pod created, IP assigned.</strong> <code>aws-node</code> hands one of the pre-allocated secondary IPs straight to the new pod's <code>eth0</code> &mdash; no separate overlay address is ever created.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Native VPC routing.</strong> Because the pod's IP is a real VPC address, cross-node pod-to-pod traffic just follows normal VPC routing tables &mdash; no VXLAN tunnel, no encapsulation, no extra hop.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 **Implication:** Pod IP exhaustion is a real concern. If your subnet has 256 IPs and nodes pre-allocate secondary IPs, you can run out. Solution: use `/16` or `/18` subnets for worker nodes, enable **custom networking** to use a secondary CIDR (`100.64.0.0/16`), or enable **prefix delegation** (each ENI IP prefix = `/28` = 16 IPs, massively increasing pod density).
+
+<div class="quiz-card">
+  <p class="quiz-q">A vanilla Kubernetes cluster with a 100-node overlay network essentially never runs out of pod IPs. An EKS cluster with the same node count can. Why the difference?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Overlay pod IPs come from a separate CIDR (e.g. 10.244.0.0/16) sized independently of the physical network. EKS pods get real VPC subnet IPs pre-allocated onto each node's secondary ENIs, so the pod IP pool is bounded by the size of the actual VPC subnet the nodes sit in &mdash; a 256-address subnet really can run out.</div>
+</div>
 
 ---
 
@@ -210,6 +258,34 @@ graph TD
     SDK -->|"5. access S3 with temp creds"| S3["Amazon S3"]:::yellow
 ```
 
+Step through the token exchange:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Read the projected token.</strong> The pod's AWS SDK reads the OIDC token that the kubelet projected into the ServiceAccount volume mount &mdash; no credentials were ever baked into the pod.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. AssumeRoleWithWebIdentity.</strong> The SDK calls AWS STS, presenting that token together with the IAM role ARN from the ServiceAccount's <code>eks.amazonaws.com/role-arn</code> annotation.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. STS validates the token.</strong> STS checks the token against the cluster's EKS OIDC provider &mdash; confirming it's a genuine, unexpired token issued for that exact ServiceAccount.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Temporary credentials issued.</strong> Once validated, STS hands back short-lived credentials (15 minutes to 1 hour), scoped to whatever the assumed role allows.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Call the AWS API.</strong> The SDK uses those temporary credentials directly &mdash; e.g. to read from S3 &mdash; with no long-lived secret ever stored in the pod, and no dependency on the node's own IAM role.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 ```yaml
 apiVersion: v1
 kind: ServiceAccount
@@ -247,6 +323,12 @@ The IAM role's trust policy must allow the cluster's OIDC provider to assume it:
 }
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">A pod uses IRSA to read from S3, but the EC2 node it's scheduled on has an IAM instance profile with no S3 permissions at all. Can the pod still read the S3 bucket?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Yes. IRSA credentials come from the pod's own ServiceAccount assuming its own IAM role via STS &mdash; they're completely independent of the node's instance profile. The whole point of IRSA is that a pod's AWS permissions don't have to be, and shouldn't be, inherited from (or shared with) whatever's running on the same node.</div>
+</div>
+
 ---
 
 ## Node Groups: Managed vs Self-Managed vs Fargate
@@ -264,6 +346,33 @@ The IAM role's trust policy must allow the cluster's OIDC provider to assume it:
 
 **Fargate limitation:** No DaemonSets. Since there are no nodes (pods run on AWS micro-VMs), `aws-node` CNI DaemonSet, `kube-proxy` DaemonSet, and monitoring DaemonSets don't run. AWS handles pod networking separately. CloudWatch Container Insights uses sidecar injection via Fluent Bit.
 
+What actually happens when a pod gets scheduled differs a lot more between these three than the table alone shows:
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="mng" class="active">Managed Node Group</button>
+    <button data-tab="self">Self-Managed</button>
+    <button data-tab="fargate">Fargate</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="mng">
+      <strong>AWS runs the ASG for you.</strong> You pick instance types and scaling config; AWS handles launching EC2 instances, attaching the node IAM role, and bootstrapping <code>kubelet</code> so it joins the cluster. Triggering an AMI upgrade cordons and drains nodes one at a time, respecting PodDisruptionBudgets, instead of you scripting that yourself.
+    </div>
+    <div class="tab-panel" data-tab-panel="self">
+      <strong>You own the launch template.</strong> Full control over the AMI, kernel parameters, and bootstrap user-data &mdash; useful for a hardened or GPU-specific image the EKS-optimized AMIs don't cover. The tradeoff: patching, draining, and replacing nodes safely during an upgrade is entirely on you, with no AWS-managed drain sequencing.
+    </div>
+    <div class="tab-panel" data-tab-panel="fargate">
+      <strong>No EC2 instances at all.</strong> Each pod (or pod group sharing a namespace) runs on its own right-sized AWS micro-VM. Because there's no persistent node, there's nothing for a DaemonSet to schedule onto &mdash; <code>aws-node</code> and <code>kube-proxy</code> simply don't run, and anything that normally relies on a DaemonSet (log/metric shippers) has to switch to sidecar injection instead.
+    </div>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">You deploy a monitoring agent as a DaemonSet expecting one copy to run per node, on a set of pods scheduled entirely on Fargate. What happens?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It never runs. Fargate pods have no underlying node object for a DaemonSet to attach to &mdash; there are no persistent nodes at all, just per-pod micro-VMs. Fargate-backed workloads need the monitoring agent injected as a sidecar container instead (which is exactly how CloudWatch Container Insights does it there, via Fluent Bit).</div>
+</div>
+
 ---
 
 ## EKS Add-ons
@@ -276,6 +385,12 @@ The IAM role's trust policy must allow the cluster's OIDC provider to assume it:
 | `aws-ebs-csi-driver` | Provisions EBS volumes for PVCs | Required since K8s 1.23 (in-tree deprecated) |
 | `aws-efs-csi-driver` | Shared EFS mounts | Multi-AZ shared storage |
 | `adot` | Metrics/traces collection | Feeds X-Ray and CloudWatch |
+
+<div class="quiz-card">
+  <p class="quiz-q">On a K8s 1.23+ EKS cluster, a PVC is stuck Pending and you haven't installed anything beyond the default cluster. What's the most likely missing piece?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The <code>aws-ebs-csi-driver</code> add-on. The in-tree EBS provisioner was deprecated starting with K8s 1.23, so EBS-backed PVCs need the CSI driver add-on installed explicitly &mdash; it's no longer something the cluster provisions for you out of the box.</div>
+</div>
 
 ---
 
