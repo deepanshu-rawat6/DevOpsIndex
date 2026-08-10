@@ -2,6 +2,16 @@
 
 Kubernetes, Linux, Docker, AWS, GCP, CI/CD, IaC, Monitoring, Git, and SRE — ordered from foundation to advanced.
 
+## Read it interactively
+
+Most guides here also render as a live site — click-to-reveal knowledge checks, tabbed comparisons, step-through walkthroughs, and Mermaid diagrams instead of static ASCII art. See [`website/`](./website) (Astro + Tailwind; deployable to Vercel).
+
+```bash
+cd website && npm install && npm run dev   # http://localhost:4321
+```
+
+Contributing a new guide or retrofitting an old one? [`website/COMPONENTS.md`](./website/COMPONENTS.md) documents the interactive-component syntax (quiz cards, tabs, steppers, toggles), and the `/interactive-docs` Claude Code skill (`.claude/skills/interactive-docs/`) applies that pattern consistently for you.
+
 ---
 
 ## Recommended Order
