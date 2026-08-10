@@ -1,5 +1,10 @@
 # Interactive components
 
+> To apply this pattern to a guide (new or existing) with the same
+> conventions used throughout this repo, use the `/interactive-docs` Claude
+> Code skill (`.claude/skills/interactive-docs/SKILL.md`) rather than
+> reinventing the checklist each time.
+
 The markdown pipeline (`src/lib/renderMd.ts` → `Fragment set:html={html}` in
 `src/pages/topic/[...slug].astro`) passes raw HTML straight through. That means
 any topic `.md` file can drop in the snippets below and get a working
