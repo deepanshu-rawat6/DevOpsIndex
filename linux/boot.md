@@ -139,6 +139,12 @@ dracut --force           # RHEL/CentOS
 update-initramfs -u     # Debian/Ubuntu
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">Why can't the kernel just mount the real root filesystem directly, instead of mounting initramfs first?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It might not have the drivers it needs compiled in &mdash; LUKS decryption, LVM assembly, NFS root, or the specific disk controller driver. initramfs carries a minimal set of tools and modules (busybox, dracut scripts, disk drivers, <code>cryptsetup</code>) just to bridge that gap: load the right drivers, decrypt/assemble what's needed, then <code>switch_root</code> onto the real filesystem and discard itself from RAM.</div>
+</div>
+
 ---
 
 ## systemd
@@ -241,3 +247,9 @@ systemd-analyze critical-chain  # critical path of boot
 | `notify` | Process sends `sd_notify(READY=1)` when ready | Services that take time to init |
 | `oneshot` | Process runs and exits (not a daemon) | Init scripts, migrations |
 | `idle` | Like simple but waits until boot is done | Low-priority startup tasks |
+
+<div class="quiz-card">
+  <p class="quiz-q">In a systemd unit file, what's the actual difference between <code>Requires=</code> and <code>Wants=</code>?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>Requires=</code> is a hard dependency &mdash; if that unit fails, this one fails too. <code>Wants=</code> is a soft dependency &mdash; systemd tries to start the listed unit alongside this one, but if it fails, this unit still starts anyway. Neither one controls <em>ordering</em> by itself &mdash; that's what <code>After=</code>/<code>Before=</code> are for, which is why unit files often pair <code>Requires=</code> or <code>Wants=</code> with an <code>After=</code> line naming the same unit.</div>
+</div>

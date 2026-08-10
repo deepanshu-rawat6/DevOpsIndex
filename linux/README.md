@@ -19,6 +19,13 @@ Everything — containers, Kubernetes, networking, storage — is built on Linux
 | [ebpf-bpftrace.md](./ebpf-bpftrace.md) | eBPF hooks, bpftrace one-liners, CPU/memory/network/disk tracing, BCC tools |
 | [signals.md](./signals.md) | SIGTERM vs SIGKILL, signal delivery internals, signal masks, SIGCHLD, graceful shutdown |
 
+Sections below carry a **❓ knowledge check** — try to answer before revealing:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## Linux Kernel Architecture
@@ -64,6 +71,12 @@ graph TD
 
 User space programs interact with hardware only through the kernel via **system calls**. The kernel runs in privileged mode (Ring 0) and controls all hardware access, memory protection, and process isolation.
 
+<div class="quiz-card">
+  <p class="quiz-q">Can a user-space application (e.g. nginx) read a file from disk without the kernel getting involved at all?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. All hardware access &mdash; disk, NIC, RAM protection &mdash; is mediated by the kernel running in Ring 0. The application can only ask via a system call (<code>open</code>, <code>read</code>); it has no privileged instructions of its own to talk to the disk controller directly.</div>
+</div>
+
 ---
 
 ## Processes
@@ -96,6 +109,12 @@ stateDiagram-v2
 | Stopped | `T` | Stopped by signal (SIGSTOP/SIGTSTP) |
 | Zombie | `Z` | Exited but parent hasn't read exit status via `wait()` |
 
+<div class="quiz-card">
+  <p class="quiz-q">A process is stuck in D state. Will <code>kill -9</code> (SIGKILL) get rid of it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Uninterruptible sleep (<code>D</code>) means the process is blocked waiting on I/O (usually disk or NFS) and can't respond to <em>any</em> signal, including SIGKILL &mdash; not until the I/O it's waiting on completes or times out. This is different from <code>S</code> (interruptible sleep), which can be woken and killed.</div>
+</div>
+
 ### Process Creation: fork() and exec()
 
 ```mermaid
@@ -121,6 +140,40 @@ sequenceDiagram
 ```
 
 **Copy-on-Write (COW):** After `fork()`, parent and child share the same physical memory pages. The kernel marks pages read-only. Only when one process writes does the kernel copy that page — avoiding expensive full copies for short-lived children.
+
+Step through what actually happens between a shell typing a command and that command running as its own process:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. fork().</strong> The parent (e.g. <code>bash</code>, PID 100) calls <code>fork()</code>. The kernel creates a new <code>task_struct</code>, copies the parent's page tables (marked copy-on-write, not actually duplicated yet), and allocates a new PID (101).
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Child is a clone.</strong> Both processes now exist, running the same code, sharing the same physical pages via COW. <code>fork()</code> returns 0 to the child and the child's PID (101) to the parent &mdash; that's the only difference in what each sees.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. exec().</strong> The child calls <code>exec("/usr/bin/nginx")</code>. The kernel throws away the child's old address space and replaces it with nginx's code, data, and stack &mdash; but keeps the same PID and any open file descriptors that weren't marked close-on-exec.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Running.</strong> PID 101 is now nginx, not a copy of bash. The parent calls <code>waitpid(101)</code> and blocks until the child exits.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Exit and reap.</strong> The child calls <code>exit()</code> and becomes a zombie &mdash; a dead process still holding its PID and exit status. It stays that way until the parent's <code>waitpid()</code> returns, at which point the kernel frees the last of its bookkeeping.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">After fork() returns but before exec() is called, does the child process have its own private copy of the parent's memory?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Not yet. Parent and child share the same physical pages, marked copy-on-write and read-only. The kernel only actually copies a page the moment either process writes to it &mdash; a private copy is created lazily, one page at a time, not upfront at fork() time.</div>
+</div>
 
 ### task_struct — The Kernel's View
 
@@ -180,6 +233,21 @@ A zombie has finished (`exit()` called) but its entry remains in the process tab
 
 #### Zombies in General Linux vs Containers
 
+Same root cause, very different outcome depending on what's running as PID 1. Flip between them:
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="general" class="active state-ok">General Linux</button>
+    <button data-toggle-opt="containers" class="state-bad">Containers</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="general">
+    <code>init</code> (PID 1 = systemd) automatically adopts and reaps orphaned zombies. Even if a parent dies without calling <code>wait()</code>, systemd picks up the zombie and reaps it within seconds &mdash; zombies here are transient and self-healing.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="containers">
+    A container's PID 1 is usually your app (<code>node server.js</code>, <code>./myapp</code>). It wasn't built to be an init process &mdash; it doesn't call <code>waitpid()</code> in a loop or handle <code>SIGCHLD</code>. Children it spawns become zombies and stay zombies <em>forever</em>, accumulating until the PID namespace (default max 32768) is exhausted and the container can't fork anything new.
+  </div>
+</div>
+
 **General Linux:** `init` (PID 1 = systemd) automatically adopts and reaps orphaned zombies. Even if a parent process dies without calling `wait()`, systemd picks up the zombie and reaps it within seconds. Zombies are transient and self-healing.
 
 **Containers — it's a real problem:**
@@ -215,44 +283,56 @@ It's not a full init system (no service management, no logging, no dependency re
 
 `dumb-init` (by Yelp) does the same thing. Use either — `tini` ships inside Docker itself (`docker run --init` uses it).
 
+<div class="quiz-card">
+  <p class="quiz-q">Why can't your Node.js or Python app just handle SIGCHLD itself instead of adding tini?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It could in theory, but almost no application code does &mdash; app frameworks aren't written to call <code>waitpid()</code> in a loop or handle <code>SIGCHLD</code>, because they were never designed to be an init process. tini exists precisely so you don't have to retrofit that logic into your app: it's a ~20KB binary that does only reaping and signal-forwarding, dropped in front of your app as PID 1 instead.</div>
+</div>
+
 #### Fix Options
 
-**Option 1 — tini in Dockerfile (recommended, works everywhere):**
-```dockerfile
-FROM node:18
-RUN apt-get update && apt-get install -y --no-install-recommends tini
+Four ways to get an init process reaping zombies in front of your app — pick one:
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="tini-dockerfile" class="active">tini in Dockerfile</button>
+    <button data-tab="docker-init">Docker --init</button>
+    <button data-tab="k8s-shareproc">Kubernetes</button>
+    <button data-tab="dumb-init">dumb-init</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="tini-dockerfile">
+      <strong>Recommended — works everywhere.</strong>
+      <pre><code>FROM node:18
+RUN apt-get update &amp;&amp; apt-get install -y --no-install-recommends tini
 ENTRYPOINT ["/usr/bin/tini", "--"]
 CMD ["node", "server.js"]
 # tini is now PID 1, node is PID 2
-# tini reaps zombies and forwards SIGTERM → node
-```
-
-**Option 2 — Docker `--init` flag (dev/local only):**
-```bash
-docker run --init myimage
+# tini reaps zombies and forwards SIGTERM → node</code></pre>
+    </div>
+    <div class="tab-panel" data-tab-panel="docker-init">
+      <strong>Dev/local only.</strong>
+      <pre><code>docker run --init myimage
 # Docker injects its bundled tini as PID 1 automatically
-# Not available in Kubernetes — don't rely on this in prod
-```
-
-**Option 3 — Kubernetes (shareProcessNamespace):**
-```yaml
-# k8s doesn't have --init. Options:
-# a) Bake tini into your image (Option 1) — preferred
-# b) Use shareProcessNamespace so the pause container can reap
-spec:
+# Not available in Kubernetes — don't rely on this in prod</code></pre>
+    </div>
+    <div class="tab-panel" data-tab-panel="k8s-shareproc">
+      <strong>Kubernetes has no <code>--init</code> flag.</strong> Bake tini into your image (preferred), or share the PID namespace so the pause container can reap:
+      <pre><code>spec:
   shareProcessNamespace: true   # all containers share one PID namespace
   containers:
     - name: app
-      image: myimage
-```
-
-**Option 4 — dumb-init (alternative to tini):**
-```dockerfile
-FROM python:3.11
+      image: myimage</code></pre>
+    </div>
+    <div class="tab-panel" data-tab-panel="dumb-init">
+      <strong>Alternative to tini, same idea.</strong>
+      <pre><code>FROM python:3.11
 RUN pip install dumb-init
 ENTRYPOINT ["dumb-init", "--"]
-CMD ["python", "app.py"]
-```
+CMD ["python", "app.py"]</code></pre>
+    </div>
+  </div>
+</div>
 
 **Signal forwarding also matters:** without tini, `docker stop` sends `SIGTERM` to PID 1 (your app). If your app doesn't handle `SIGTERM`, Docker waits 30s then sends `SIGKILL` — no graceful shutdown. With tini, `SIGTERM` → tini → your app, and tini waits for your app to exit cleanly before terminating.
 
@@ -270,6 +350,12 @@ CMD ["python", "app.py"]
 | SIGCHLD | 17 | Ignore | Yes | Child status changed |
 
 **Always SIGTERM first, SIGKILL only if stuck.** In Kubernetes, kubelet sends SIGTERM, waits `terminationGracePeriodSeconds`, then SIGKILL.
+
+<div class="quiz-card">
+  <p class="quiz-q">Why does kubelet send SIGTERM and wait, instead of just sending SIGKILL immediately to stop a pod faster?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>SIGKILL can't be caught or ignored &mdash; the process is terminated instantly with zero chance to clean up (close DB connections, finish in-flight requests, flush buffers). SIGTERM is catchable, so it gives the app a chance to shut down gracefully. kubelet only escalates to SIGKILL after <code>terminationGracePeriodSeconds</code> if the process is still around.</div>
+</div>
 
 ---
 
@@ -321,6 +407,40 @@ RAM is divided into **pages** (4KB typically). Every virtual address is translat
 - **Minor fault:** Page in memory but not mapped (COW, first access) — kernel maps it, no disk I/O
 - **Major fault:** Page in swap — kernel reads from disk → very slow
 
+What actually happens, in order, when a process touches a virtual address that isn't mapped yet:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. CPU accesses a virtual address.</strong> The MMU walks the page tables to translate it to a physical address, as it does for every memory access.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. No valid mapping found.</strong> The MMU can't complete the translation — the page isn't currently mapped into this process's page table — and raises a page fault, trapping into the kernel.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Kernel decides: minor or major?</strong> It checks whether the page is already sitting in RAM (just not mapped for this process yet — e.g. a COW page, or first touch of a freshly <code>mmap</code>'d region) or whether it's been swapped out to disk.
+    </div>
+    <div class="stepper-panel">
+      <strong>4a. Minor fault path.</strong> The page is already in RAM. The kernel just updates the page table to point at it and resumes the process — no disk I/O, effectively free.
+    </div>
+    <div class="stepper-panel">
+      <strong>4b. Major fault path.</strong> The page has to be read back from swap on disk first — orders of magnitude slower than RAM — before the kernel can map it and resume the process.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A process touches a page that's part of a copy-on-write mapping from a recent fork(). Is that a minor or a major fault?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Minor. The page is already sitting in physical RAM (shared with the parent) — the kernel just needs to map it (and, on a write, copy it) without touching disk. Major faults are specifically for pages that were swapped out and have to be read back from disk.</div>
+</div>
+
 ### Swap
 
 When RAM is full, kernel moves least-recently-used pages to swap. It's orders of magnitude slower:
@@ -339,6 +459,12 @@ cat /proc/<PID>/oom_score         # current score
 echo -1000 > /proc/<PID>/oom_score_adj  # protect from OOM (-1000 = never kill)
 dmesg | grep -i "oom\|killed"     # check for past OOM events
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A container has swap disabled (the common cgroup default) and its process exceeds its memory limit. Does the kernel swap pages out to make room?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. With swap disabled there's nowhere to evict pages to, so the kernel can't buy time the way it would on a normal host — it goes straight to the OOM killer, which picks a victim by <code>oom_score</code> and kills it outright. This is why containers tend to die abruptly under memory pressure instead of just slowing down.</div>
+</div>
 
 ---
 
@@ -373,6 +499,27 @@ graph TD
 - **Running out of inodes** = cannot create files even with free disk space. Check: `df -i`
 - **Hard link** — another name pointing to same inode. Can't cross filesystems. Survives original deletion.
 - **Symlink** — separate file containing a path string. Breaks if target deleted. Can cross filesystems.
+
+Same idea, flip between them:
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="hardlink" class="active">Hard link</button>
+    <button data-toggle-opt="symlink">Symlink</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="hardlink">
+    Another directory entry pointing at the <strong>same inode number</strong>. Can't cross filesystems (inode numbers are only unique within one filesystem). Survives deletion of the original name — the data isn't freed until every hard link to that inode is gone.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="symlink">
+    A separate file that just contains a <strong>path string</strong> pointing at another file. Breaks (dangles) if the target is deleted or moved. Can cross filesystems freely, since it's just text, not an inode reference.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">You delete the original file that a hard link points to. Does the hard link still work?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Yes. A hard link is just another directory entry pointing at the same inode &mdash; the inode (and its data blocks) only get freed once every hard link referencing it is removed, not when any single one of them is. This is the opposite of a symlink, which breaks the moment the path it points to stops existing.</div>
+</div>
 
 ### Virtual Filesystem (VFS) Layer
 
@@ -418,6 +565,12 @@ On an **N-core machine:**
 
 **High load + low CPU%?** → Processes in D state (disk I/O). Check `wa%` in top, run `iostat -x 1`.
 
+<div class="quiz-card">
+  <p class="quiz-q">A server shows load average 8.0 on a 4-core machine, but CPU usage (us% + sy%) is only 15%. Is the CPU the bottleneck?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Load average counts both runnable (R) <em>and</em> uninterruptible-sleep (D) processes &mdash; it isn't a CPU-only metric. High load with low CPU usage almost always means a pile of D-state processes blocked on disk/NFS I/O, not CPU contention. Check <code>wa%</code> in top and run <code>iostat -x 1</code> before assuming you need more cores.</div>
+</div>
+
 ---
 
 ## File Descriptors
@@ -456,6 +609,12 @@ ls -la /proc/<PID>/fd/             # list them
 ulimit -n 65536                     # raise temporarily
 # Permanent: /etc/security/limits.conf
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A process running <code>ulimit -n 65536</code> at the shell still hits "too many open files" once it opens a few thousand sockets. What's the most likely reason?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The <code>ulimit</code> command only raises the limit for the shell session it's run in (and anything it launches afterward) &mdash; not for a process that's already running, and not permanently across reboots or new sessions. A long-lived service needs the limit set in <code>/etc/security/limits.conf</code> (or its systemd unit's <code>LimitNOFILE</code>), not a one-off interactive <code>ulimit</code> call.</div>
+</div>
 
 ---
 
@@ -496,6 +655,11 @@ graph TD
 - High load + high sy% = **syscall-heavy** (excessive context switches)
 - High load + active swap = **memory pressure** (thrashing)
 
+<div class="quiz-card">
+  <p class="quiz-q">top shows high sy% (system CPU) but low us% (user CPU) and low wa%. Is this a disk problem?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Low wa% rules out I/O wait. High sy% specifically points to the kernel itself burning CPU &mdash; excessive syscalls or context switches &mdash; not your application's own code (that would show as high us%) and not disk waiting. Chase it with strace or perf, not iostat.</div>
+</div>
 
 ---
 

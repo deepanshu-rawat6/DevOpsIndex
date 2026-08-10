@@ -2,6 +2,11 @@
 
 Containers didn't appear out of nowhere in 2013. They are the result of four decades of OS isolation research, each layer solving the gaps left by the previous one. Understanding this progression explains why containers work the way they do.
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## Evolution Timeline
@@ -29,6 +34,46 @@ timeline
     2016 : cgroups v2 (Linux 4.5)
            : Unified hierarchy, better resource control
 ```
+
+Same timeline, walked through one era at a time — what each one added, and specifically what gap in the previous era it closed:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. chroot (1979).</strong> Added: a process-local view of the filesystem root — everything below <code>/jail</code> looks like <code>/</code> to the jailed process. Problem solved: build isolation and system recovery, nothing more. It never touched process visibility, networking, users, or resource limits, and a root process inside it can simply <code>chroot()</code> again to escape — it was never meant as a security boundary.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. BSD Jails (2000).</strong> Added: a complete isolated environment per jail — own hostname, own IP(s), own process tree, own user namespace. Problem solved: every gap chroot left open. This was the first true OS-level virtualization, proving the idea could work — just FreeBSD-only, with no fine-grained resource limits and no concept of image layers yet.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Linux namespaces (2002&ndash;2016).</strong> Added: the same isolation-of-visibility idea as Jails, but as separate kernel primitives (mnt, uts, ipc, pid, net, user, cgroup) rolled out one at a time over 14 years. Problem solved: gave Linux its own equivalent of Jails, piece by piece, instead of one bundled feature. It still only isolates what a process can <em>see</em> &mdash; a namespaced process can consume all the CPU and memory it wants.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. cgroups (2008).</strong> Added: limiting, accounting, and enforcement of actual resource usage &mdash; CPU, memory, IO, process count. Problem solved: exactly the gap namespaces left &mdash; controlling what a process can <em>use</em>, not just what it can see.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. LXC (2008).</strong> Added: namespaces + cgroups + a minimal init process, wired together into one usable runtime tool. Problem solved: nobody had to hand-assemble kernel primitives themselves anymore &mdash; effectively reimplementing BSD Jails on Linux. It still had no image layers, no standard image format or registry, and a poor developer experience.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Docker (2013).</strong> Added: image layers (union FS/overlayfs), the Dockerfile, a registry, and a simple CLI &mdash; the developer workflow around containers. Problem solved: LXC's packaging and distribution gap. Docker didn't replace the kernel primitives underneath; namespaces and cgroups are unchanged, just wrapped in better tooling.
+    </div>
+    <div class="stepper-panel">
+      <strong>7. runc + OCI standard (2015).</strong> Added: a standardized container runtime spec, with Docker's own <code>libcontainer</code> becoming the reference implementation, <code>runc</code>. Problem solved: portability &mdash; a standard spec means any OCI-compliant runtime can run any OCI-compliant image, instead of everything being locked to Docker's own implementation.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Did Docker invent containers?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Namespaces and cgroups already existed, and LXC had already combined them into a working container runtime five years earlier. Docker's contribution was the developer workflow on top of unchanged kernel primitives: image layers, the Dockerfile, a registry, and a simple CLI.</div>
+</div>
 
 ---
 
@@ -84,6 +129,12 @@ cp /bin/bash /jail/bin/
 ldd /bin/bash | grep -o '/lib[^ ]*' | xargs -I{} cp {} /jail/lib64/
 chroot /jail /bin/bash   # process now sees /jail as /
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A process is running inside a chroot jail as root. Can it see and signal other processes on the host, and can it escape the jail entirely?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Yes to both. chroot only restricts the filesystem view &mdash; it does nothing for process, network, or user isolation, and places no resource limits. Root inside the jail is root on the host, and a root process can simply call <code>chroot()</code> again to break out. It was designed for build isolation and system recovery, never as a security boundary.</div>
+</div>
 
 ---
 
@@ -145,6 +196,12 @@ graph TD
 - No concept of image layers or packaging
 
 BSD Jails proved the concept was sound and inspired the Linux kernel developers to implement equivalent primitives — which became **namespaces** and **cgroups**.
+
+<div class="quiz-card">
+  <p class="quiz-q">Did BSD Jails offer fine-grained resource limits — capping a jail's CPU% or memory the way cgroups later would?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No, only partial resource control via jail parameters &mdash; no fine-grained CPU% or memory caps. Jails solved filesystem, process, network, and user isolation completely, but the resource-limiting gap was still open. That's exactly the gap cgroups were built to close, years later.</div>
+</div>
 
 ---
 
@@ -229,6 +286,12 @@ sequenceDiagram
 
 **Key insight:** Namespaces give isolation of visibility. A process in a PID namespace cannot see or signal processes in other PID namespaces. But it can still consume all CPU and memory — that's what cgroups solve.
 
+<div class="quiz-card">
+  <p class="quiz-q">A process is isolated in its own PID, network, and mount namespaces. Can it still consume unlimited CPU and memory on the host?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Yes. Namespaces control what a process can <em>see</em>, not what it can <em>use</em>. A fully namespaced process with no cgroup attached can still starve the host of CPU or memory &mdash; that resource-usage gap is exactly what cgroups exist to close.</div>
+</div>
+
 ---
 
 ## cgroups (Linux 2.6.24, 2008)
@@ -287,6 +350,12 @@ graph TD
 - `pids.max` — process/thread count (prevents fork bombs)
 - `io.max` — disk read/write throughput limits
 - `memory.swap.max 0` — disable swap for containers (crash fast, don't degrade)
+
+<div class="quiz-card">
+  <p class="quiz-q">What's the key structural difference between cgroups v1 and cgroups v2?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>v1 used multiple separate hierarchies, one per controller (CPU, memory, IO tracked independently with their own rules). v2 unifies all controllers under a single hierarchy with a consistent API &mdash; which is also why v2's memory and IO accounting is more accurate (per-cgroup subtree instead of per-process, and a unified io controller instead of blkio covering block devices only).</div>
+</div>
 
 ---
 
@@ -411,6 +480,12 @@ graph TD
 - Complex configuration files (lxc.conf)
 - Poor developer experience — not designed for app packaging
 - No Dockerfile-equivalent for reproducible builds
+
+<div class="quiz-card">
+  <p class="quiz-q">Did LXC have a concept of image layers or a standard registry, the way Docker containers do?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Each LXC container's rootfs was a full copy or a manually managed copy-on-write filesystem, with no standard image format or registry. LXC combined namespaces and cgroups into the first complete Linux container runtime, but packaging and distribution were exactly the gaps Docker filled next.</div>
+</div>
 
 ---
 
@@ -566,6 +641,12 @@ graph TD
 
 This full stack is why containers are lightweight: there's no hypervisor, no guest OS kernel, no hardware emulation. The app runs directly on the host kernel, just with a restricted view and resource limits enforced by kernel primitives.
 
+<div class="quiz-card">
+  <p class="quiz-q">A Docker container writes to a file that only exists in a read-only image layer. What actually happens on disk?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Copy-on-write: the file is copied from the image layer (<code>lowerdir</code>) into the container's writable layer (<code>upperdir</code>), then the write happens there. The original image layer is never touched, which is exactly how multiple containers can share the same read-only image layers while each keeps its own independent changes.</div>
+</div>
+
 ---
 
 ## Docker Image Size Optimization
@@ -591,6 +672,29 @@ FROM gcr.io/distroless/base-debian12        # glibc dynamic binaries
 FROM gcr.io/distroless/java21-debian12      # Java
 FROM gcr.io/distroless/nodejs20-debian12    # Node.js
 ```
+
+Four named, mutually-exclusive starting points — pick one per image, not a mix:
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="ubuntu" class="active state-bad">ubuntu</button>
+    <button data-toggle-opt="debianslim" class="state-warn">debian-slim</button>
+    <button data-toggle-opt="scratch" class="state-ok">scratch</button>
+    <button data-toggle-opt="distroless" class="state-ok">distroless</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="ubuntu">
+    <strong>~70MB.</strong> Full shell, package manager, and utilities included. Convenient for debugging inside the container, but every one of those extras is also attack surface and dead weight you're shipping and pulling on every deploy.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="debianslim">
+    <strong>~30MB.</strong> Strips docs, locales, and the apt cache but keeps a real shell and package manager. A reasonable middle ground when you occasionally still need to <code>exec</code> into the container to poke around.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="scratch">
+    <strong>0MB.</strong> No base at all — just your binary. Only works for fully static binaries (Go with <code>CGO_ENABLED=0</code>, Rust with musl) since there's no libc, no shell, and no way to exec in at all.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="distroless">
+    <strong>~2MB base.</strong> No shell, no package manager, but does include the language runtime/libc a dynamically-linked binary needs (separate variants for static binaries, glibc, Java, Node.js). The best default for most apps that aren't fully static: smaller and safer than debian-slim, without scratch's "static binaries only" restriction.
+  </div>
+</div>
 
 ### Step 2: Multi-stage build (most impactful for compiled languages)
 

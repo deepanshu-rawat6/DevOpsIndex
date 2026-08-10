@@ -1,5 +1,14 @@
 # strace, perf and Profiling
 
+Each major section below closes with a quick knowledge check — track how many you've cleared as you go:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
+---
+
 ## 1. strace — Syscall Interception
 
 strace uses the `ptrace(2)` syscall to intercept every system call made by a process. The kernel pauses the tracee at each syscall entry/exit, allowing strace to inspect arguments and return values.
@@ -74,6 +83,18 @@ sequenceDiagram
 
 > **Production warning:** strace adds ~10-100x overhead. On live systems, use `-c` for aggregated stats or attach briefly. Use `perf trace` for lower overhead.
 
+<div class="quiz-card">
+  <p class="quiz-q">Why does strace impose 10-100x overhead instead of just the cost of one extra process reading syscall info?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    Look at the sequence diagram above: ptrace stops the tracee twice per syscall —
+    once at SYSCALL_ENTER and once at SYSCALL_EXIT — and each stop requires a
+    context switch to strace and back before the tracee can resume. That's two
+    extra round trips through the kernel for every single syscall the process
+    makes, not a one-time cost.
+  </div>
+</div>
+
 ---
 
 ## 2. perf stat — Hardware Counters
@@ -125,6 +146,17 @@ perf stat -e LLC-loads,LLC-load-misses,LLC-stores ./myapp
 # TLB events
 perf stat -e dTLB-loads,dTLB-load-misses ./myapp
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A perf stat run shows IPC of 0.3. Does that mean the CPU is running too slow (a clock-speed problem)?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No. IPC measures how many instructions retire per cycle, not clock speed —
+    per the table above, &lt; 0.5 points to the CPU spending most cycles
+    stalled waiting on something, usually memory (check cache-miss rate next).
+    Raising clock speed wouldn't fix a stall the CPU spends waiting on RAM.
+  </div>
+</div>
 
 ---
 
@@ -197,6 +229,47 @@ flowchart LR
     E --> F[flamegraph.svg<br/>open in browser]
 ```
 
+Step through the same pipeline one stage at a time:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Record with stack traces.</strong> <code>perf record -F 99 -ag -o perf.data sleep 30</code>
+      &mdash; sample at 99Hz (not 100Hz) system-wide (<code>-a</code>) with call graphs (<code>-g</code>) for 30 seconds.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Export to folded format.</strong> Clone Brendan Gregg's <code>FlameGraph</code> repo, then
+      <code>perf script -i perf.data | ./FlameGraph/stackcollapse-perf.pl &gt; out.folded</code> decodes the raw
+      samples into one line per unique stack, with a count of how many samples hit it.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Generate the SVG.</strong> <code>./FlameGraph/flamegraph.pl out.folded &gt; flamegraph.svg</code>
+      turns the folded stacks into the interactive, color-coded image.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Open and read it.</strong> <code>open flamegraph.svg</code> &mdash; then look for the widest
+      frames near the top, per the reading guide below.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Why sample at -F 99 instead of a round number like 100Hz?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    Sampling at exactly 100Hz can fall into lockstep with the kernel's own
+    100Hz timer tick, so every sample keeps catching the same phase of
+    periodic work and skews the profile. 99Hz avoids that alignment so the
+    samples land at effectively random points relative to the timer.
+  </div>
+</div>
+
 ---
 
 ## 5. Flame Graphs — How to Read
@@ -234,6 +307,16 @@ graph TD
 3. Off-CPU flame graphs (perf + sleep analysis) show blocking time — different tool
 4. Differential flame graphs compare before/after a change
 
+<div class="quiz-card">
+  <p class="quiz-q">In a flame graph, function A is drawn to the left of function B at the same stack depth. Does that mean A ran before B in time?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No. Left-to-right order is alphabetical, not chronological — the x-axis
+    encodes aggregate CPU time (frame width = % of samples), not a timeline.
+    A sitting left of B tells you nothing about which one ran first.
+  </div>
+</div>
+
 ---
 
 ## 6. perf trace — Lightweight Syscall Tracer
@@ -270,3 +353,57 @@ perf trace -T ls
 | Child tracing (-f) | Yes | Yes |
 | Production safe | No | Cautious yes |
 | Output format | Detailed | Concise |
+
+<div class="quiz-card">
+  <p class="quiz-q">The table lists perf trace as "Cautious yes" for production, not an unconditional yes, even though its overhead is ~2-5x versus strace's ~10-100x. Why the caveat?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    Tracepoints/eBPF are much cheaper per syscall than ptrace's double
+    context-switch stop, but 2-5x is still real overhead, not zero. On a
+    system already close to saturated or latency-sensitive, that multiplier
+    can still matter — "cheaper than strace" isn't the same guarantee as
+    "safe to run always."
+  </div>
+</div>
+
+---
+
+## 7. Choosing the Right Tool — strace vs perf vs Flame Graphs
+
+Sections 1-6 covered each tool on its own. Here's the same decision compressed to "which one do I reach for," by use case and overhead:
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="strace-tool" class="active">strace</button>
+    <button data-tab="perf-tool">perf</button>
+    <button data-tab="flamegraph-tool">flame graphs</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="strace-tool">
+      <strong>Use case:</strong> Deep, per-syscall inspection of a single process &mdash; exact arguments,
+      return values, and errors. Reach for it on questions like "why is my process hung" or
+      "what files does it open at startup."<br/><br/>
+      <strong>Overhead:</strong> ~10-100x, because ptrace stops the tracee at every syscall entry
+      <em>and</em> exit. Fine for a brief attach or with <code>-c</code>; don't leave it running against
+      live traffic.
+    </div>
+    <div class="tab-panel" data-tab-panel="perf-tool">
+      <strong>Use case:</strong> Everything from a whole-system health check (<code>perf stat</code>'s
+      hardware counters &mdash; IPC, cache misses) to a live view of hot functions
+      (<code>perf top</code>) to a full CPU profile over a time window
+      (<code>perf record</code> + <code>perf report</code>), plus lower-overhead syscall tracing
+      via <code>perf trace</code>.<br/><br/>
+      <strong>Overhead:</strong> A few percent for counter reads and sampling; <code>perf trace</code>
+      runs ~2-5x thanks to tracepoints/eBPF instead of ptrace &mdash; an order of magnitude cheaper
+      than strace, and cautiously safe for production.
+    </div>
+    <div class="tab-panel" data-tab-panel="flamegraph-tool">
+      <strong>Use case:</strong> Turning <code>perf record</code>'s raw stack samples into one picture,
+      so the widest (hottest) function jumps out instead of scrolling through
+      <code>perf report</code> line by line. Best when you need to show, not just find, where the
+      CPU time went.<br/><br/>
+      <strong>Overhead:</strong> None beyond whatever <code>perf record</code> already cost to capture
+      the samples &mdash; the SVG is generated offline, after the run.
+    </div>
+  </div>
+</div>

@@ -2,6 +2,13 @@
 
 A signal is a software interrupt sent to a process by the kernel or another process. It's the primary mechanism for async process notification.
 
+Track how many knowledge checks you clear as you go:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## Common Signals
@@ -49,6 +56,27 @@ kill -15 <pid> && sleep 30 && kill -9 <pid> 2>/dev/null
 **Why SIGKILL can't be caught:**
 SIGKILL and SIGSTOP are handled entirely by the kernel scheduler — the process never gets CPU time to run a handler. This is intentional: it guarantees a way to always terminate a hung process.
 
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="sigterm" class="active state-ok">SIGTERM</button>
+    <button data-toggle-opt="sigkill" class="state-bad">SIGKILL</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="sigterm">
+    Delivered to the process like any other signal. If a handler is installed, it runs in user space &mdash; flush buffers, close connections, save state &mdash; and the process decides when to exit. Catchable, blockable, ignorable.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="sigkill">
+    Never delivered to the process at all. The kernel scheduler removes it directly &mdash; no handler runs, in-flight I/O is dropped, nothing gets flushed. Can't be caught, blocked, or ignored.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A process installs a handler for SIGTERM that catches the signal but never calls exit. You send it SIGTERM again. Does that force it to stop — and if not, what will?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No. SIGTERM is catchable, so a process that installs a handler decides for itself whether and when to exit &mdash; sending it again just runs the handler again (or does nothing if it's already mid-handler). Only SIGKILL forces termination, because SIGKILL and SIGSTOP are handled entirely by the kernel scheduler and never reach a user-space handler at all.
+  </div>
+</div>
+
 ---
 
 ## Signal Handling Internals
@@ -70,6 +98,14 @@ sequenceDiagram
 
 **When is a signal delivered?**
 A signal becomes pending when sent. It's delivered when the process next transitions from kernel space to user space (syscall return or interrupt return). A sleeping process (in `select`, `read`, etc.) is woken up early — the syscall returns `EINTR`.
+
+<div class="quiz-card">
+  <p class="quiz-q">A process is blocked inside a <code>read()</code> syscall when SIGTERM arrives. Does the signal handler run the instant the signal is sent?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No. The signal only becomes <strong>pending</strong> the instant it's sent &mdash; it isn't <strong>delivered</strong> until the process next crosses from kernel space back to user space. A process sleeping in a syscall like <code>read()</code> is woken up early specifically to make that transition happen: the syscall returns <code>EINTR</code>, the handler runs, then execution resumes.
+  </div>
+</div>
 
 ---
 
@@ -101,6 +137,14 @@ signal.Notify(ch, syscall.SIGTERM, syscall.SIGINT)
 // do cleanup
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">A process blocks SIGTERM while it's mid critical-section. Someone sends SIGTERM during that window. Is the signal lost?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No. A blocked signal stays <strong>pending</strong> (visible in <code>SigPnd</code>) until the process unblocks it &mdash; the kernel doesn't drop it. As soon as the mask no longer blocks it, it's delivered. The one exception: SIGKILL and SIGSTOP can't be added to the mask at all, so they're never delayed this way.
+  </div>
+</div>
+
 ---
 
 ## SIGCHLD and Zombie Processes
@@ -124,6 +168,14 @@ trap 'wait' SIGCHLD
 # In C: use SA_NOCLDWAIT flag or signal(SIGCHLD, SIG_DFL) with waitpid
 # In Go: os/exec.Cmd.Wait() handles this automatically
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">You send SIGKILL to a zombie process's PID to try to clean it up. Does that work?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No. A zombie has already exited &mdash; all its memory is freed and it isn't scheduled, so there's no running process left to receive or act on a signal. Only its parent calling <code>wait()</code>/<code>waitpid()</code> (or the parent dying, which reparents it so init can reap it) removes its entry from the process table.
+  </div>
+</div>
 
 ---
 
@@ -150,6 +202,39 @@ func main() {
 2. App starts draining (stop accepting, finish in-flight)
 3. After `terminationGracePeriodSeconds` (default 30s) → SIGKILL
 4. Set `preStop` hook if you need extra time before SIGTERM
+
+Step through the same sequence:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. SIGTERM sent.</strong> Kubernetes sends SIGTERM to the pod's PID 1 the moment it starts terminating &mdash; this is also when the <code>terminationGracePeriodSeconds</code> countdown starts.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. App drains.</strong> The SIGTERM handler stops accepting new work and finishes in-flight requests &mdash; <code>srv.Shutdown(ctx)</code> in the Go example above.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Grace period expires.</strong> If the app hasn't exited by the end of <code>terminationGracePeriodSeconds</code> (default 30s), Kubernetes sends SIGKILL &mdash; unconditionally, whether or not draining finished.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Optional: preStop hook.</strong> Runs before SIGTERM is sent, if configured &mdash; use it when you need extra lead time, e.g. letting kube-proxy remove the pod from service endpoints before traffic actually stops arriving.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Your app takes 45 seconds to drain in-flight requests, but <code>terminationGracePeriodSeconds</code> is left at its default. What happens?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    The default grace period is 30s. Kubernetes sends SIGKILL at the 30s mark regardless of whether draining finished &mdash; your app is killed mid-drain, dropping the remaining 15 seconds of in-flight work. Fix it by raising <code>terminationGracePeriodSeconds</code> to comfortably exceed the actual drain time, not by assuming the platform will wait for you.
+  </div>
+</div>
 
 ---
 
@@ -197,10 +282,15 @@ In a container, PID 1 has special responsibilities:
 
 When you write a Dockerfile with shell-form CMD, `/bin/sh` becomes PID 1:
 
-```
-Container PID table:
-  PID 1: /bin/sh -c "java -jar app.jar"   ← receives SIGTERM
-  PID 2: java -jar app.jar                ← child of sh, never sees SIGTERM
+```mermaid
+sequenceDiagram
+    participant CR as Container runtime
+    participant P1 as PID 1 (/bin/sh -c ...)
+    participant P2 as PID 2 (java -jar app.jar)
+
+    CR->>P1: SIGTERM
+    Note over P1: shell doesn't forward signals to children by default
+    Note over P2: never receives SIGTERM
 ```
 
 The shell receives SIGTERM but doesn't forward it to the child by default. The child (your app) never gets SIGTERM. Kubernetes waits `terminationGracePeriodSeconds`, then sends SIGKILL to PID 1 (the shell), which kills the entire process group. Your app gets SIGKILL with no chance to flush, drain connections, or save state.
@@ -222,6 +312,14 @@ docker inspect <image> | jq '.[0].Config.Cmd'
 # Exec form: ["java","-jar","app.jar"]
 # Shell form: ["/bin/sh","-c","java -jar app.jar"]
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">Your Dockerfile uses <code>CMD java -jar app.jar</code> (shell form) and <code>kubectl delete pod</code> sends SIGTERM. Does your app get a chance to shut down gracefully?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No, not by default. Shell form makes <code>/bin/sh -c "..."</code> PID 1; your app is just its child. The shell receives SIGTERM but doesn't forward it, so the app never sees it. Kubernetes waits out <code>terminationGracePeriodSeconds</code>, then sends SIGKILL to PID 1 (the shell), which kills the whole process group &mdash; your app dies with SIGKILL, not SIGTERM, with no chance to flush or drain.
+  </div>
+</div>
 
 ### Shell wrapper with exec (when you need a startup script)
 
@@ -281,15 +379,46 @@ docker run --init myimage
 #     init: true
 ```
 
-```
-With tini:
-  PID 1: tini -- java -jar app.jar
-  PID 2: java -jar app.jar
+```mermaid
+sequenceDiagram
+    participant CR as Container runtime
+    participant T as PID 1 (tini)
+    participant P as PID 2 (java -jar app.jar)
 
-  SIGTERM → tini receives → forwards SIGTERM to PID 2 (java)
-  java runs its shutdown hooks → flushes, drains, exits cleanly
-  tini exits → container terminates
+    CR->>T: SIGTERM
+    T->>P: forwards SIGTERM
+    Note over P: shutdown hooks run — flush, drain, exit cleanly
+    P-->>T: exits
+    T-->>CR: tini exits, container terminates
 ```
+
+Step through the same flow:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Container runtime sends SIGTERM.</strong> Docker/containerd/Kubernetes only ever signals PID 1 inside the container &mdash; it has no idea any other process exists in there.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. tini (PID 1) receives it.</strong> tini's whole job is registering handlers for every signal and forwarding them &mdash; it does nothing else on the way through.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. tini forwards SIGTERM to the app (PID 2).</strong> This is the step a bare shell-form CMD skips &mdash; <code>/bin/sh</code> doesn't forward signals to its child by default.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. App runs its shutdown hooks.</strong> Same as any direct SIGTERM handler: stop accepting requests, drain in-flight work, flush buffers, exit cleanly.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. tini reaps and exits.</strong> Once the app process is gone, tini (still PID 1) exits too, and the container terminates &mdash; no zombies left behind, because tini also handles <code>waitpid()</code> along the way.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ### dumb-init — alternative to tini
 
@@ -336,6 +465,14 @@ spec:
             command: ["/bin/sh", "-c", "nginx -s quit; while killall -0 nginx; do sleep 1; done"]
       # SIGQUIT will be sent after preStop completes
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">You run <code>docker stop</code> on a plain nginx container with no <code>STOPSIGNAL</code> override. Does nginx drain in-flight requests before it exits?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No. <code>docker stop</code> defaults to sending SIGTERM, but nginx treats SIGTERM as a fast, immediate close &mdash; it's SIGQUIT that tells nginx to finish in-flight requests before shutting down. Without <code>STOPSIGNAL SIGQUIT</code> (or an equivalent preStop hook), the default signal produces the opposite of a graceful drain.
+  </div>
+</div>
 
 ### Verifying graceful shutdown works
 

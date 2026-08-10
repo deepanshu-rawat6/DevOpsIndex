@@ -1,5 +1,14 @@
 # Memory Tuning
 
+A field-level reference for reading and tuning Linux memory: what the kernel's own counters mean, how the OOM killer picks a victim, when swap helps vs hurts, and how cgroups v2 turn into Kubernetes memory limits. Knowledge checks are sprinkled throughout — track how many you've cleared:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
+---
+
 ## 1. /proc/meminfo — Key Fields
 
 ```bash
@@ -30,6 +39,12 @@ SUnreclaim:       256000 kB   # Unreclaimable slab
 | `MemAvailable` | MemFree + reclaimable buffers/cache + part of slab. **Use this** to judge if memory is available for a new process |
 
 > A server with MemFree=100MB but MemAvailable=8GB is healthy. The kernel uses free RAM for caching aggressively.
+
+<div class="quiz-card">
+  <p class="quiz-q">A server shows MemFree=100MB and MemAvailable=8GB. Is it low on memory?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. MemAvailable already accounts for reclaimable buffers/cache and part of slab, so 8GB is genuinely available to a new process. MemFree alone is misleading &mdash; the kernel deliberately spends spare RAM on page cache, so a low MemFree on an otherwise healthy box is normal, not a warning sign.</div>
+</div>
 
 ---
 
@@ -63,6 +78,12 @@ sysctl -p /etc/sysctl.d/99-memory.conf
 **When swap is useful vs harmful:**
 - Useful: cushion for rarely-accessed JVM heap; allows overcommit for fork-heavy workloads
 - Harmful: database buffers getting swapped causes 100ms+ latency spikes; use `swappiness=1` for MySQL/PostgreSQL/Redis
+
+<div class="quiz-card">
+  <p class="quiz-q">Does setting vm.swappiness=0 disable swapping entirely?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Per the table above, <code>0</code> means "swap only to avoid OOM, never proactively" &mdash; the kernel still reclaims file cache first, but it will still swap anonymous memory rather than let the system hit an out-of-memory condition. It's not an on/off switch, it's the low end of a tendency dial.</div>
+</div>
 
 ---
 
@@ -122,6 +143,43 @@ flowchart TD
     J --> K[Memory freed<br/>alloc retried]
 ```
 
+Same sequence, one step at a time:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Allocation fails.</strong> The kernel first tries to reclaim reclaimable memory (page cache, slab) and retry the allocation. The OOM killer is only invoked once RAM and swap together are actually exhausted, not just fragmented.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. OOM killer invoked.</strong> It walks every process on the system as a candidate victim.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Score each candidate.</strong> <code>oom_score = (process_rss / total_memory) &times; 1000</code>, then <code>oom_score_adj</code> is added on top. A process using a larger share of RAM starts with a higher base score.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Exempt processes are skipped.</strong> Anything with <code>oom_score_adj = -1000</code> is never a candidate, no matter how much RSS it holds &mdash; this is how sshd or a monitoring agent gets protected.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Highest score wins.</strong> The kernel picks the surviving process with the highest score and sends it <code>SIGKILL</code> (or a child, per the dmesg line "score X or sacrifice child").
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Memory freed, alloc retried.</strong> The killed process's memory is released and the original failed allocation is retried.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A process has oom_score_adj set to -1000. Can the OOM killer ever pick it as a victim?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. -1000 exempts it completely from scoring &mdash; it's skipped as a candidate regardless of how much RSS it holds. That's the mechanism behind protecting a critical daemon like sshd: <code>echo -1000 &gt; /proc/$(pgrep sshd)/oom_score_adj</code>.</div>
+</div>
+
 ---
 
 ## 4. Dirty Pages
@@ -151,6 +209,43 @@ sysctl -w vm.dirty_background_ratio=2
 # Force flush all dirty pages now
 sync && echo 3 > /proc/sys/vm/drop_caches
 ```
+
+The two ratios above aren't the same trigger — walk through what actually happens to a page from the moment it's written:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Write happens.</strong> The page is modified in the page cache and marked dirty. Nothing has hit disk yet — the write returns immediately.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Flush daemon wakes on schedule.</strong> Every <code>vm.dirty_writeback_centisecs</code> (default 500 = 5s), the kernel's writeback thread checks dirty page state.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Background threshold hit.</strong> Once total dirty pages exceed <code>vm.dirty_background_ratio</code> (default 10% of RAM), background writeback starts asynchronously — processes doing writes are not blocked.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Age threshold hit.</strong> Independently, any page dirty longer than <code>vm.dirty_expire_centisecs</code> (default 3000 = 30s) gets written regardless of the ratio thresholds.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Foreground threshold hit.</strong> If dirty pages keep growing past <code>vm.dirty_ratio</code> (default 20% of RAM), any process attempting a write is blocked synchronously until writeback catches up — this is the I/O stall you feel.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Pages written, Dirty drops.</strong> Writeback completes, <code>Dirty</code> in <code>/proc/meminfo</code> shrinks, and any blocked writers resume.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">vm.dirty_background_ratio is 10 and vm.dirty_ratio is 20. What happens when dirty pages hit 15% of memory?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Background writeback is already running (it kicked in at 10%), but writers are not blocked — that only happens at 20% (dirty_ratio). Between the two thresholds, writeback happens asynchronously while processes keep writing at full speed; only crossing dirty_ratio itself makes writes block.</div>
+</div>
 
 ---
 
@@ -186,21 +281,48 @@ madvise(ptr, size, MADV_NOHUGEPAGE); // opt out
 
 Set `/sys/kernel/mm/transparent_hugepage/enabled` to `madvise` — only allocate huge pages when explicitly requested.
 
+The three modes, side by side:
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="always" class="active">always</button>
+    <button data-tab="madvise">madvise</button>
+    <button data-tab="never">never</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="always">
+      <strong>Kernel default on most distros.</strong> Every eligible mapping gets promoted to huge pages automatically, no application changes needed. <code>khugepaged</code> runs continuously in the background compacting memory to create more huge pages — that compaction is exactly what causes the 10&ndash;100ms latency spikes that make this mode risky for Redis, MySQL, PostgreSQL, MongoDB, and Cassandra.
+    </div>
+    <div class="tab-panel" data-tab-panel="madvise">
+      <strong>Opt-in, per allocation.</strong> Huge pages are only used where an application explicitly calls <code>madvise(ptr, size, MADV_HUGEPAGE)</code> on a region; everything else stays on regular 4KB pages. This is the recommended middle ground — workloads that know they benefit (large JVM heaps, analytics engines) can ask for huge pages on their hot regions without <code>khugepaged</code> silently compacting memory system-wide.
+    </div>
+    <div class="tab-panel" data-tab-panel="never">
+      <strong>Fully disabled.</strong> No huge pages, no <code>khugepaged</code> background compaction, ever. The safe default for latency-sensitive databases willing to eat the (small) extra TLB overhead of 4KB pages in exchange for never risking a multi-millisecond compaction stall.
+    </div>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Why is "never" often the safer choice for a latency-sensitive database, even though huge pages themselves would reduce TLB overhead?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It isn't the huge pages that hurt — it's khugepaged, the background daemon that compacts memory to create them, which can stall the system for 10-100ms at unpredictable times under "always". "never" trades away the TLB benefit to avoid that compaction latency entirely; "madvise" is the compromise that keeps the benefit for opted-in regions without the surprise stalls elsewhere.</div>
+</div>
+
 ---
 
 ## 6. Memory cgroups v2 — How K8s Limits Work
 
 Kubernetes uses cgroups v2 to enforce memory limits on pods/containers.
 
-```
-/sys/fs/cgroup/
-└── kubepods.slice/
-    └── pod<uid>/
-        └── <container-id>/
-            ├── memory.max        ← hard limit (limits.memory)
-            ├── memory.high       ← soft limit (triggers reclaim)
-            ├── memory.current    ← current usage
-            └── memory.oom.group  ← kill whole cgroup on OOM
+```mermaid
+graph TD
+    Root["/sys/fs/cgroup/"] --> Slice["kubepods.slice/"]
+    Slice --> Pod["pod&lt;uid&gt;/"]
+    Pod --> Container["&lt;container-id&gt;/"]
+    Container --> Max["memory.max<br/>hard limit (limits.memory)"]
+    Container --> High["memory.high<br/>soft limit (triggers reclaim)"]
+    Container --> Current["memory.current<br/>current usage"]
+    Container --> Group["memory.oom.group<br/>kill whole cgroup on OOM"]
 ```
 
 ```bash
@@ -223,6 +345,12 @@ cat /sys/fs/cgroup/kubepods.slice/pod<uid>/<cid>/memory.events
 | — | `memory.high` | ~90% of limit; triggers aggressive reclaim before OOM |
 
 **OOMKilled pod:** When a container exceeds `memory.max`, the kernel OOM killer kills the cgroup's processes. K8s reports `OOMKilled` in pod status and restarts the container if `restartPolicy: Always`.
+
+<div class="quiz-card">
+  <p class="quiz-q">A container's memory.current climbs past memory.high but stays under memory.max. Is it OOM-killed?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. memory.high isn't a kill threshold &mdash; it's a soft limit that triggers aggressive reclaim, the kernel pushing usage back down. The container is only OOM-killed once it actually tries to exceed memory.max, the hard limit. Crossing memory.high just means reclaim pressure, not termination.</div>
+</div>
 
 ---
 
@@ -319,6 +447,29 @@ BestEffort        1000   (killed first)
 
 The kubelet sets `oom_score_adj` automatically based on QoS class. This is why Guaranteed pods survive node memory pressure while BestEffort pods are the first to go.
 
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="guaranteed" class="active state-ok">Guaranteed</button>
+    <button data-toggle-opt="burstable" class="state-warn">Burstable</button>
+    <button data-toggle-opt="besteffort" class="state-bad">BestEffort</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="guaranteed">
+    <strong>oom_score_adj = -997.</strong> Set when every container in the pod has requests equal to limits, for both CPU and memory. Effectively protected &mdash; killed last, only once nothing else survivable is left on the node.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="burstable">
+    <strong>oom_score_adj = 2 to 999.</strong> Set when at least one container has a request below its limit. The exact value is proportional to how much memory the pod is actually using relative to what it requested &mdash; a pod that's ballooned way past its request scores closer to 999, one still near its request scores much lower.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="besteffort">
+    <strong>oom_score_adj = 1000.</strong> Set when no container specifies memory or CPU requests/limits at all. Always the first target under node memory pressure &mdash; the kubelet gives it zero protection.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Node runs out of memory. Which pod gets killed first: a Burstable pod using 3x its requested memory, or a BestEffort pod using barely any memory at all?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The BestEffort pod. Its oom_score_adj is a fixed 1000 regardless of actual usage &mdash; QoS class sets a floor the kubelet never lets it rise above. A Burstable pod's score is proportional to overage, so it can get close to 999, but BestEffort is pinned at the maximum unconditionally.</div>
+</div>
+
 ### Memory pressure debugging with PSI
 
 Pressure Stall Information (PSI) gives a percentage of time tasks were stalled waiting for memory. Available in kernels 4.20+ and cgroup v2.
@@ -349,6 +500,25 @@ while true; do
   sleep 10
 done
 ```
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="some" class="active">some</button>
+    <button data-toggle-opt="full">full</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="some">
+    At least one task on the system was stalled waiting for memory during the window. Other tasks may have kept running fine &mdash; this is the earlier, more sensitive warning signal.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="full">
+    Every runnable task was stalled waiting for memory at the same time &mdash; nothing could make progress. This is the more severe signal: CPU is sitting idle because there's simply no memory to hand out.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">/proc/pressure/memory shows "some avg10=40.00" and "full avg10=0.10". Is the whole system stalled?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. "some" being high means at least one task was stalled a lot of the time, but "full" near zero means it's almost never the case that every task is stalled simultaneously &mdash; other tasks are still making progress. This pattern points at one or two memory-hungry processes under pressure, not a system-wide memory crisis.</div>
+</div>
 
 ### Swap behavior
 
@@ -440,3 +610,9 @@ env:
 ```
 
 Without `GOMEMLIMIT`, Go GC targets 100% heap growth by default. The heap can spike 2x before GC kicks in — easily exceeding K8s memory limits → OOMKill. With `GOMEMLIMIT`, GC collects proactively near the limit.
+
+<div class="quiz-card">
+  <p class="quiz-q">A Go service has a 512Mi K8s memory limit but no GOMEMLIMIT set. Why can it get OOMKilled even though its live heap is well under 512Mi?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Go's default GC targets 100% heap growth before collecting &mdash; meaning the heap can balloon to roughly 2x its live-object size before a collection cycle kicks in. That transient 2x spike can blow past the 512Mi cgroup limit even though the steady-state live heap would fit comfortably. GOMEMLIMIT tells the GC to collect proactively as it nears the limit, instead of waiting for the 100%-growth target.</div>
+</div>
