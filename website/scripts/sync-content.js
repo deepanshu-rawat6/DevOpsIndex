@@ -66,7 +66,7 @@ const SECTIONS = [
   },
   {
     slug: 'on-prem-k8s', title: 'Databases on Kubernetes', order: 15,
-    readOrder: ['README', 'postgres', 'mysql', 'mongodb', 'redis-cluster', 'kafka', 'clickhouse'],
+    readOrder: ['README', 'postgres', 'mysql', 'mongodb', 'mongodb-vm-cluster', 'redis-cluster', 'kafka', 'clickhouse'],
   },
   {
     slug: 'system-design', title: 'System Design', order: 16,

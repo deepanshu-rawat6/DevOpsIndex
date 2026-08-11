@@ -2,6 +2,11 @@
 
 Cross-database replication reference — beginner to advanced.
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## 1. Why Replication
@@ -17,15 +22,32 @@ Cross-database replication reference — beginner to advanced.
 
 ## 2. Sync vs Async — Latency and RPO
 
-**Async (default):** Primary writes locally, returns ACK, ships WAL/binlog in background.  
-- Write latency: fast  
-- RPO: seconds of data loss possible
+Every replication design is really a choice about where on this spectrum a given write sits — how much latency you're willing to pay on the critical path in exchange for how much data you're willing to lose if the primary dies one instant after acknowledging the write.
 
-**Sync:** Primary waits for at least one replica to confirm before returning ACK.  
-- Write latency: network RTT added  
-- RPO: 0 (no data loss on failover)
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="async" class="active state-warn">Async (default)</button>
+    <button data-toggle-opt="semisync">Semi-sync (MySQL)</button>
+    <button data-toggle-opt="sync" class="state-ok">Sync</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="async">
+    Primary writes locally, returns ACK, ships WAL/binlog in background.<br/>
+    <strong>Write latency:</strong> fast — nothing on the critical path waits on the network.<br/>
+    <strong>RPO:</strong> seconds of data loss possible if the primary dies before the replica catches up.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="semisync">
+    Primary waits for one replica to acknowledge <strong>receipt</strong> of the write — not that it has been applied yet.<br/>
+    <strong>Write latency:</strong> one network round trip, but no wait for the replica's apply step.<br/>
+    <strong>RPO:</strong> near-zero — the data exists on a second node's relay log even though that node hasn't necessarily replayed it yet.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="sync">
+    Primary waits for at least one replica to confirm before returning ACK.<br/>
+    <strong>Write latency:</strong> full network RTT added to every write.<br/>
+    <strong>RPO:</strong> 0 — no data loss on failover, since a replica already had the write before the client was told it succeeded.
+  </div>
+</div>
 
-**Semi-sync (MySQL):** Primary waits for one replica to acknowledge receipt (not apply). RPO is near-zero.
+Semi-sync is the practical middle ground production MySQL clusters actually run: it avoids async's silent data-loss window without paying sync's full apply-confirmation latency on every write — the trade is a replica that's formally "ack'd" a write it may not have replayed yet.
 
 ### Diagram: Write Path
 
@@ -35,19 +57,40 @@ sequenceDiagram
     participant P as Primary
     participant R as Replica
 
-    Note over C,R: Async replication
+    rect rgb(60, 45, 20)
+    Note over C,R: Async replication — fire and forget
+    C->>P: WRITE
+    P->>P: Write to local disk (WAL/binlog)
+    P-->>C: ACK (before the replica has seen it)
+    P--)R: Ship WAL/binlog (background, no wait)
+    end
+
+    rect rgb(30, 50, 65)
+    Note over C,R: Semi-sync replication (MySQL rpl_semi_sync)
     C->>P: WRITE
     P->>P: Write to local disk
+    P->>R: Ship WAL/binlog
+    R-->>P: Acknowledge receipt only (relay log, not yet applied)
     P-->>C: ACK
-    P->>R: Ship WAL/binlog (background)
+    R->>R: Apply asynchronously afterward
+    end
 
+    rect rgb(30, 65, 45)
     Note over C,R: Sync replication
     C->>P: WRITE
     P->>P: Write to local disk
     P->>R: Ship WAL/binlog
-    R-->>P: Confirm received and applied
+    R->>R: Apply
+    R-->>P: Confirm received AND applied
     P-->>C: ACK
+    end
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">In MySQL semi-sync replication, what exactly does the primary wait for before returning ACK to the client?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Only that one replica has acknowledged <em>receipt</em> of the write — not that it has been applied. RPO is near-zero because the data already exists on a second node's relay log, but that's a weaker guarantee than full sync, where the replica confirms both received and applied before the primary ACKs the client.</div>
+</div>
 
 ---
 
@@ -60,6 +103,12 @@ sequenceDiagram
 | Selective tables | No | Yes |
 | Use case | Standby, HA | ETL, CDC, heterogeneous targets |
 | Examples | PG streaming, MySQL InnoDB redo | PG logical, MySQL binlog row-format |
+
+<div class="quiz-card">
+  <p class="quiz-q">You need to replicate just two tables out of a Postgres 13 cluster into a Postgres 16 cluster for ETL. Physical or logical replication?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Logical. Physical replication ships raw WAL bytes — the whole cluster, byte-for-byte, and it doesn't cross major versions. Logical replication operates on rows/logical changes, so it supports both selecting specific tables and replicating between different versions, exactly the two requirements here.</div>
+</div>
 
 ---
 
@@ -102,6 +151,12 @@ SELECT slot_name, active, restart_lsn FROM pg_replication_slots;
 SELECT pg_drop_replication_slot('replica1');
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">A replica behind a physical replication slot goes offline and never reconnects. What happens on the primary?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The primary keeps retaining WAL for that slot indefinitely — the whole point of a slot is that the primary won't discard WAL until the slot's replica has consumed it. With no replica ever reconnecting, WAL just accumulates until the disk fills. The fix is operational, not automatic: monitor slot lag and manually drop the slot (pg_drop_replication_slot) once a replica is confirmed gone for good.</div>
+</div>
+
 ### Logical Replication
 
 ```sql
@@ -136,11 +191,30 @@ SET LOCAL synchronous_commit = remote_apply;
 
 ### Binary Log Formats
 
-| Format | What is logged | Pros | Cons |
-|---|---|---|---|
-| `STATEMENT` | SQL text | small log | non-deterministic UDFs unsafe |
-| `ROW` | before/after row images | safe, CDC-ready | large log |
-| `MIXED` | auto-switch | balanced | complex |
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="stmt" class="active">STATEMENT</button>
+    <button data-tab="row">ROW</button>
+    <button data-tab="mixed">MIXED</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="stmt">
+      <strong>Logs the SQL text itself.</strong> Smallest log size. Risk: non-deterministic functions (things like <code>UUID()</code>, unordered <code>LIMIT</code>, session variables) can replay differently on the replica than what actually happened on the primary — the replica ends up diverged rather than identical.
+    </div>
+    <div class="tab-panel" data-tab-panel="row">
+      <strong>Logs before/after row images.</strong> Safe regardless of how non-deterministic the original SQL was, and CDC tooling can consume it directly since it's already a stream of row-level changes. Cost: a much larger log, especially for statements that touch many rows.
+    </div>
+    <div class="tab-panel" data-tab-panel="mixed">
+      <strong>Auto-switches between STATEMENT and ROW</strong> based on whether the statement being logged is deterministic. Balances log size against safety, at the cost of the format itself being harder to reason about — you can't assume a fixed shape when reading the binlog.
+    </div>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Why is STATEMENT-based binlog format risky for replication correctness?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It logs the SQL text, not the actual data change — so a non-deterministic statement (a UDF, an unordered LIMIT, anything that can legitimately produce a different result each time it runs) can replay on the replica and produce a different outcome than what happened on the primary. ROW format sidesteps this entirely by logging the actual before/after row images instead of the statement that produced them.</div>
+</div>
 
 ```sql
 -- Enable GTID replication

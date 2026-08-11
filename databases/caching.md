@@ -2,6 +2,11 @@
 
 From fundamentals to production patterns.
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## 1. Why Cache
@@ -21,27 +26,60 @@ From fundamentals to production patterns.
 
 **Cost reduction**: DB CPU is expensive; Redis/Memcached nodes are cheap per RPS served.
 
+<div class="quiz-card">
+  <p class="quiz-q">A DB query (cold) takes 5–50ms and Redis takes ~0.1–1ms. Why is the DB so much slower even though both are ultimately reading from fast storage?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>A "cold" DB query pays for index lookups plus disk I/O (or at best a DB-side page cache) on every request, and often does more work per query (joins, locking, planning). Redis is a purpose-built in-memory key-value lookup with none of that overhead — it's not that the DB's storage is slow, it's that a cache short-circuits the whole query-execution path down to a single memory lookup.</div>
+</div>
+
 ---
 
 ## 2. Cache Tier Hierarchy
 
+Each tier trades latency for sharing scope: the faster a cache is, the fewer things can see what's in it. CPU cache is invisible outside one core; an in-process cache is invisible outside one app instance; only the distributed tier is actually shared state across a fleet.
+
 ```mermaid
 graph TD
-    Client["Client Browser"]
-    CDN["CDN Edge Cache\n~5ms, geographic"]
-    AppL1["App In-Process Cache\n~0.01ms, per instance"]
-    Redis["Distributed Cache Redis/Memcached\n~0.5ms, shared"]
-    DBQueryCache["DB Query Cache\n~1ms, per DB node"]
-    DB["Database Disk\n~10ms+"]
-    CPU["CPU L1/L2/L3 Cache\n1-40ns, per core"]
+    classDef client fill:#7f8c8d,stroke:#616a6b,color:#fff,rx:6
+    classDef edge fill:#8e44ad,stroke:#6c3483,color:#fff,rx:6
+    classDef app fill:#3498db,stroke:#2471a3,color:#fff,rx:6
+    classDef cache fill:#e67e22,stroke:#ba6018,color:#fff,rx:6
+    classDef db fill:#2c3e50,stroke:#1a252f,color:#fff,rx:6
+    classDef cpu fill:#27ae60,stroke:#1e8449,color:#fff,rx:6
 
-    Client --> CDN
-    CDN --> AppL1
-    AppL1 --> Redis
-    Redis --> DBQueryCache
-    DBQueryCache --> DB
-    CPU -.->|"used by app process"| AppL1
+    Client["Client Browser<br/>issues the request"]:::client
+
+    subgraph EDGE["Edge Tier — global, per-PoP"]
+        CDN["CDN Edge Cache<br/>~5ms, geographic"]:::edge
+    end
+
+    subgraph APP["Application Tier — per instance"]
+        CPU["CPU L1/L2/L3 Cache<br/>1–40ns, per core"]:::cpu
+        AppL1["App In-Process Cache<br/>~0.01ms, per instance heap"]:::app
+    end
+
+    subgraph SHARED["Shared Cache Tier — fleet-wide"]
+        Redis["Distributed Cache<br/>Redis / Memcached<br/>~0.5ms, shared"]:::cache
+    end
+
+    subgraph DBT["Database Tier"]
+        DBQueryCache["DB Query Cache<br/>~1ms, per DB node"]:::db
+        DB["Database Disk<br/>~10ms+"]:::db
+    end
+
+    Client -->|"request"| CDN
+    CDN -->|"miss: forward"| AppL1
+    CPU -.->|"used transparently<br/>by the app process"| AppL1
+    AppL1 -->|"miss: fan out"| Redis
+    Redis -->|"miss: query"| DBQueryCache
+    DBQueryCache -->|"miss: disk read"| DB
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">Why can't an app in-process cache just replace the shared Redis/Memcached tier entirely, given it's ~50x faster (0.01ms vs 0.5ms)?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Scope, not speed, is the tradeoff: an in-process cache lives in one app instance's heap, so every other instance in the fleet has its own separate, inconsistent copy (or no copy at all). The distributed tier is slower per lookup but is the only tier that gives every instance the same shared view of the data — which is exactly what's needed for anything beyond single-instance hot data.</div>
+</div>
 
 ---
 
@@ -58,13 +96,16 @@ sequenceDiagram
     App->>Cache: GET key
     alt cache hit
         Cache-->>App: return value
-    else cache miss
+        Note over App: DB never touched — fast path
+    else cache miss (cold key or expired TTL)
         Cache-->>App: nil
         App->>DB: SELECT ...
         DB-->>App: row data
         App->>Cache: SET key value EX ttl
+        Note over Cache: key now warm until TTL expiry
         App-->>App: return value
     end
+    Note over App,DB: Risk: if another process updates the DB directly,<br/>this cache entry goes stale until TTL expiry
 ```
 
 **Code pattern (Python/Redis):**
@@ -85,6 +126,12 @@ def get_user(user_id):
 
 **Thundering herd risk:** Many requests miss simultaneously on cold start or expiry — all hit DB at once. See §11.
 
+<div class="quiz-card">
+  <p class="quiz-q">A cache-aside app updates a row directly in the DB via a one-off admin script, bypassing the application code entirely. What happens to reads of that row?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>They keep returning the old, stale cached value until the TTL expires — cache-aside only refreshes the cache on the read path, inside the app's own get logic. Anything that changes the DB outside that code path (a direct DB write, another service, a manual script) has no way to invalidate the cached entry, which is exactly the staleness risk called out for this pattern.</div>
+</div>
+
 ---
 
 ## 4. Write-Through
@@ -96,11 +143,19 @@ sequenceDiagram
     participant App
     participant Cache
     participant DB
+    participant App2 as Another App Instance
 
     App->>Cache: SET key value
+    activate Cache
     Cache->>DB: INSERT/UPDATE (synchronous)
     DB-->>Cache: ack
     Cache-->>App: ack
+    deactivate Cache
+    Note over App,DB: Write latency = cache write + DB write,<br/>paid on every write regardless of future reads
+
+    App2->>Cache: GET key
+    Cache-->>App2: return value (already fresh)
+    Note over App2: No stale read possible —<br/>cache was updated in the same operation as the DB
 ```
 
 **Pros:** Cache is always consistent with DB. No stale reads after writes.
@@ -117,18 +172,32 @@ Write to cache immediately; flush to DB asynchronously.
 sequenceDiagram
     participant App
     participant Cache
+    participant Queue as Dirty-Key Queue
     participant DB
 
     App->>Cache: SET key value
-    Cache-->>App: ack (fast)
-    Note over Cache: dirty key queued
-    Cache-)DB: async flush (batch)
-    DB-->>Cache: ack
+    Cache-->>App: ack (fast — DB not involved yet)
+    Cache->>Queue: enqueue dirty key
+    Note over Queue: keys batch up until<br/>flush interval or batch size hit
+
+    par periodic flush
+        Queue->>DB: batched INSERT/UPDATE
+        DB-->>Queue: ack
+        Queue->>Queue: mark keys clean
+    end
+
+    Note over Cache,DB: Risk: if Cache/Queue crashes before flush,<br/>queued writes are lost — the client already got "ack"
 ```
 
 **Pros:** Extremely fast writes. Batch DB writes reduce I/O.
 
 **Cons:** Data loss if cache crashes before flush. Complexity in failure handling.
+
+<div class="quiz-card">
+  <p class="quiz-q">The app already received "ack" for a write-behind SET. Ten seconds later, the cache process crashes before its next batch flush. Is that write safe?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — the ack only confirmed the write landed in the cache/queue, not the DB. Write-behind's whole speed advantage comes from acknowledging before the DB write happens, so any dirty key still sitting in the queue when the cache crashes is lost permanently, even though the client was already told the write succeeded. This is the core tradeoff versus write-through, which pays extra latency specifically to avoid this gap.</div>
+</div>
 
 ---
 
@@ -139,17 +208,20 @@ Cache sits in front of DB and fetches transparently on miss.
 ```mermaid
 sequenceDiagram
     participant App
-    participant Cache
+    participant Cache as Cache + Loader<br/>(e.g. Spring @Cacheable)
     participant DB
 
     App->>Cache: GET key
     alt cache hit
         Cache-->>App: value
     else cache miss
+        Note over Cache,DB: The cache itself calls the DB —<br/>App code never sees this branch
         Cache->>DB: SELECT ...
         DB-->>Cache: data
-        Cache-->>App: data (and stores it)
+        Cache->>Cache: store fetched value
+        Cache-->>App: data
     end
+    Note over App: App's code is identical on hit or miss —<br/>always just "GET key"
 ```
 
 **Difference from cache-aside:** App only talks to cache. Cache library/provider handles DB fetching. Example: Spring Cache with `@Cacheable`.
@@ -158,30 +230,69 @@ sequenceDiagram
 
 ## 7. All 4 Patterns — Side-by-Side
 
+Solid arrows are synchronous (the caller waits); dashed arrows are asynchronous (the caller already moved on). That one visual distinction is most of what separates write-through's safety from write-behind's speed.
+
 ```mermaid
 graph LR
-    subgraph CacheAside["Cache-Aside"]
-        CA_App["App"] -->|"read: GET"| CA_Cache["Cache"]
-        CA_App -->|"on miss: SELECT"| CA_DB["DB"]
+    classDef app fill:#3498db,stroke:#2471a3,color:#fff,rx:6
+    classDef cache fill:#e67e22,stroke:#ba6018,color:#fff,rx:6
+    classDef db fill:#2c3e50,stroke:#1a252f,color:#fff,rx:6
+
+    subgraph CacheAside["Cache-Aside — app owns both paths"]
+        CA_App["App"]:::app -->|"read: GET"| CA_Cache["Cache"]:::cache
+        CA_App -->|"on miss: SELECT"| CA_DB["DB"]:::db
         CA_App -->|"on miss: SET"| CA_Cache
         CA_App -->|"write: UPDATE"| CA_DB
     end
 
-    subgraph WriteThrough["Write-Through"]
-        WT_App["App"] -->|"write: SET"| WT_Cache["Cache"]
-        WT_Cache -->|"sync write"| WT_DB["DB"]
+    subgraph WriteThrough["Write-Through — sync, consistent"]
+        WT_App["App"]:::app -->|"write: SET"| WT_Cache["Cache"]:::cache
+        WT_Cache -->|"sync write"| WT_DB["DB"]:::db
     end
 
-    subgraph WriteBehind["Write-Behind"]
-        WB_App["App"] -->|"write: SET"| WB_Cache["Cache"]
-        WB_Cache -.->|"async flush"| WB_DB["DB"]
+    subgraph WriteBehind["Write-Behind — fast, eventually consistent"]
+        WB_App["App"]:::app -->|"write: SET"| WB_Cache["Cache"]:::cache
+        WB_Cache -.->|"async flush"| WB_DB["DB"]:::db
     end
 
-    subgraph ReadThrough["Read-Through"]
-        RT_App["App"] -->|"read: GET"| RT_Cache["Cache"]
-        RT_Cache -->|"on miss: SELECT"| RT_DB["DB"]
+    subgraph ReadThrough["Read-Through — cache owns the DB fetch"]
+        RT_App["App"]:::app -->|"read: GET"| RT_Cache["Cache"]:::cache
+        RT_Cache -->|"on miss: SELECT"| RT_DB["DB"]:::db
     end
 ```
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="ptn-aside" class="active">Cache-Aside</button>
+    <button data-tab="ptn-through">Write-Through</button>
+    <button data-tab="ptn-behind">Write-Behind</button>
+    <button data-tab="ptn-readthrough">Read-Through</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="ptn-aside">
+      <strong>Pros:</strong> Only caches what's actually read. Cache failures don't break writes.<br/>
+      <strong>Cons:</strong> First read is always slow (cold miss). Stale data possible if DB changes outside the app.
+    </div>
+    <div class="tab-panel" data-tab-panel="ptn-through">
+      <strong>Pros:</strong> Cache is always consistent with DB. No stale reads after writes.<br/>
+      <strong>Cons:</strong> Write latency = cache latency + DB latency. Cache fills with data that may never be read.
+    </div>
+    <div class="tab-panel" data-tab-panel="ptn-behind">
+      <strong>Pros:</strong> Extremely fast writes. Batch DB writes reduce I/O.<br/>
+      <strong>Cons:</strong> Data loss if cache crashes before flush. Complexity in failure handling.
+    </div>
+    <div class="tab-panel" data-tab-panel="ptn-readthrough">
+      <strong>Pros:</strong> App only talks to cache — simpler application code, no manual miss-handling.<br/>
+      <strong>Cons:</strong> Locked into whatever the cache library/provider's loader supports (e.g. Spring Cache's <code>@Cacheable</code>) — less control than hand-rolled cache-aside.
+    </div>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">You need the fastest possible writes and can tolerate losing the last few seconds of data on a crash. Which of the 4 patterns fits, and which is the wrong choice for the same requirement?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Write-behind fits — it acks the client immediately and flushes to the DB asynchronously in batches, trading some crash-safety for speed. Write-through is the wrong choice here: it deliberately pays cache latency + DB latency on every write specifically to guarantee zero data loss, which is the opposite tradeoff from "fastest writes, some loss is fine."</div>
+</div>
 
 ---
 
@@ -219,6 +330,12 @@ maxmemory-policy allkeys-lru
 | `volatile-ttl` | Evict keys with shortest TTL first |
 
 **Rule of thumb:** Use `allkeys-lru` for pure caches. Use `volatile-ttl` when mixing persistent and ephemeral keys.
+
+<div class="quiz-card">
+  <p class="quiz-q">A Redis instance stores both session cache keys (with TTLs) and a permanent feature-flag hash (no TTL) that must never be evicted. Which maxmemory-policy fits, and why would allkeys-lru be wrong here?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>volatile-ttl (or another volatile-* policy) fits, because it only ever evicts keys that have a TTL set — the permanent feature-flag hash has none, so it's never a candidate for eviction. allkeys-lru would be wrong: it evicts by recency across every key regardless of TTL, so a rarely-accessed but permanent feature-flag key could get evicted under memory pressure right alongside disposable session keys.</div>
+</div>
 
 ---
 
@@ -295,6 +412,12 @@ Uses ~12KB regardless of cardinality — far cheaper than a Set for billions of 
 **Choose Memcached when:** pure string caching, extreme memory efficiency matters, multi-threaded performance on many cores.
 
 **Choose Redis when:** you need persistence, replication, complex data structures, pub/sub, or Lua atomicity.
+
+<div class="quiz-card">
+  <p class="quiz-q">A team needs a sliding-window rate limiter and a leaderboard, both backed by the same cache layer. Why does that requirement alone rule out Memcached?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Both of those need a Sorted Set (ZADD/ZRANGE/ZREMRANGEBYSCORE) — Memcached only supports plain strings, with no native structured data types at all. Redis's richer data structures (Hash, List, Set, ZSet, Stream, Geo, HLL) are exactly the differentiator here; building a sliding-window rate limiter on Memcached would mean reimplementing sorted-set semantics yourself on top of raw strings.</div>
+</div>
 
 ---
 
