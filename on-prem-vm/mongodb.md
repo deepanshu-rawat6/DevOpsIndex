@@ -570,9 +570,431 @@ systemctl enable --now mongod
   </div>
 </div>
 
+### Automated Setup Script
+
+The steps above (conf file, systemd unit, data directory, daemon-reload) are mechanical enough to script. Save this as `setup-mongo-arbiter.sh` on the arbiter VM and run it as root.
+
+```bash
+#!/usr/bin/env bash
+# -----------------------------------------------------------------------------
+# setup-mongo-arbiter.sh
+#
+# Sets up a MongoDB arbiter instance on this VM:
+#   - Writes /etc/mongod-<db-name>.conf
+#   - Writes /etc/systemd/system/mongod-<db-name>-arbiter.service
+#   - Creates /data/mongodb-<db-name>  (owned by mongodb:mongodb)
+#   - Runs systemd daemon-reload, enable, and start
+#
+# Usage:
+#   sudo ./setup-mongo-arbiter.sh             # interactive, applies changes
+#   sudo ./setup-mongo-arbiter.sh --dry-run   # interactive, only prints what would happen
+# -----------------------------------------------------------------------------
+
+set -euo pipefail
+
+die()  { echo "ERROR: $*" >&2; exit 1; }
+info() { echo "==> $*"; }
+
+# ── dry-run flag ──────────────────────────────────────────────────────────────
+DRY_RUN=false
+for arg in "$@"; do
+  case "$arg" in
+    --dry-run) DRY_RUN=true ;;
+    *) die "Unknown argument: $arg. Usage: $0 [--dry-run]" ;;
+  esac
+done
+
+# Wrapper: in dry-run mode print the command instead of running it
+run() {
+  if $DRY_RUN; then
+    echo "  [dry-run] $*"
+  else
+    "$@"
+  fi
+}
+
+# Write a file: in dry-run mode show the content that would be written
+write_file() {
+  local path="$1"
+  local content="$2"
+  local perms="$3"
+  if $DRY_RUN; then
+    echo "  [dry-run] would write ${path} (chmod ${perms}):"
+    echo "$content" | sed 's/^/    /'
+    echo
+  else
+    echo "$content" > "$path"
+    chmod "$perms" "$path"
+  fi
+}
+
+# ── must run as root ──────────────────────────────────────────────────────────
+[[ "$EUID" -eq 0 ]] || die "This script must be run as root (use sudo)"
+
+# ── header ────────────────────────────────────────────────────────────────────
+echo "============================================"
+if $DRY_RUN; then
+  echo "  MongoDB Arbiter Setup  [DRY RUN]"
+else
+  echo "  MongoDB Arbiter Setup"
+fi
+echo "============================================"
+echo
+
+# ── interactive prompts ───────────────────────────────────────────────────────
+
+# Replicaset name
+while true; do
+  read -rp "Enter replicaset name: " REPLSET
+  [[ -n "$REPLSET" ]] && break
+  echo "  Replicaset name cannot be empty. Please try again."
+done
+
+# Port
+while true; do
+  read -rp "Enter port number for the arbiter: " PORT
+  if [[ "$PORT" =~ ^[0-9]+$ ]] && (( PORT >= 1024 && PORT <= 65535 )); then
+    break
+  fi
+  echo "  Invalid port. Must be a number between 1024 and 65535. Please try again."
+done
+
+# ── derive db name ────────────────────────────────────────────────────────────
+# Strips trailing -rs/<rs suffix> and leading rs prefix, lowercases,
+# and normalises underscores to hyphens.
+# e.g. myapp-rs  → myapp
+#      rs0-auth  → auth
+DERIVED_DB_NAME=$(echo "$REPLSET" \
+  | sed -E 's/-[Rr][Ss][0-9]*$//;s/^[Rr][Ss][0-9]*-//' \
+  | sed 's/^[-_]*//;s/[-_]*$//' \
+  | tr '[:upper:]' '[:lower:]' \
+  | tr '_' '-')
+
+# Fall back to the full lowercased replicaset name if nothing was left
+if [[ -z "$DERIVED_DB_NAME" ]]; then
+  DERIVED_DB_NAME=$(echo "$REPLSET" | tr '[:upper:]' '[:lower:]' | tr '_' '-')
+fi
+
+# Let the user confirm or override
+echo
+read -rp "DB name derived from replicaset [${DERIVED_DB_NAME}] (press Enter to accept or type to override): " DB_NAME_INPUT
+DB_NAME="${DB_NAME_INPUT:-$DERIVED_DB_NAME}"
+
+# ── summary & confirmation ────────────────────────────────────────────────────
+CONF_FILE="/etc/mongod-${DB_NAME}.conf"
+SERVICE_FILE="/etc/systemd/system/mongod-${DB_NAME}-arbiter.service"
+SERVICE_NAME="mongod-${DB_NAME}-arbiter.service"
+DATA_DIR="/data/mongodb-${DB_NAME}"
+
+echo
+echo "--------------------------------------------"
+if $DRY_RUN; then
+  echo "  Mode       : DRY RUN — no changes will be made"
+fi
+echo "  Replicaset : $REPLSET"
+echo "  Port       : $PORT"
+echo "  DB name    : $DB_NAME"
+echo "  Config     : $CONF_FILE"
+echo "  Service    : $SERVICE_FILE"
+echo "  Data dir   : $DATA_DIR"
+echo "--------------------------------------------"
+echo
+
+read -rp "Proceed? [y/N]: " CONFIRM
+case "$CONFIRM" in
+  [yY]|[yY][eE][sS]) ;;
+  *) echo "Aborted."; exit 0 ;;
+esac
+echo
+
+# ── guard: abort if targets already exist (skip in dry-run) ──────────────────
+if ! $DRY_RUN; then
+  for target in "$CONF_FILE" "$SERVICE_FILE"; do
+    if [[ -e "$target" ]]; then
+      die "$target already exists — remove it manually if you want to recreate it"
+    fi
+  done
+fi
+
+# ── 1. Write mongod config ────────────────────────────────────────────────────
+info "Writing $CONF_FILE"
+MONGOD_CONF="storage:
+  dbPath: ${DATA_DIR}
+  engine: wiredTiger
+
+systemLog:
+  destination: file
+  path: ${DATA_DIR}/mongod.log
+  logAppend: true
+
+net:
+  port: ${PORT}
+  bindIp: 0.0.0.0
+
+replication:
+  replSetName: ${REPLSET}
+
+security:
+  authorization: enabled
+  keyFile: /etc/mongodb-keyfile"
+
+write_file "$CONF_FILE" "$MONGOD_CONF" "640"
+$DRY_RUN || info "  Done → $CONF_FILE"
+
+# ── 2. Write systemd service ──────────────────────────────────────────────────
+info "Writing $SERVICE_FILE"
+MONGOD_SERVICE="[Unit]
+Description=MongoDB instance ${DB_NAME} arbiter
+After=network.target
+
+[Service]
+User=mongodb
+Group=mongodb
+ExecStart=/usr/bin/mongod --config /etc/mongod-${DB_NAME}.conf
+Restart=always
+RestartSec=5
+TimeoutStartSec=180
+LimitNOFILE=64000
+LimitNPROC=64000
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=mongod-${DB_NAME}-arbiter
+
+[Install]
+WantedBy=multi-user.target"
+
+write_file "$SERVICE_FILE" "$MONGOD_SERVICE" "644"
+$DRY_RUN || info "  Done → $SERVICE_FILE"
+
+# ── 3. Create data directory ──────────────────────────────────────────────────
+info "Creating data directory $DATA_DIR"
+if $DRY_RUN; then
+  echo "  [dry-run] would mkdir -p $DATA_DIR"
+  echo "  [dry-run] would chown -R mongodb:mongodb $DATA_DIR"
+  echo "  [dry-run] would chmod 755 $DATA_DIR"
+else
+  if [[ -d "$DATA_DIR" ]]; then
+    info "  Directory already exists — skipping mkdir"
+  else
+    mkdir -p "$DATA_DIR"
+    info "  Created $DATA_DIR"
+  fi
+  chown -R mongodb:mongodb "$DATA_DIR"
+  chmod 755 "$DATA_DIR"
+  info "  Ownership set to mongodb:mongodb on $DATA_DIR"
+fi
+
+# ── 4. Reload systemd & start service ────────────────────────────────────────
+info "Running systemctl daemon-reload"
+run systemctl daemon-reload
+
+info "Enabling $SERVICE_NAME"
+run systemctl enable "$SERVICE_NAME"
+
+info "Starting $SERVICE_NAME"
+run systemctl start "$SERVICE_NAME"
+
+# ── 5. Done ───────────────────────────────────────────────────────────────────
+echo
+if $DRY_RUN; then
+  info "Service status check (skipped in dry-run)"
+  echo
+  echo "✓ Dry run complete — no changes were made."
+  echo "  Run without --dry-run to apply."
+else
+  info "Service status:"
+  systemctl status "$SERVICE_NAME" --no-pager --lines=10 || true
+  echo
+  echo "✓ Arbiter setup complete for replicaset '${REPLSET}' (db: ${DB_NAME}) on port ${PORT}"
+fi
+echo "  Config   : $CONF_FILE"
+echo "  Service  : $SERVICE_FILE"
+echo "  Data dir : $DATA_DIR"
+```
+
+**What the script does:**
+- Prompts for replicaset name and port — validates both before proceeding
+- Derives a short `DB_NAME` from the replicaset name by stripping trailing `-rs`/`-rs0` suffixes and leading `rs0-` prefixes (e.g. `myapp-rs` → `myapp`)
+- Shows a full summary and asks for confirmation before touching anything
+- Guards against overwriting existing conf/service files — fails fast rather than silently clobbering
+- `--dry-run` prints exactly what would be written and run, without touching the filesystem or systemd
+
+```bash
+# Make executable and run
+chmod +x setup-mongo-arbiter.sh
+
+# Preview first
+sudo ./setup-mongo-arbiter.sh --dry-run
+
+# Apply
+sudo ./setup-mongo-arbiter.sh
+```
+
 ---
 
-## 8. Write Concern
+### What the Arbiter Actually Does
+
+People often treat the arbiter as a black box — "it votes". Here's what it's actually doing at every moment.
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>Heartbeats (always-on).</strong> The arbiter pings every other member every 2 seconds (<code>heartbeatIntervalMillis: 2000</code>). It tracks each member's health, state (<code>PRIMARY</code>/<code>SECONDARY</code>), and optime. Members also heartbeat back to it — the arbiter is a full participant in the mesh, just without data.
+    </div>
+    <div class="stepper-panel">
+      <strong>No data, no oplog.</strong> The arbiter has a <code>local</code> database like any mongod, but it only holds replica set metadata (<code>local.system.replset</code>). It never receives oplog entries, never applies operations, and has no <code>local.oplog.rs</code> with user data in it. Its <code>dbPath</code> stays near-empty.
+    </div>
+    <div class="stepper-panel">
+      <strong>Election trigger.</strong> When the arbiter misses heartbeats from the primary for <code>electionTimeoutMillis</code> (10 seconds default), it concludes the primary is down. It then triggers an election — or supports a candidacy from a secondary that also noticed.
+    </div>
+    <div class="stepper-panel">
+      <strong>Voting.</strong> The arbiter votes for the candidate whose optime is most recent. If two secondaries both declare candidacy, the arbiter's vote is what breaks the tie. It will NOT vote for a candidate whose optime is behind its own last-known state of the set. Priority of the arbiter is always 0 — it can never nominate itself as primary.
+    </div>
+    <div class="stepper-panel">
+      <strong>Veto power.</strong> The arbiter can veto a candidate it believes is stale — if the candidate's optime is behind what the arbiter has seen acknowledged. This prevents a lagging secondary from winning an election and losing writes.
+    </div>
+    <div class="stepper-panel">
+      <strong>Not counted for write concern.</strong> This is the most misunderstood part. The arbiter participates in elections (voting majority), but it does <strong>not</strong> count toward <code>w: "majority"</code> write concern. Write concern counts <em>data-bearing</em> members only. In a PSA set that means primary + secondary — the arbiter is invisible to write acknowledgment. See the Write Concern section for the full implications.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">The arbiter VM loses its network connection to both the primary and secondary. From the primary's perspective, is quorum still intact?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    Yes — primary + secondary = 2 votes, which is still a majority of 3. The cluster keeps working. The arbiter being isolated doesn't break quorum as long as the two data-bearing nodes can still see each other. The danger flips: if the <em>primary</em> then also fails, the secondary has only 1 vote and cannot elect itself — it needs the arbiter back to reach 2.
+  </div>
+</div>
+
+---
+
+## 8. Async Replication — The Oplog
+
+When you write to the primary with `w: 1`, MongoDB confirms the write immediately and replicates to secondaries in the background. That background mechanism is the **oplog**.
+
+```mermaid
+sequenceDiagram
+    participant APP as Application
+    participant P as Primary (10.0.0.1)
+    participant OPLOG as local.oplog.rs<br/>(primary)
+    participant S as Secondary (10.0.0.2)
+
+    APP->>P: db.orders.insertOne({...})
+    P->>P: write to WiredTiger data files
+    P->>OPLOG: append oplog entry {op:"i", ns:"myapp.orders", o:{...}}
+    P-->>APP: WriteResult OK  ← client unblocked here (w:1)
+    Note over S: tailing cursor on primary's oplog (long-poll)
+    OPLOG-->>S: new entry available
+    S->>S: apply operation to local data files
+    S->>S: append same entry to own local.oplog.rs
+    Note over S: secondary's optime advances
+```
+
+**w: 1 flow in plain terms:** The primary writes to its data files and its own oplog, then tells the client "done" — before the secondary has seen anything. The secondary is always catching up asynchronously. The gap between the primary's latest optime and the secondary's optime is the **replication lag**.
+
+### The Oplog — What's Inside
+
+```javascript
+// Inspect the oplog on the primary
+use local
+db.oplog.rs.find().sort({ $natural: -1 }).limit(3).pretty()
+```
+
+```json
+{
+  "ts":  { "$timestamp": { "t": 1723334400, "i": 1 } },
+  "t":   1,           // election term — increments on each election
+  "op":  "i",         // operation: i=insert, u=update, d=delete, c=command, n=noop
+  "ns":  "myapp.orders",
+  "ui":  "<collection UUID>",
+  "wall": "2026-08-11T10:00:00Z",
+  "o":   { "_id": "...", "item": "widget", "qty": 100 }
+}
+```
+
+| Field | Meaning |
+|-------|---------|
+| `ts` | Timestamp + increment counter. Secondaries use this to track where they are in the oplog |
+| `t` | Election term. Lets members detect stale oplog entries from a previous primary |
+| `op` | `i` insert · `u` update · `d` delete · `c` command (DDL) · `n` noop (heartbeat tick) |
+| `ns` | Namespace: `db.collection` |
+| `o` / `o2` | The operation: `o` is the document or update spec; `o2` is the query filter for updates |
+
+**Oplog entries are idempotent.** MongoDB rewrites updates (even `$inc`) into full replacement forms before writing to the oplog. This means an oplog entry can be applied multiple times and produce the same result — critical for safe replication and crash recovery.
+
+### How the Secondary Follows
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>Tailing cursor.</strong> The secondary opens a long-lived tailing cursor on <code>local.oplog.rs</code> of its sync source (usually the primary). This is a blocking read — the cursor waits at the end of the oplog until a new entry appears, then immediately returns it. No polling, no sleep loops.
+    </div>
+    <div class="stepper-panel">
+      <strong>Apply in batches.</strong> The secondary buffers incoming oplog entries and applies them in batches for efficiency. A dedicated applier thread applies operations to WiredTiger while an oplog writer thread appends the same entries to the secondary's own <code>local.oplog.rs</code> — this is how the secondary's oplog grows too.
+    </div>
+    <div class="stepper-panel">
+      <strong>Optime advances.</strong> After applying each batch, the secondary updates its <code>optime</code> — the timestamp of the last entry it applied. This is what <code>rs.status()</code> reports as <code>optimeDate</code>. The primary tracks each member's optime via heartbeat responses.
+    </div>
+    <div class="stepper-panel">
+      <strong>Chained replication (optional).</strong> By default secondaries sync from the primary. With <code>allowChaining: true</code> (default), MongoDB may automatically route a secondary to sync from another secondary if that path has lower latency. This reduces load on the primary but can add an extra hop of lag.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+### Oplog Window — the Most Overlooked Tuning Knob
+
+The oplog is a **capped collection** — fixed size, oldest entries roll off when it fills. The **oplog window** is how far back in time those entries go. If a secondary falls behind further than the window, it cannot catch up by replaying entries — there are none left. It must do a full **initial sync** (copy all data from scratch).
+
+```javascript
+// Check the oplog window on the primary
+rs.printReplicationInfo()
+// configured oplog size:   5120 MB
+// log length start to end: 86723 secs (24.09 hrs)   ← this is your window
+// oplog first event time:  2026-08-10 10:00:00 UTC
+// oplog last event time:   2026-08-11 10:05:00 UTC
+
+// Check lag per secondary
+rs.printSecondaryReplicationInfo()
+// source: 10.0.0.2:27017
+//   syncedTo: 2026-08-11 10:04:55 UTC
+//   0 secs (0 hrs) behind the primary   ← healthy
+```
+
+```yaml
+# mongod.conf (primary) — tune oplog size to cover your maintenance window
+replication:
+  replSetName: "rs0"
+  oplogSizeMB: 10240   # 10 GB — covers ~48h of lag for moderate write workloads
+                       # Rule: oplog window should be >= longest expected secondary downtime
+                       # (planned maintenance, patch reboots, etc.)
+```
+
+> ⚠️ **You cannot shrink the oplog after it's created** without a full resync of each secondary. Size it generously from the start. A 5–10 GB oplog is cheap on modern disks; an unplanned initial sync on a 500 GB dataset is hours of downtime.
+
+<div class="quiz-card">
+  <p class="quiz-q">The secondary was down for planned maintenance for 30 hours. The oplog window on the primary is 24 hours. What happens when the secondary restarts?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    The secondary checks its last optime against the primary's oplog. Since the secondary was down for 30h but the oplog only goes back 24h, the entries it needs to catch up have already rolled off — the oplog has been overwritten. MongoDB detects this (<code>stateStr: RECOVERING</code>, log: "too stale to catch up") and forces a full initial sync: it wipes its own data and copies everything fresh from the primary. Depending on dataset size, this can take hours. This is why <code>oplogSizeMB</code> should be sized to cover your longest expected downtime, not just current write rate.
+  </div>
+</div>
+
+---
+
+## 9. Write Concern
 
 Write concern controls how many replica set members must acknowledge a write before MongoDB returns success to the client. Getting this wrong is the most common cause of data loss after a failover.
 
@@ -612,30 +1034,59 @@ db.orders.insertOne(
   </div>
 </div>
 
-**How `w: "majority"` works with an arbiter:**
+**How `w: "majority"` works with an arbiter — the PSA trap:**
+
+`w: "majority"` counts **data-bearing members only**. The arbiter never counts for write concern, regardless of its voting weight in elections.
 
 ```
-Set members: primary (vote), secondary (vote), arbiter (vote)
-Total votes:  3
-Majority:     2
+PSA set — 3 voting members, but only 2 data-bearing:
 
-Write acknowledged by primary + secondary = 2 votes = majority ✓
-Write acknowledged by primary + arbiter  = 2 votes = majority ✓  (but arbiter has no data!)
+  For ELECTIONS (voting majority):
+    primary (1 vote) + secondary (1 vote) + arbiter (1 vote) = 3 votes total
+    majority = 2   →   any 2 members can elect a primary
+
+  For w: "majority" (write concern majority):
+    data-bearing members: primary + secondary = 2 total
+    majority of data-bearing = 2   →   BOTH must acknowledge the write
+    arbiter: invisible to write concern, never counted
+
+  Secondary DOWN, arbiter UP:
+    Only 1 data-bearing member can acknowledge (just the primary)
+    1 of 2 is NOT a majority  →  w:"majority" writes BLOCK until wtimeout
 ```
 
-> ⚠️ The arbiter counts toward the majority quorum for `w: "majority"`, but it does **not** hold the data. If the primary and arbiter both confirm a write but the secondary hasn't replicated it yet — and then the primary dies — the arbiter cannot supply the data to a new primary. Always pair `w: "majority"` with `j: true` on the primary so the primary's journal is flushed before reporting success.
+This is the **PSA trap** — `w: "majority"` effectively becomes "primary AND secondary must confirm" in a 3-member PSA set. If the secondary goes down (maintenance, crash, lag), your writes will block and timeout until it recovers.
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="psa-secondary-up" class="active state-ok">Secondary up</button>
+    <button data-toggle-opt="psa-secondary-down" class="state-warn">Secondary down</button>
+    <button data-toggle-opt="psa-primary-down" class="state-warn">Primary down</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="psa-secondary-up">
+    <strong>Normal operation.</strong> Both primary and secondary acknowledge writes. <code>w: "majority"</code> is satisfied (2 of 2 data-bearing). Arbiter is doing heartbeats in the background — invisible to write flow. Replication lag is low; the secondary is tailing the oplog.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="psa-secondary-down">
+    <strong>Secondary down.</strong> Only the primary can acknowledge. <code>w: "majority"</code> requires 2 of 2 data-bearing — it can't be met. Writes block until <code>wtimeout</code> (e.g. 5 seconds), then fail with <code>WriteConcernFailed</code>. The cluster is still up and the primary is still primary (arbiter + primary = election quorum), but writes with <code>w: majority</code> are unavailable. Use <code>w: 1</code> to allow writes to continue with reduced durability, or restore the secondary.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="psa-primary-down">
+    <strong>Primary down.</strong> The secondary and arbiter together have 2 votes — election quorum is met. The secondary wins the election and becomes the new primary. Write concern is now satisfied again (the new primary + ... wait, there's only one data-bearing member now). With the old primary gone, <code>w: "majority"</code> of 1 data-bearing member = 1 of 1, so the new primary alone can satisfy it. Writes resume after ~10s election window.
+  </div>
+</div>
+
+> **PSA recommendation:** Use `w: "majority"` with `wtimeout` set so writes fail fast rather than block forever. Have your application handle `WriteConcernFailed` by falling back to `w: 1` during secondary downtime if business requirements allow it, or switch to a PSS topology if you need guaranteed `w: "majority"` availability even when one node is down.
 
 <div class="quiz-card">
-  <p class="quiz-q">With <code>w: "majority"</code> and 3 voting members (primary + secondary + arbiter), the secondary is unreachable. A write arrives at the primary. Does it succeed?</p>
+  <p class="quiz-q">With <code>w: "majority"</code> in a PSA set, the secondary goes down for a 2-hour OS patch. What happens to writes during those 2 hours?</p>
   <button class="quiz-reveal">Reveal answer</button>
   <div class="quiz-a" hidden>
-    Yes — if <code>wtimeout</code> hasn't expired. The primary + arbiter = 2 votes = majority, so the write can still be acknowledged by <code>w: "majority"</code> even without the secondary. The write is only on the primary and the arbiter has no data copy, so there's elevated risk if the primary crashes before the secondary recovers. This is a known tradeoff of the PSA (Primary-Secondary-Arbiter) topology — for stronger durability guarantees under secondary failure, use a PSS (Primary-Secondary-Secondary) topology instead.
+    Writes block waiting for a second data-bearing acknowledgement that never comes, then fail with <code>WriteConcernFailed</code> after <code>wtimeout</code> expires. The arbiter does NOT count for write concern — it's 1 of 2 data-bearing nodes, not 2 of 2. The cluster itself stays up (election quorum = primary + arbiter = 2 votes), but <code>w: "majority"</code> is not satisfiable until the secondary returns. Options during the maintenance window: temporarily lower the app's write concern to <code>w: 1</code>, or use a PSS topology (two full secondaries) so one going down still leaves primary + one secondary = 2 of 3 data-bearing = majority.
   </div>
 </div>
 
 ---
 
-## 9. mongodb-exporter (Prometheus)
+## 10. mongodb-exporter (Prometheus)
 
 The Percona `mongodb_exporter` exposes MongoDB's internal metrics in Prometheus format. Run it on the primary VM alongside mongod.
 
@@ -764,7 +1215,7 @@ curl -s http://localhost:9216/metrics | grep -E "^mongodb_up|^mongodb_rs_members
 
 ---
 
-## 10. Prometheus Scrape Config
+## 11. Prometheus Scrape Config
 
 ```yaml
 # /etc/prometheus/prometheus.yml  (add this job)
@@ -789,7 +1240,7 @@ scrape_configs:
 
 ---
 
-## 11. Operational Runbook
+## 12. Operational Runbook
 
 ### Health checks at a glance
 
@@ -852,7 +1303,7 @@ db.serverStatus().repl          // replication info
 
 ---
 
-## 12. Setup Checklist
+## 13. Setup Checklist
 
 <div class="stepper">
   <div class="stepper-panels">

@@ -603,6 +603,12 @@ GET /my_index/_analyze
 
 Response shows each token, its position, and offset — essential for debugging why a search isn't matching.
 
+<div class="quiz-card">
+  <p class="quiz-q">A field is analyzed with the built-in <code>standard</code> analyzer. A search for "running" is expected to also match documents containing "run" or "runs" — the way many full-text engines behave by default. Does it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. The standard analyzer lowercases and splits on whitespace/punctuation but applies no stemming at all — "running", "run", and "runs" are three distinct terms in the inverted index. Stemming only happens if you build a custom analyzer with a stemmer token filter (as in the my_analyzer example above) or pick a language-specific analyzer like "english". Assuming stemming is on by default is a common surprise the first time exact-word-only matches show up in production.</div>
+</div>
+
 ---
 
 ## 12. Query DSL
@@ -772,6 +778,12 @@ Approximate — error ~0.5% at default precision. Exact cardinality requires loa
 }
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">A cardinality aggregation reports "unique_users": 48,215 for a field with precision_threshold: 1000. Is that number exact?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — cardinality uses the HyperLogLog++ algorithm, which is approximate by design, with roughly 0.5% error at default precision. Exact deduplication would mean loading every distinct value into memory across the cluster, which doesn't scale. Raising precision_threshold trades more memory for tighter accuracy, but it's never a guarantee of an exact count — don't use cardinality where you need a legally or financially exact unique count.</div>
+</div>
+
 ---
 
 ## 14. Performance Tuning
@@ -859,6 +871,12 @@ PUT /logs
 -Xmx16g
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">A host has 128 GB of RAM. Someone sets Xms/Xmx to 64g, reasoning "50% of RAM, textbook advice." Is that safe?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — the 50%-of-RAM guideline has a hard ceiling around 31 GB, not just a percentage. Above roughly 32 GB the JVM can no longer use compressed ordinary object pointers (COOPs), so object references double in size and effective heap usage jumps — you can end up with worse usable heap at 64g than at 30g. On a 128 GB host, ES heap should be capped near 30-31 GB, with the rest left for the OS page cache Lucene depends on, not scaled up proportionally with total RAM.</div>
+</div>
+
 ### Shard sizing
 
 - Target 20–50 GB per shard
@@ -899,14 +917,53 @@ GET /_cluster/settings
 
 ## 16. Index Lifecycle Management (ILM)
 
-ILM automates moving indices through hot/warm/cold/delete phases based on age or size.
+ILM automates moving indices through hot/warm/cold/delete phases based on age or size — the goal is to keep expensive resources (fast disk, full replica counts, CPU for scoring) allocated only to data that's actively hot, and shrink the footprint of everything older automatically instead of an operator manually re-provisioning indices every week.
 
 ```mermaid
 graph LR
-    Hot[Hot Phase active writes + searches] -->|rollover at 50GB or 30d| Warm[Warm Phase read-only reduced replicas]
-    Warm -->|after 60d| Cold[Cold Phase mounted from snapshot searchable]
-    Cold -->|after 180d| Delete[Delete Phase index removed]
+    classDef hot fill:#e74c3c,stroke:#c0392b,color:#fff,rx:6
+    classDef warm fill:#f39c12,stroke:#ba6018,color:#fff,rx:6
+    classDef cold fill:#3498db,stroke:#2471a3,color:#fff,rx:6
+    classDef del fill:#7f8c8d,stroke:#616a6b,color:#fff,rx:6
+
+    subgraph POLICY["ILM policy: logs_policy"]
+        HOT["Hot Phase<br/>active writes + searches<br/>priority: 100"]:::hot
+        WARM["Warm Phase<br/>read-only, shrink to 1 shard<br/>forcemerge, reduced replicas<br/>priority: 50"]:::warm
+        COLD["Cold Phase<br/>mounted from snapshot<br/>searchable, minimal resources<br/>priority: 0"]:::cold
+        DEL["Delete Phase<br/>index removed"]:::del
+    end
+
+    HOT -->|"rollover at<br/>max_size: 50gb OR max_age: 30d"| WARM
+    WARM -->|"min_age: 60d"| COLD
+    COLD -->|"min_age: 180d"| DEL
 ```
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="hot" class="active state-ok">Hot</button>
+    <button data-toggle-opt="warm" class="state-warn">Warm</button>
+    <button data-toggle-opt="cold" class="state-warn">Cold</button>
+    <button data-toggle-opt="delete" class="state-bad">Delete</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="hot">
+    Full priority (100), taking both writes and reads. This is the only phase where the index is still growing — everything else exists to shrink the footprint of data that's stopped changing.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="warm">
+    Read-only. Shrunk to a single shard and force-merged to a single segment (cheaper to hold, cheaper to search), replica count typically reduced. Data is still fully on local disk, just no longer accepting writes.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="cold">
+    Mounted from a snapshot instead of living on local disk directly — still searchable, but at much lower resource cost (priority: 0, minimal allocation). Trades some query latency for a dramatically smaller local footprint.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="delete">
+    The index is removed entirely. Whatever retention window <code>min_age</code> encodes here is the point of no return — there's no phase after this one.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">An index has been open only 10 days but has already written 55 GB, under a policy with rollover set to max_size: 50gb, max_age: 30d. Does it roll over?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Yes. Rollover conditions are OR'd together, not AND'd — hitting either the size threshold or the age threshold triggers it, whichever comes first. Here the index blew past 50gb well before 30 days elapsed, so it rolls over at day 10, not day 30. Sizing rollover thresholds only around expected time (or only around expected volume) misses that either one alone is sufficient to fire.</div>
+</div>
 
 ### ILM Policy
 
@@ -1058,9 +1115,40 @@ GET /products/_explain/1
 { "query": { "match": { "name": "laptop" } } }
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">A product listing already scores well for "laptop" with 5 mentions in its description. Someone stuffs the description with "laptop" 10 times instead, hoping to roughly double its relevance score. Does it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No, not close to double. BM25's term-frequency component saturates — controlled by k1 (default 1.2) — so going from 5 to 10 occurrences of the same term barely moves the TF score; the curve flattens fast after the first few mentions. Keyword-stuffing a field doesn't scale relevance the way a naive frequency count would, which is exactly the point of the saturation term.</div>
+</div>
+
 ---
 
 ## 18. Pagination Strategies
+
+Four different approaches trade off simplicity, cost, and consistency guarantees differently — picking the wrong one is usually invisible until an index gets large or hot.
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="fromsize" class="active">from/size</button>
+    <button data-tab="searchafter">search_after</button>
+    <button data-tab="pit">PIT</button>
+    <button data-tab="scroll">scroll</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="fromsize">
+      <strong>Simplest, worst at scale.</strong> Every shard must fetch and sort <code>from + size</code> documents, then the coordinating node discards everything before <code>from</code>. Cost grows with page depth, not just page size — capped by default at <code>from + size &lt;= 10,000</code> (<code>index.max_result_window</code>) for exactly this reason.
+    </div>
+    <div class="tab-panel" data-tab-panel="searchafter">
+      <strong>Cursor-based, no skip cost.</strong> Uses the sort values of the last hit as the starting point for the next page, so it never re-scans discarded documents. Requires a tiebreaker field in the sort (usually <code>_id</code>) so the cursor is unambiguous. The tradeoff: results can shift between pages if new matching documents are indexed mid-pagination.
+    </div>
+    <div class="tab-panel" data-tab-panel="pit">
+      <strong>search_after + a frozen view.</strong> A Point In Time snapshot pins the index state so pages stay consistent even while writes continue elsewhere — the recommended pairing with search_after for anything user-facing that pages through changing data.
+    </div>
+    <div class="tab-panel" data-tab-panel="scroll">
+      <strong>Deprecated, still fine for one-off exports.</strong> Keeps a server-side search context open for a fixed window. Expensive to hold open at scale (memory per open scroll), which is why search_after + PIT replaced it for anything long-lived — but it's still a reasonable choice for a single bulk data export you run once and close.
+    </div>
+  </div>
+</div>
 
 ### from/size (avoid for deep pagination)
 
@@ -1118,6 +1206,12 @@ POST /_search/scroll
 { "scroll": "2m", "scroll_id": "<id>" }
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">A page-2 request using search_after returns a document that was already shown on page 1, because a new document was indexed in between the two requests and shifted the sort order. What prevents this?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>search_after alone doesn't prevent it — it only avoids the skip-and-discard cost of from/size, it doesn't freeze the data. Pairing it with a Point In Time (PIT) does: PIT pins a consistent view of the index at the moment it's opened, so subsequent pages via search_after are paginating over a snapshot that new writes can't shift underneath the reader.</div>
+</div>
+
 ---
 
 ## 19. Ingest Pipelines
@@ -1164,6 +1258,12 @@ PUT /logs/_settings
 ```
 
 Common processors: `grok`, `date`, `geoip`, `user_agent`, `set`, `remove`, `rename`, `convert`, `split`, `join`, `gsub` (regex replace), `foreach`, `enrich` (lookup from another index), `fingerprint` (dedup hash).
+
+<div class="quiz-card">
+  <p class="quiz-q">A pipeline named access_log_pipeline is created and successfully tested with _simulate. Documents indexed afterward with a plain POST /logs/_doc still arrive unparsed, with the raw message field intact. What's missing?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Creating a pipeline doesn't attach it to anything — it has to be invoked, either per-request with ?pipeline=access_log_pipeline on the index call, or set as index.default_pipeline so every write to that index runs through it automatically. _simulate only tests the pipeline's logic in isolation; it doesn't wire it into the index's write path.</div>
+</div>
 
 ---
 
@@ -1227,6 +1327,25 @@ PUT /articles
 }
 ```
 
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="exact" class="active state-warn">Exact k-NN</button>
+    <button data-toggle-opt="ann" class="state-ok">Approximate (HNSW)</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="exact">
+    Brute-force — computes similarity against every vector in scope. Perfectly accurate, but scans linearly; only practical on small datasets or a heavily pre-filtered candidate set.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="ann">
+    Uses an HNSW graph to jump toward nearby vectors without comparing against all of them. Orders of magnitude faster at scale, but approximate — it can miss a true nearest neighbor in exchange for speed. <code>num_candidates</code> and the graph's <code>m</code>/<code>ef_construction</code> trade recall against latency and memory.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A k-NN search with k: 10 and num_candidates: 100 on an HNSW-indexed field occasionally omits a document that a brute-force exact search would have ranked in the true top 10. Is that a bug?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — that's the expected tradeoff of approximate nearest neighbor search. HNSW doesn't guarantee finding the exact top-k; it navigates the graph toward likely-close neighbors and can miss an edge case. Raising num_candidates (the candidate pool considered before returning k) improves recall at the cost of more compute — exact k-NN is the only mode with a hard correctness guarantee, and it doesn't scale the same way.</div>
+</div>
+
 ### Hybrid search — combine BM25 + vector
 
 ```json
@@ -1287,9 +1406,30 @@ PUT /logs/_mapping
 }
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">A team adds a runtime field to compute response_time_seconds instead of reindexing millions of documents to add a real mapped field. What do they give up by not reindexing?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Query-time performance. A runtime field's script executes fresh against every matching document at search time instead of reading a precomputed, indexed value — fine for prototyping, ad-hoc analysis, or fields queried rarely, but noticeably slower than a real mapped field under heavy or repeated query load. Runtime fields are a way to defer the reindex decision, not a free permanent substitute for one.</div>
+</div>
+
 ---
 
 ## 22. Cross-Cluster Search (CCS) & Cross-Cluster Replication (CCR)
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="ccs" class="active">CCS — Cross-Cluster Search</button>
+    <button data-tab="ccr">CCR — Cross-Cluster Replication</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="ccs">
+      <strong>Query-time federation, no data copied.</strong> A single search fans out live to remote clusters and merges results back — nothing is duplicated at rest. Good for "search everywhere from one place," bad for latency-sensitive queries if the remote cluster is far away, since every query pays that round trip.
+    </div>
+    <div class="tab-panel" data-tab-panel="ccr">
+      <strong>Data-copying replication, no query fan-out.</strong> A follower index continuously pulls ops from a leader index in another cluster and keeps its own full local copy, read-only until promoted. Good for disaster recovery and low-latency local reads in another region — the data is physically present, not fetched on demand.
+    </div>
+  </div>
+</div>
 
 ### Cross-Cluster Search — query across multiple clusters
 
@@ -1327,6 +1467,26 @@ PUT /follower-logs/_ccr/follow
 
 Follower index is read-only. Replicates ops from leader in near-real-time. To promote follower to leader (DR failover):
 
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Pause following.</strong> <code>_ccr/pause_follow</code> stops pulling new ops from the leader — a deliberate checkpoint before changing the index's role.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Close the index.</strong> CCR requires the follower to be closed before its replication relationship can be torn down; it can't be unfollowed while open.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Unfollow.</strong> <code>_ccr/unfollow</code> permanently detaches it from the leader and converts it into an ordinary, writable standalone index — this can't be undone; it's "detach for good," not "pause."
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 ```bash
 POST /follower-logs/_ccr/pause_follow
 POST /follower-logs/_close
@@ -1334,9 +1494,40 @@ POST /follower-logs/_ccr/unfollow
 # follower is now a normal writable index
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">A team needs a low-latency, fully local copy of their EU logs index available for reads in a US region, ready to fail over during a regional outage. Is Cross-Cluster Search or Cross-Cluster Replication the right fit?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>CCR. Cross-Cluster Search doesn't copy any data — every query still round-trips to wherever the data actually lives, which defeats "low-latency local reads." CCR maintains a real, physically local follower index kept in near-real-time sync, so US reads never leave the region, and that follower can be promoted to a standalone writable index during failover — exactly the DR use case.</div>
+</div>
+
 ---
 
 ## 23. Snapshot & Restore
+
+Four stages, from one-time setup to ongoing automation:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Register a repository.</strong> A one-time declaration of <em>where</em> snapshots live (S3, GCS, shared filesystem, ...) — this is just target-location config, no data moves yet.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Take a snapshot.</strong> Copies the current state of the chosen indices into the repository. Every snapshot after the first is incremental — only new or changed segment files are uploaded, unchanged segments are referenced from the previous snapshot instead of re-copied.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Restore.</strong> Rehydrates indices from a chosen snapshot, optionally renamed so it doesn't collide with a live index of the same name.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Automate with SLM.</strong> A Snapshot Lifecycle Management policy takes step 2 out of anyone's hands — snapshots run on a schedule with automatic retention, instead of relying on someone remembering to run them.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ### Register a repository (S3)
 
@@ -1365,6 +1556,8 @@ PUT /_snapshot/my_s3_repo/snapshot_2026_01_01
 // Check status
 GET /_snapshot/my_s3_repo/snapshot_2026_01_01
 ```
+
+**Why snapshots are cheap to repeat:** Lucene segments are immutable, so a second snapshot of the same index only has to upload segments created since the last snapshot — unchanged segments are simply referenced, not re-uploaded. That's what makes daily (or hourly) snapshots practical at scale instead of a full-copy operation every time.
 
 ### Restore
 
@@ -1399,6 +1592,12 @@ PUT /_slm/policy/daily_snapshots
 // Execute immediately
 POST /_slm/policy/daily_snapshots/_execute
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A daily SLM policy has been running for 90 days against the same S3 repository. Roughly how much data does each new snapshot actually upload, assuming most old data isn't changing?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Only the segments that are new or changed since the previous snapshot — not a full copy of the index every time. Because Lucene segments are immutable, unchanged segments from earlier snapshots are simply referenced rather than re-uploaded. This incremental behavior is exactly what makes frequent (even hourly) snapshots practical instead of prohibitively expensive at scale.</div>
+</div>
 
 ---
 
@@ -1459,6 +1658,12 @@ PUT /_security/role/restricted_reader
 }
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">The restricted_reader role above sets both field_security (grant only order_id, status, created_at) and a document-level query (region: EU). Does a matching user see all EU orders in full, or only some fields of some orders?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Both restrictions apply together, not either/or — the user sees only documents matching region: EU (document-level security), and within those documents, only the three granted fields (field-level security). The two mechanisms compose: one controls which rows are visible, the other controls which columns are visible on the rows that are.</div>
+</div>
+
 ---
 
 ## 25. Transforms & Rollups
@@ -1489,3 +1694,9 @@ POST /_transform/daily_sales_summary/_start
 ```
 
 Transforms replace rollups (deprecated). Use them for pre-aggregated dashboards, summary indexes, and reducing query load on high-cardinality indexes.
+
+<div class="quiz-card">
+  <p class="quiz-q">The daily_sales_summary transform above includes a sync.time.delay of 60s. What would happen without that delay?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>A continuous transform periodically checks the source index for documents newer than its last checkpoint, and the delay exists to tolerate indexing latency — without it, the transform could run its checkpoint query right as a batch of orders is still being indexed, miss those not-yet-visible documents at that instant, and never revisit that time window again. The delay gives in-flight writes time to actually land and become searchable before the transform considers that time range "done."</div>
+</div>

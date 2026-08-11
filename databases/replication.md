@@ -185,6 +185,12 @@ CREATE SUBSCRIPTION mysub
 SET LOCAL synchronous_commit = remote_apply;
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">Postgres's default synchronous_commit setting is literally named "on." Does that mean every write already waits for a replica before being acknowledged?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — despite the name, the table above shows <code>on</code> returns the ACK at the same point as <code>local</code>: after the local WAL flush, with no wait on any replica. "Data loss on replica" is listed as the risk for both. Getting an actual replica-durability guarantee requires explicitly setting <code>remote_write</code> (near-zero RPO) or <code>remote_apply</code> (RPO 0) — the default only protects against a crash on the primary itself, not a failover to a replica that never received the write.</div>
+</div>
+
 ---
 
 ## 5. MySQL Replication
@@ -260,9 +266,23 @@ START REPLICA FOR CHANNEL 'source2';
 
 ### Replica Set Architecture
 
-```
-Primary  ──oplog──▶  Secondary 1
-         ──oplog──▶  Secondary 2  (odd member count for elections)
+```mermaid
+graph TD
+    classDef primary fill:#e74c3c,stroke:#c0392b,color:#fff
+    classDef secondary fill:#3498db,stroke:#2471a3,color:#fff
+
+    P["Primary<br/>accepts all writes,<br/>appends to local.oplog.rs"]:::primary
+    S1["Secondary 1<br/>tails oplog, replays entries"]:::secondary
+    S2["Secondary 2<br/>tails oplog, replays entries"]:::secondary
+
+    P -->|oplog stream| S1
+    P -->|oplog stream| S2
+
+    subgraph SET["3-member set — odd count avoids tied elections"]
+        P
+        S1
+        S2
+    end
 ```
 
 ### Oplog
@@ -284,6 +304,12 @@ rs.printSecondaryReplicationInfo()
 1. Any member that hasn't heard from primary within `electionTimeoutMillis` (10 s) calls an election
 2. Candidate requests votes; wins if it has the most up-to-date oplog and majority of votes
 3. Raft-inspired; uses term numbers to prevent stale leaders
+
+<div class="quiz-card">
+  <p class="quiz-q">A candidate has more votes cast in its favor than any other node, but its oplog isn't the most up-to-date in the set. Does it become primary?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — winning requires the most up-to-date oplog <em>and</em> a majority of votes, not vote count alone. In practice this rarely even gets close: members are supposed to withhold votes from a candidate whose oplog is behind theirs, so a stale candidate typically can't accumulate a majority in the first place.</div>
+</div>
 
 ### Write Concern
 
@@ -311,10 +337,20 @@ db.orders.insertOne(doc, { writeConcern: { w: "majority", j: true, wtimeout: 300
 
 ### PSYNC2 Protocol
 
-```
-Replica → Primary:  PSYNC <replid> <offset>
-Primary → Replica:  FULLRESYNC <replid> <offset>  (full RDB sync)
-                OR  CONTINUE                        (partial resync)
+```mermaid
+sequenceDiagram
+    participant R as Replica
+    participant P as Primary
+
+    R->>P: PSYNC <replid> <offset>
+    alt offset still covered by repl-backlog (partial resync possible)
+        P-->>R: +CONTINUE
+        P->>R: stream only the commands missing since <offset>
+    else replid mismatch, first connection, or offset fell off the backlog
+        P-->>R: +FULLRESYNC <replid> <offset>
+        P->>R: RDB snapshot (entire dataset)
+        P->>R: stream commands received while the snapshot was transferring
+    end
 ```
 
 - `repl-backlog-size` (default 1 MB): ring buffer on primary. If replica lag exceeds backlog, full resync required.
@@ -324,6 +360,12 @@ Primary → Replica:  FULLRESYNC <replid> <offset>  (full RDB sync)
 # Check replication state
 redis-cli INFO replication
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A replica disconnects for an unusually long time. When it reconnects and sends PSYNC, it gets FULLRESYNC instead of CONTINUE even though its replid still matches. Why?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The commands it needs to catch up on have already been overwritten in the primary's repl-backlog — a fixed-size ring buffer (default just 1 MB). Once the gap since disconnect exceeds what the backlog can hold, a partial resync (CONTINUE) is no longer possible regardless of a matching replid, and the primary falls back to a full RDB transfer. Sizing repl-backlog-size for your expected disconnect windows is what keeps routine blips cheap.</div>
+</div>
 
 ### Sentinel (Automatic Failover)
 
@@ -340,6 +382,28 @@ sentinel failover-timeout mymaster 10000
 - 16384 hash slots distributed across masters
 - Each master has 1+ replicas
 - Nodes exchange gossip every second; `CLUSTER FAILOVER` or auto-failover when master is unreachable for `cluster-node-timeout`
+
+```mermaid
+graph LR
+    classDef master fill:#2980b9,stroke:#1f618d,color:#fff
+    classDef replica fill:#7f8c8d,stroke:#616a6b,color:#fff
+
+    M1["Master A<br/>slots 0–5460"]:::master
+    M2["Master B<br/>slots 5461–10922"]:::master
+    M3["Master C<br/>slots 10923–16383"]:::master
+    R1["Replica of A"]:::replica
+    R2["Replica of B"]:::replica
+    R3["Replica of C"]:::replica
+
+    M1 -.->|"gossip"| M2
+    M2 -.->|"gossip"| M3
+    M3 -.->|"gossip"| M1
+    M1 -->|"async replication"| R1
+    M2 -->|"async replication"| R2
+    M3 -->|"async replication"| R3
+```
+
+Gossip is how every node learns cluster shape and health without a central coordinator — each node's view of "who owns which slots" and "who's unreachable" converges through peer-to-peer chatter, which is also why `cluster-node-timeout` (how long a master must be unreachable before its replica is promoted) is a cluster-wide setting, not per-node.
 
 ---
 
@@ -358,6 +422,12 @@ Replica2 LEO: [0,1,2]        ← lagging, removed from ISR
 
 HW = 4  (min LEO across ISR)
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">In the example above, the leader's LEO is 5 but consumers can only read up to offset 4 (the HW). Why hold back an offset the leader already has?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>HW is defined as the minimum LEO across the ISR — the highest offset guaranteed to exist on every in-sync replica, not just the leader. Offset 5 only exists on the leader so far; if the leader failed right now, that offset could disappear when a replica takes over. Exposing it to consumers before it's replicated risks a consumer reading data that later turns out to have never really "happened" from the cluster's point of view.</div>
+</div>
 
 ### Producer Acks
 
@@ -400,19 +470,76 @@ Term numbers act as logical clocks.
 
 ```mermaid
 sequenceDiagram
-    participant F1 as Follower 1
-    participant F2 as Follower 2
-    participant C as Candidate
+    participant N1 as Node A
+    participant N2 as Node B
+    participant N3 as Node C (times out first)
+    participant CL as Client
 
-    Note over F1,C: Election timeout fires on Candidate
-    C->>F1: RequestVote term=5
-    C->>F2: RequestVote term=5
-    F1-->>C: VoteGranted
-    F2-->>C: VoteGranted
-    Note over C: Won majority — becomes Leader
-    C->>F1: AppendEntries heartbeat
-    C->>F2: AppendEntries heartbeat
+    rect rgb(50, 35, 60)
+    Note over N1,N3: Phase 1 — Leader election (term 5)
+    N3->>N3: Election timeout fires — becomes Candidate, term 4→5
+    N3->>N1: RequestVote(term=5, lastLogIndex, lastLogTerm)
+    N3->>N2: RequestVote(term=5, lastLogIndex, lastLogTerm)
+    N1->>N1: not yet voted this term AND candidate log ≥ mine → grant
+    N2->>N2: not yet voted this term AND candidate log ≥ mine → grant
+    N1-->>N3: VoteGranted(term=5)
+    N2-->>N3: VoteGranted(term=5)
+    Note over N3: Majority (2 of 3) — becomes Leader, starts heartbeats
+    end
+
+    rect rgb(30, 50, 65)
+    Note over CL,N3: Phase 2 — Log replication
+    CL->>N3: Command: SET x=1
+    N3->>N3: Append to local log (uncommitted)
+    N3->>N1: AppendEntries(term=5, entry, leaderCommit)
+    N3->>N2: AppendEntries(term=5, entry, leaderCommit)
+    N1->>N1: Append entry to local log
+    N2->>N2: Append entry to local log
+    N1-->>N3: Success
+    N2-->>N3: Success
+    Note over N3: Majority acknowledged — commit entry, apply to state machine
+    N3-->>CL: Result
+    Note over N1,N2: Next heartbeat carries new commit index — followers apply too
+    end
 ```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Election timeout.</strong> A follower hears no heartbeat for its randomized timeout window. It becomes a Candidate and increments its term — the new term number is what lets every other node recognize this as a fresh election, not a stale retry.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. RequestVote goes out.</strong> The candidate sends <code>RequestVote</code> to every other node, including its own last log index and term so voters can judge how caught-up it is.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Nodes decide whether to vote.</strong> A node grants its vote only if it hasn't already voted this term <em>and</em> the candidate's log is at least as up-to-date as its own — a stale candidate can request all it wants, it simply won't collect votes.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Majority reached — becomes Leader.</strong> Once the candidate holds votes from a majority of nodes, it becomes Leader for this term and immediately starts sending heartbeats to suppress further elections.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Client command arrives.</strong> The Leader appends the command to its own log first — uncommitted — then sends <code>AppendEntries</code> to every follower carrying that entry.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Followers replicate and ack.</strong> Each follower appends the entry to its own log and acknowledges. The Leader only needs a majority to respond, not every follower.
+    </div>
+    <div class="stepper-panel">
+      <strong>7. Commit and respond.</strong> Once a majority has acknowledged, the Leader commits the entry, applies it to its state machine, and responds to the client. The next heartbeat carries the updated commit index so followers know to apply it too.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Node C's election timeout fires first, so it starts requesting votes before Node A or Node B time out. But Node C's log is behind theirs. Does timing out first win it the election?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. A node grants its vote only if it hasn't already voted this term <em>and</em> the candidate's log is at least as up-to-date as its own. Node A and Node B will see that Node C's log is behind theirs and withhold their votes, so Node C can't reach a majority no matter how quickly it started campaigning. Timing out first only earns a chance to run — an out-of-date log still loses.</div>
+</div>
 
 ### Paxos (Classic)
 
@@ -424,6 +551,43 @@ Two phases:
 | Phase 1b | Promise(n, v) | Acceptor promises; returns highest accepted value if any |
 | Phase 2a | Accept(n, v) | Proposer sends chosen value |
 | Phase 2b | Accepted(n, v) | Acceptor accepts; notifies learners |
+
+```mermaid
+sequenceDiagram
+    participant PR as Proposer
+    participant A1 as Acceptor 1
+    participant A2 as Acceptor 2
+    participant L as Learner
+
+    rect rgb(50, 35, 60)
+    Note over PR,A2: Phase 1 — Prepare / Promise
+    PR->>A1: Prepare(n=7)
+    PR->>A2: Prepare(n=7)
+    A1->>A1: n=7 higher than any promised so far → promise
+    A2->>A2: n=7 higher than any promised so far → promise
+    A1-->>PR: Promise(7, no prior accepted value)
+    A2-->>PR: Promise(7, no prior accepted value)
+    end
+
+    rect rgb(30, 50, 65)
+    Note over PR,L: Phase 2 — Accept / Accepted
+    PR->>A1: Accept(n=7, v="X")
+    PR->>A2: Accept(n=7, v="X")
+    A1->>A1: n=7 still highest promised → accept
+    A2->>A2: n=7 still highest promised → accept
+    A1-->>PR: Accepted(7, "X")
+    A2-->>PR: Accepted(7, "X")
+    A1--)L: Accepted(7, "X")
+    A2--)L: Accepted(7, "X")
+    Note over L: Majority accepted the same value — "X" is chosen
+    end
+```
+
+<div class="quiz-card">
+  <p class="quiz-q">After Phase 1 (Prepare/Promise) completes successfully across a majority of acceptors, has a value actually been chosen yet?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Phase 1 only gets acceptors to promise not to accept any proposal numbered less than n — no value is sent in this phase at all. The actual value only goes out in Phase 2 (Accept(n, v)), and it's only considered chosen once a majority of acceptors respond Accepted(n, v). Prepare/Promise is purely about reserving the right to propose next, not about committing anything.</div>
+</div>
 
 Raft vs Paxos: Raft is easier to understand (strong leader, sequential log); Paxos is more general but leaves log ordering to implementation.
 
@@ -438,6 +602,12 @@ Raft vs Paxos: Raft is easier to understand (strong leader, sequential log); Pax
 | Last-Write-Wins (LWW) | Highest timestamp wins | clock skew causes data loss |
 | CRDTs | Data structures that merge deterministically | limited to counters, sets, etc. |
 | Application-level | App detects conflict, merges or prompts user | complex but correct |
+
+<div class="quiz-card">
+  <p class="quiz-q">Last-Write-Wins resolves conflicts by keeping the write with the highest timestamp. What's the specific failure mode this table calls out?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Clock skew causing data loss. If one node's clock runs even slightly ahead, its write can "win" over a write that actually happened later in real time on a node with an accurate or lagging clock — silently discarding the genuinely newer data with no merge, no conflict signal, and no way for the application to notice.</div>
+</div>
 
 ### Galera Cluster (MySQL/MariaDB)
 
@@ -469,6 +639,12 @@ Example:
 ```
 
 Use async for cross-region writes unless RPO=0 is required.
+
+<div class="quiz-card">
+  <p class="quiz-q">Using the us-east-1 → eu-west-1 example above (~85ms RTT), why does that make sync replication so much costlier cross-region than it is within a single AZ?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Sync replication's write latency directly includes the full network round-trip to the remote replica before the primary can ACK the client — and cross-region RTT (tens of milliseconds, ~85ms here) is orders of magnitude larger than same-AZ RTT (typically sub-millisecond). Every single write pays that ~85ms minimum. Async ships the WAL/binlog in the background instead, so the client never waits on that RTT — the tradeoff being the seconds-scale replication lag and possible data loss on failover that async always carries.</div>
+</div>
 
 ### Managed Services
 
@@ -567,6 +743,12 @@ SET GLOBAL replica_parallel_workers = 8;
 SET GLOBAL replica_parallel_type = LOGICAL_CLOCK;
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">A replica is lagging and its CPU is already pegged at 100%. Enabling parallel apply is one of the mitigations listed above — will it fix this specific replica's lag?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Not necessarily. Parallel apply only addresses one specific cause from the list above — single-threaded replay. If the real bottleneck is under-provisioned CPU/IO (a different listed cause), spreading replay across more parallel workers on a host that's already saturated won't help and can even make contention worse. Matching the mitigation to the actual measured cause matters more than reaching for parallel apply by default.</div>
+</div>
+
 ---
 
 ## 13. Comparison Table
@@ -618,14 +800,25 @@ SELECT now() - pg_last_xact_replay_timestamp() AS lag FROM pg_stat_replication;
 patronictl -c patroni.yml pause
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">During the partition, the old primary can still be reached by some clients directly — it just can't reach a majority of replicas or its distributed lock. Why does that stop it from safely continuing to accept writes?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Because every listed prevention mechanism ties "allowed to write" to holding a majority: Patroni's old primary loses its etcd/ZooKeeper lock during the partition, and MongoDB's w:"majority" write concern simply blocks if the primary is isolated from enough voting members. Being reachable by *some* clients isn't the same as being reachable by a *majority* of the replica set — and it's exactly that majority check that keeps the isolated old primary from accepting writes the rest of the cluster will never see, which is what causes divergence in the first place.</div>
+</div>
+
 ---
 
 ### Scenario 3: Cascading Replica
 
 **Setup:** Primary → Replica1 → Replica2 (cascading / chain replication)
 
-```
-Primary  ──WAL──▶  Replica1  ──WAL──▶  Replica2
+```mermaid
+graph LR
+    classDef primary fill:#2c3e50,stroke:#1a252f,color:#fff
+    classDef replica fill:#3498db,stroke:#2471a3,color:#fff
+
+    P["Primary"]:::primary -->|"WAL stream<br/>lag: L1"| R1["Replica 1<br/>relays WAL onward"]:::replica
+    R1 -->|"WAL stream<br/>lag: L2 (additional)"| R2["Replica 2<br/>total lag ≈ L1 + L2"]:::replica
 ```
 
 **PostgreSQL:**

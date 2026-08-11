@@ -162,6 +162,12 @@ sequenceDiagram
 
 **Cons:** Write latency = cache latency + DB latency. Cache fills with data that may never be read.
 
+<div class="quiz-card">
+  <p class="quiz-q">In the write-through diagram, "Another App Instance" issues a GET right after the first write and gets the fresh value with no DB round trip. What would break that guarantee if the Cache→DB step were made asynchronous instead of synchronous?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The "no stale reads" guarantee only holds because the DB write completes <em>before</em> the client's write is acknowledged — so cache and DB are already in sync by the time any other instance can read. Making that DB write asynchronous is exactly what write-behind does instead, and it's precisely why write-behind carries a data-loss risk that write-through doesn't: the client gets "ack" before the DB has the value, so a crash in that gap loses the write outright rather than just serving a slightly stale read.</div>
+</div>
+
 ---
 
 ## 5. Write-Behind (Write-Back)
@@ -225,6 +231,12 @@ sequenceDiagram
 ```
 
 **Difference from cache-aside:** App only talks to cache. Cache library/provider handles DB fetching. Example: Spring Cache with `@Cacheable`.
+
+<div class="quiz-card">
+  <p class="quiz-q">In the read-through diagram, the note says the app's code is "identical on hit or miss — always just GET key." In cache-aside's Python example, is that also true?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — cache-aside's <code>get_user</code> function explicitly branches on the miss (<code>if data: ... else: db.query(...); redis.setex(...)</code>). That branching logic is application code the developer wrote and owns. In read-through, that same branch exists, but it lives inside the cache library/provider (e.g. Spring's <code>@Cacheable</code> loader) — the app never sees it, which is the entire difference between the two patterns.</div>
+</div>
 
 ---
 
@@ -392,6 +404,12 @@ PFCOUNT unique:visitors:home   # returns 2, not 3
 ```
 Uses ~12KB regardless of cardinality — far cheaper than a Set for billions of IDs.
 
+<div class="quiz-card">
+  <p class="quiz-q">PFADD unique:visitors:home user:1001 user:1002 user:1001 followed by PFCOUNT returns exactly 2, not 3. Is that count guaranteed to be exact in general, and why does HyperLogLog trade that away?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Here it happens to be exact because the cardinality is tiny, but HyperLogLog is fundamentally an approximate structure — at real-world scale it carries about 0.81% error either direction. The trade is deliberate: a Set would be exact but grows linearly with the number of unique items (unusable for billions of IDs), while HyperLogLog stays at a fixed ~12KB regardless of cardinality by giving up exactness for that constant memory footprint.</div>
+</div>
+
 ---
 
 ## 10. Redis vs Memcached
@@ -425,21 +443,63 @@ Uses ~12KB regardless of cardinality — far cheaper than a Set for billions of 
 
 **Problem:** A hot key expires. Thousands of requests all miss simultaneously, all hit DB at once, DB collapses.
 
+The danger isn't the miss itself — cache-aside is designed to tolerate misses. It's that a *hot* key means hundreds or thousands of in-flight requests were relying on that one cached value at the same moment, so the instant it disappears, all of them fall through to the DB together, as if the cache had never been there at all.
+
 ```mermaid
 sequenceDiagram
     participant R1 as Request 1
     participant R2 as Request 2
-    participant R3 as Request N
+    participant RN as Request N (thousands more)
     participant Cache
     participant DB
 
-    R1->>Cache: GET hot_key → miss
-    R2->>Cache: GET hot_key → miss
-    R3->>Cache: GET hot_key → miss
-    R1->>DB: SELECT (stampede)
-    R2->>DB: SELECT (stampede)
-    R3->>DB: SELECT (stampede)
+    Note over Cache: hot_key's TTL just expired — cache now empty for this key
+    par near-simultaneous misses
+        R1->>Cache: GET hot_key
+        Cache-->>R1: nil (miss)
+    and
+        R2->>Cache: GET hot_key
+        Cache-->>R2: nil (miss)
+    and
+        RN->>Cache: GET hot_key
+        Cache-->>RN: nil (miss)
+    end
+    Note over R1,RN: all of them saw the same empty key within milliseconds —<br/>none knows another is about to run the identical query
+    rect rgb(90, 30, 30)
+    par stampede — every miss independently falls through to the DB
+        R1->>DB: SELECT (recompute hot_key)
+        R2->>DB: SELECT (recompute hot_key)
+        RN->>DB: SELECT (recompute hot_key)
+    end
+    end
+    Note over DB: DB was sized for a trickle of cache misses,<br/>not the full read volume at once — CPU/connections saturate
 ```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Steady state.</strong> <code>hot_key</code> is cached and its TTL is ticking down. Thousands of requests/sec hit Redis and the DB sees none of that traffic.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. TTL expires.</strong> The single cached value for <code>hot_key</code> is gone — but request volume hasn't dropped even slightly; it's the same hot key it was a second ago.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Every in-flight request misses at once.</strong> Because they were all reading the same key, they all discover the miss within the same few milliseconds — not staggered, not one-at-a-time.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Each miss independently falls through to the DB.</strong> Cache-aside's own miss-handling logic runs on every one of those requests — no request has any way of knowing thousands of others are about to issue the identical query.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. The DB collapses.</strong> It was provisioned for a steady trickle of cache misses, not the full read volume landing in one burst. Connections and CPU saturate, latency spikes for unrelated queries too, and the outage can cascade well beyond the one hot key.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ### Solution 1: Mutex / Distributed Lock
 ```python
@@ -493,6 +553,12 @@ def get_stale_ok(key, ttl, stale_ttl=60):
 ### Solution 4: Background Refresh
 Cron/worker refreshes hot keys before they expire. Works well for known-hot keys.
 
+<div class="quiz-card">
+  <p class="quiz-q">The mutex solution and XFetch both prevent a DB pile-up, but in different ways. What specifically does XFetch avoid that the mutex approach doesn't?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The mutex still lets the full herd occur — every request still misses and reaches the lock check — it just serializes who's allowed to actually query the DB while everyone else sleeps and retries. XFetch avoids the herd happening at all: because it recomputes probabilistically <em>before</em> the key ever fully expires, one request gets picked ahead of time to refresh it, so the key rarely reaches a state where thousands of requests hit a true miss simultaneously in the first place.</div>
+</div>
+
 ---
 
 ## 12. Cache Warming
@@ -521,6 +587,12 @@ def warm():
 **Shadow traffic replay:** Replay recent production logs against new cache before cutover.
 
 **Rule:** Never deploy a stateful cache service without a warm-up phase. Use feature flags or canary to shift traffic gradually.
+
+<div class="quiz-card">
+  <p class="quiz-q">Lazy warming is called "acceptable if DB can handle initial cold traffic." A team relies on lazy warming alone and then deploys during peak hours with a cache flush. What's the risk, in the section's own terms?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Exactly the failure mode this section opens with: "a cold cache after deploy → all traffic hits DB → DB overload → cascading failure." Lazy warming's "acceptable" caveat assumes the DB can absorb that initial cold-traffic spike — which is precisely what's least true at peak hours, when request volume (and therefore the cold-miss volume) is at its highest. That's why the rule is to always pair a deploy with an explicit warm-up phase rather than trust cache-aside's natural warming alone.</div>
+</div>
 
 ---
 
@@ -564,6 +636,12 @@ data = redis.get(key)
 redis.incr("product:42:version")
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">Incrementing product:42:version doesn't delete product:42:v1. What actually removes the old versioned key, and what goes wrong if it was set without a TTL?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Nothing in this pattern actively deletes it — the design relies on the old key expiring naturally via TTL ("old keys expire naturally via TTL"). If <code>product:42:v1</code> was written with no TTL, it just sits in Redis forever as orphaned data: every version bump leaves another abandoned key behind, and nothing will ever reclaim that memory on its own.</div>
+</div>
+
 ---
 
 ## 14. Distributed Cache Consistency
@@ -578,12 +656,35 @@ sequenceDiagram
     participant B as App Instance B
     participant Cache
 
+    rect rgb(90, 30, 30)
+    Note over A,B: Unsafe — plain GET + SET, no coordination
     A->>Cache: GET user:1 → v1
     B->>Cache: GET user:1 → v1
     A->>Cache: SET user:1 v2
-    B->>Cache: SET user:1 v3 (overwrites v2)
-    Note over Cache: v2 lost
+    B->>Cache: SET user:1 v3 (B never saw v2, overwrites blindly)
+    Note over Cache: v2 is gone — B's write didn't know v2 existed
+    end
+
+    rect rgb(30, 70, 40)
+    Note over A,B: Safe — WATCH / MULTI / EXEC (optimistic locking)
+    A->>Cache: WATCH user:1, GET user:1 → v1
+    B->>Cache: WATCH user:1, GET user:1 → v1
+    A->>Cache: MULTI, SET user:1 v2, EXEC
+    Cache-->>A: EXEC succeeds — user:1 unchanged since A's WATCH
+    B->>Cache: MULTI, SET user:1 v3, EXEC
+    Cache-->>B: EXEC returns nil — user:1 changed since B's WATCH
+    B->>Cache: retry: GET user:1 → v2, recompute, MULTI/EXEC
+    Note over Cache: no write silently lost — B is forced to retry on fresh data
+    end
 ```
+
+Optimistic locking doesn't prevent the race from happening — B still reads the stale `v1` first. What it prevents is B's write from *landing* unnoticed: `EXEC` fails atomically the moment the watched key changed underneath it, forcing B back through the read-transform-write loop until it succeeds against current data.
+
+<div class="quiz-card">
+  <p class="quiz-q">In the "unsafe" half of the diagram, why is it v2 that gets lost, specifically, and not v3?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>B's GET happened before A's SET, so B's in-memory view is still v1 — B has no idea v2 ever existed. B's SET isn't conditioned on what it read; it just overwrites whatever is currently in the cache with v3. A's write (v2) is the one sandwiched in the middle chronologically, so it's the one that gets clobbered — whichever write lands last always wins, regardless of which one was "newer" from the app's perspective.</div>
+</div>
 
 ### Redis WATCH / MULTI / EXEC (Optimistic Locking)
 ```bash
@@ -624,6 +725,12 @@ return 0
 EVAL "<script>" 1 user:1 expected_val new_val
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">The Lua compare-and-swap script only calls SET if current == expected. Why is this immune to the same race that broke the plain GET+SET example, when it's still doing a read followed by a write?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Because the entire read-compare-write sequence runs as one atomic operation inside Redis via EVAL — no other client's command can interleave between the GET and the SET the way A's and B's commands interleaved in the unsafe example. WATCH/MULTI/EXEC gets the same safety by detecting and rejecting a conflicting change after the fact (optimistic, retry-based); the Lua script instead makes the check-and-set indivisible from the start, so there's never a window for another writer to sneak in.</div>
+</div>
+
 ---
 
 ## 15. CDN vs Application Cache vs DB Cache
@@ -637,6 +744,12 @@ EVAL "<script>" 1 user:1 expected_val new_val
 | Use when | Public static/cacheable content | Single-instance hot data | Multi-instance shared state | Read-heavy reporting queries |
 | Cost | CDN egress pricing | Free (heap memory) | Redis node cost | Included with DB |
 | Risk | Stale public content | No sharing across pods | Network latency + connection pool | MySQL removed query cache in 8.0 |
+
+<div class="quiz-card">
+  <p class="quiz-q">The table lists "DB Query Cache" with invalidation "AUTO on write" but its risk is "MySQL removed query cache in 8.0." What does that imply for a system designed around this tier today?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It means this tier can't be relied on as a given for a modern MySQL deployment — the automatic, DB-managed query cache described in this row doesn't exist at all on MySQL 8.0+. Any read-heavy reporting workload that was leaning on that tier needs to shift that caching responsibility up a layer, into the distributed (Redis) or application tier instead, since the DB is no longer doing it automatically underneath them.</div>
+</div>
 
 ---
 
@@ -684,6 +797,12 @@ rate(redis_evicted_keys_total[5m])
 # Memory fragmentation ratio (>1.5 = fragmented)
 redis_memory_used_rss_bytes / redis_memory_used_bytes
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">With 90% hit rate, 1ms cache latency, and 20ms DB latency, the worked example gives 2.9ms average effective latency. Why isn't it closer to the midpoint of 1ms and 20ms (~10.5ms)?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Because effective_latency is a weighted average by hit rate, not a plain average of the two numbers: 0.9 × 1ms + 0.1 × 20ms = 2.9ms. Only the 10% of requests that actually miss pay the 20ms DB cost — the 90% that hit dominate the result, which is exactly why even a "slow" 20ms DB barely moves the average once the hit rate is high.</div>
+</div>
 
 ---
 
@@ -748,6 +867,12 @@ r = redis.Redis(connection_pool=pool)
 - Set `max_connections` to (app_threads × 0.5) as a starting point
 - Monitor `connected_clients` in Redis
 - Use pipelining to batch commands and reduce round-trips
+
+<div class="quiz-card">
+  <p class="quiz-q">The hot-key fix uses a local shadow cache with a 1–5 second TTL. What would go wrong if that local TTL were stretched to 60 seconds instead?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Each app instance could keep serving its own stale local copy of the hot key for up to that whole 60-second window before checking Redis again — far past any update to the real value. The 1–5s window is deliberately short so the shadow cache absorbs almost all of the read traffic away from the single Redis shard while still bounding how out-of-date any one instance's copy can get.</div>
+</div>
 
 ---
 
