@@ -1,6 +1,6 @@
 # MongoDB Internals
 
-How MongoDB actually stores, replicates, and serves documents underneath `mongosh` — the storage engine, the oplog, how an election really resolves, and the write-concern arithmetic that decides whether a failover loses data. For the operational side of running this on real VMs (firewall rules, `mongod.conf`, the Prometheus exporter, a step-by-step bootstrap), see [on-prem-k8s/mongodb-vm-cluster.md](../on-prem-k8s/mongodb-vm-cluster.md); for the Kubernetes-operator version, see [on-prem-k8s/mongodb.md](../on-prem-k8s/mongodb.md).
+How MongoDB actually stores, replicates, and serves documents underneath `mongosh` — the storage engine, the oplog, how an election really resolves, and the write-concern arithmetic that decides whether a failover loses data. For the operational side of running this on real VMs (firewall rules, `mongod.conf`, the Prometheus exporter, a step-by-step bootstrap), see [on-prem-vm/mongodb.md](../on-prem-vm/mongodb.md); for the Kubernetes-operator version, see [on-prem-k8s/mongodb.md](../on-prem-k8s/mongodb.md).
 
 <div class="quiz-progress" data-quiz-progress>
   <span class="quiz-progress-label">0/0 checks</span>

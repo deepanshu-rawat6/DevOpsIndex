@@ -66,14 +66,18 @@ const SECTIONS = [
   },
   {
     slug: 'on-prem-k8s', title: 'Databases on Kubernetes', order: 15,
-    readOrder: ['README', 'postgres', 'mysql', 'mongodb', 'mongodb-vm-cluster', 'redis-cluster', 'kafka', 'clickhouse'],
+    readOrder: ['README', 'postgres', 'mysql', 'mongodb', 'redis-cluster', 'kafka', 'clickhouse'],
   },
   {
-    slug: 'system-design', title: 'System Design', order: 16,
+    slug: 'on-prem-vm', title: 'On-Prem VM Setup', order: 16,
+    readOrder: ['README', 'mongodb'],
+  },
+  {
+    slug: 'system-design', title: 'System Design', order: 17,
     readOrder: ['README', 'scaling', 'cap-pacelc', 'rate-limiting', 'async-patterns', 'api-design', 'distributed-transactions'],
   },
   {
-    slug: 'sre', title: 'SRE & Debugging', order: 17,
+    slug: 'sre', title: 'SRE & Debugging', order: 18,
     readOrder: ['README', 'k8s-debugging', 'k8s-scenarios', 'linux-debugging', 'aws-scenarios', 'cicd-scenarios', 'iac-scenarios', 'sre-concepts', 'self-healing-aiops', 'db-monitoring'],
   },
 ];
