@@ -2,19 +2,47 @@
 
 Compute Engine is GCP's VM service — equivalent to AWS EC2. Google's infrastructure advantage shows up here: live migration, custom machine types, and better sustained use economics.
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## Machine Families Overview
 
-```
-AWS EC2 Instance Families          GCP Machine Families
-──────────────────────────────────────────────────────────
-t3, t4g (burstable)             →  e2 (cost-optimized, shared/dedicated)
-m5, m6i (general purpose)       →  n2, n2d, n4 (general purpose)
-c5, c6i (compute optimized)     →  c2, c3 (compute optimized)
-r5, r6i (memory optimized)      →  m1, m2, m3 (memory optimized)
-p3, p4 (GPU)                    →  a2, g2 (GPU — A100/L4)
-inf1, trn1 (ML inferencing)     →  a3 (H100 GPU), TPU (unique to GCP)
+```mermaid
+graph LR
+    classDef burstable fill:#16a085,stroke:#117a65,color:#fff,rx:6
+    classDef general fill:#2980b9,stroke:#1f618d,color:#fff,rx:6
+    classDef compute fill:#e67e22,stroke:#ba6018,color:#fff,rx:6
+    classDef memory fill:#8e44ad,stroke:#6c3483,color:#fff,rx:6
+    classDef gpu fill:#c0392b,stroke:#922b21,color:#fff,rx:6
+
+    subgraph AWS["AWS EC2 instance families"]
+        T3["t3, t4g<br/>burstable"]:::burstable
+        M5["m5, m6i<br/>general purpose"]:::general
+        C5["c5, c6i<br/>compute optimized"]:::compute
+        R5["r5, r6i<br/>memory optimized"]:::memory
+        P3["p3, p4<br/>GPU"]:::gpu
+        INF["inf1, trn1<br/>ML inferencing"]:::gpu
+    end
+
+    subgraph GCP["GCP machine families"]
+        E2["e2<br/>cost-optimized, shared/dedicated"]:::burstable
+        N2["n2, n2d, n4<br/>general purpose"]:::general
+        C2["c2, c3<br/>compute optimized"]:::compute
+        M1["m1, m2, m3<br/>memory optimized"]:::memory
+        A2["a2, g2<br/>GPU — A100/L4"]:::gpu
+        A3["a3 (H100 GPU), TPU<br/>TPU unique to GCP"]:::gpu
+    end
+
+    T3 -->|"closest analog"| E2
+    M5 -->|"closest analog"| N2
+    C5 -->|"closest analog"| C2
+    R5 -->|"closest analog"| M1
+    P3 -->|"closest analog"| A2
+    INF -->|"closest analog, but<br/>not a real equivalent"| A3
 ```
 
 ### Machine Family Quick Guide
@@ -30,6 +58,12 @@ inf1, trn1 (ML inferencing)     →  a3 (H100 GPU), TPU (unique to GCP)
 | **m3** | 4–128 | Memory optimized, newer gen | r6i |
 | **a2** | 12–96 | A100 GPU workloads | p4 |
 | **g2** | 4–96 | L4 GPU, inference | g5 |
+
+<div class="quiz-card">
+  <p class="quiz-q">Which row in the AWS→GCP machine family mapping has no real AWS equivalent, and what does that imply about picking a family purely by "closest AWS analog"?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>TPU — it's called out as unique to GCP, with inf1/trn1 only mapped to it as the nearest fit, not a real match. The AWS-analog column is a useful starting point for translating an existing AWS architecture, not a complete picture of what a family can do — some GCP capacity (TPU, and custom machine types more generally) simply doesn't have an AWS box to reason from.</div>
+</div>
 
 ---
 
@@ -52,6 +86,12 @@ gcloud compute instances create my-vm \
 ```
 
 This often saves 20-40% cost compared to the next-size-up predefined instance on AWS.
+
+<div class="quiz-card">
+  <p class="quiz-q">You try to create <code>custom-2-1024</code> (2 vCPUs, 1 GB RAM). Does GCP allow it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Memory must fall between 0.9 GB and 6.5 GB per vCPU, so 2 vCPUs requires at least roughly 1.8 GB — 1 GB is below the floor. The <code>-ext</code> suffix only raises the ceiling for extended memory beyond 6.5 GB/vCPU; it doesn't relax the 0.9 GB/vCPU minimum on the low end.</div>
+</div>
 
 ---
 
@@ -104,6 +144,34 @@ gcloud compute instances create prod-vm \
 | `pd-ssd` | 30,000 IOPS | High | Databases, latency-sensitive | io1 |
 | `pd-extreme` | 120,000 IOPS | Very high | High-perf databases | io2 Block Express |
 | `hyperdisk-balanced` | Up to 160,000 IOPS | Configurable | Latest gen, best perf | io2 |
+| `local-ssd` | Highest (physically attached NVMe) | Very high | Ephemeral scratch, cache, high-perf temp data | Instance store |
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="pdstandard" class="active">pd-standard</button>
+    <button data-tab="pdbalanced">pd-balanced</button>
+    <button data-tab="pdssd">pd-ssd</button>
+    <button data-tab="pdextreme">pd-extreme</button>
+    <button data-tab="localssd">local-ssd</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="pdstandard">
+      <strong>HDD-backed, cheapest, size-scaled IOPS.</strong> Performance scales with how much you provision (bigger disk = more IOPS, no independent tuning), and there's no burst headroom. Fine for boot disks, dev/test, and cold or infrequently-read data where latency doesn't matter — the wrong choice for anything transactional.
+    </div>
+    <div class="tab-panel" data-tab-panel="pdbalanced">
+      <strong>SSD-backed, the sensible default.</strong> 3,000 IOPS per TB provisioned at a lower price point than pd-ssd. Good enough for most application workloads — web servers, general-purpose databases without extreme latency requirements — without paying for headroom you won't use.
+    </div>
+    <div class="tab-panel" data-tab-panel="pdssd">
+      <strong>SSD-backed, higher and more consistent performance.</strong> Up to 30,000 IOPS, at a higher $/GB than pd-balanced. Reach for this when latency consistency actually matters — production OLTP databases, anything latency-sensitive enough that pd-balanced's ceiling is a real constraint.
+    </div>
+    <div class="tab-panel" data-tab-panel="pdextreme">
+      <strong>Provisioned IOPS, decoupled from capacity.</strong> Up to 120,000 IOPS that you dial in independently of how much you provision, at the highest price of the persistent-disk family. For the small set of workloads (the most demanding databases) where pd-ssd's ceiling still isn't enough.
+    </div>
+    <div class="tab-panel" data-tab-panel="localssd">
+      <strong>Physically attached NVMe — fastest option, but ephemeral.</strong> Local SSD lives on the same physical host as the VM, so it has the lowest latency and highest IOPS of anything in this table — and none of it is a Persistent Disk. Data is wiped if the VM stops, crashes, or is preempted, so it's for scratch space, cache tiers, or temp data the application can afford to lose, never the only copy of anything.
+    </div>
+  </div>
+</div>
 
 ```bash
 # Add a persistent disk to a running VM
@@ -124,6 +192,12 @@ gcloud compute disks resize my-data-disk \
 ```
 
 **GCP advantage**: Persistent Disk can be attached to multiple VMs in read-only mode (for shared datasets). EBS multi-attach is limited and complex.
+
+<div class="quiz-card">
+  <p class="quiz-q">Can the same Persistent Disk be attached to more than one VM at once — and if so, under what constraint?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Yes, but only read-only across all attached VMs — useful for sharing a dataset (reference data, static assets) across many instances without copying it. That's a real advantage over EBS, where multi-attach is limited and complex to set up.</div>
+</div>
 
 ---
 
@@ -173,6 +247,12 @@ gcloud compute instances describe my-vm \
   fi
   python3 /opt/train.py'
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A batch job needs roughly 36 hours of uninterrupted-as-possible compute. Preemptible VM or Spot VM?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Spot VM. Preemptible VMs carry a hard 24-hour runtime cap regardless of whether they ever get preempted, so a 36-hour job would be force-stopped even on a lucky run. Spot VMs have the same discount and the same 30-second preemption notice, but no artificial time limit — the checkpoint/resume pattern still matters for either, since both can be preempted at any time.</div>
+</div>
 
 ---
 
@@ -251,6 +331,12 @@ gcloud compute firewall-rules create allow-iap-ssh \
 
 **GCP advantage**: IAP tunneling is like AWS Systems Manager Session Manager — SSH to private VMs without bastion hosts or public IPs. No .pem files, keys rotated per session.
 
+<div class="quiz-card">
+  <p class="quiz-q">You run <code>gcloud compute ssh --tunnel-through-iap</code> against a private VM and the connection times out. The VM has no other firewall rules for SSH. What's most likely missing?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>A firewall rule allowing ingress from <code>35.235.240.0/20</code> (Google's IAP source range) on tcp:22. IAP proxies the connection, but it still originates traffic from that specific range at the network layer — the destination VM's firewall has to explicitly allow it, the same as any other ingress rule.</div>
+</div>
+
 ---
 
 ## Live Migration — GCP's Unique Advantage
@@ -259,25 +345,101 @@ AWS: when underlying hardware needs maintenance, your instance gets rebooted (sc
 
 This is why GCP claims better VM availability SLAs. For stateful applications (databases running on GCE), this is significant.
 
+```mermaid
+sequenceDiagram
+    participant VM as Running VM
+    participant SRC as Source host
+    participant DST as Destination host
+
+    Note over SRC: Host flagged for upcoming maintenance
+    SRC->>DST: Select healthy destination host, begin migration
+    loop Iterative pre-copy
+        SRC->>DST: Copy VM memory pages while VM keeps serving traffic
+        DST-->>SRC: Acknowledge copied pages
+    end
+    Note over VM,DST: Final sync — VM briefly paused, ~10ms
+    SRC->>DST: Copy last changed state
+    DST->>VM: Resume execution on destination host
+    Note over VM: No reboot, no dropped connections at the OS level
+```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Maintenance detected.</strong> The host running your VM needs
+      attention — a hardware repair, a security patch, a firmware upgrade.
+      AWS would schedule a reboot for this; GCP instead schedules a live
+      migration for every VM on that host.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Destination host selected.</strong> GCP picks a healthy host
+      with matching capacity and starts the migration in the background —
+      your VM keeps running and serving traffic on the original host the
+      entire time.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Memory and state pre-copied.</strong> The VM's memory and CPU
+      state are iteratively copied to the destination host while the source
+      VM keeps executing normally — most of the migration happens with zero
+      visible impact.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Brief pause for final sync.</strong> Once the copy is nearly
+      caught up, the VM is paused for a very short window to copy the last
+      bit of changed state — this is the <code>~10ms</code> dip you can
+      actually observe.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Cutover.</strong> The VM resumes execution on the destination
+      host. No reboot, no dropped connections at the OS level, no operator
+      action required — the entire event is transparent to the application.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">During a live migration, does the VM reboot, and does the application notice anything at all?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No reboot, no downtime — but there is a brief performance dip of around 10ms while the last bit of state is synced and the VM cuts over to the new host. For most applications that's invisible; for latency-sensitive, stateful workloads like databases running directly on GCE, it's still worth knowing it can happen.</div>
+</div>
+
 ---
 
 ## Pricing Model
 
-```
-On-demand:          full price, no commitment
-Preemptible/Spot:   60-91% discount, can be preempted
-Committed use:      1yr = 37% off, 3yr = 55% off (like Reserved Instances, but simpler)
-Sustained use:      AUTOMATIC — run >25% of month → auto-discount, no commitment
+### Pricing Models
 
-Example n2-standard-4 (us-central1):
-  On-demand:   $0.19/hr  (~$140/mo)
-  Sustained:   auto ~25% off if running all month (~$105/mo)
-  1yr commit:  ~$88/mo
-  3yr commit:  ~$63/mo
-  Spot VM:     ~$0.057/hr (~$42/mo)
-```
+| Model | Discount | Commitment | Notes |
+|-------|----------|------------|-------|
+| On-demand | None (full price) | None | Baseline |
+| Preemptible/Spot | 60–91% off | None | Can be preempted at any time |
+| Committed use (1yr) | 37% off | 1 year upfront | Like Reserved Instances, but simpler |
+| Committed use (3yr) | 55% off | 3 years upfront | |
+| Sustained use | Automatic, up to ~25% off | None — usage-based | Triggers once a VM runs more than 25% of the billing month |
+
+### Example — n2-standard-4 (us-central1)
+
+| Pricing model | Cost |
+|---------------|------|
+| On-demand | $0.19/hr (~$140/mo) |
+| Sustained use (auto) | ~$105/mo — auto ~25% off if running all month |
+| 1yr committed use | ~$88/mo |
+| 3yr committed use | ~$63/mo |
+| Spot VM | ~$0.057/hr (~$42/mo) |
 
 Sustained use discounts are **fully automatic** — just run a VM for most of the month and Google discounts it. AWS requires you to purchase Reserved Instances upfront.
+
+<div class="quiz-card">
+  <p class="quiz-q">Do you need to purchase or commit to anything upfront to get the sustained use discount, the way you would for an AWS Reserved Instance?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Sustained use discounts are fully automatic — running a VM for more than 25% of the billing month triggers the discount with no purchase step at all. Committed use discounts (the RI-equivalent, at 37%/55% off for 1yr/3yr) do require an upfront commitment; sustained use does not.</div>
+</div>
 
 ---
 
@@ -305,15 +467,22 @@ Instance groups let you manage multiple VMs as a single unit and attach them to 
 
 A MIG creates **identical VMs from an instance template** and manages them automatically — auto-healing, auto-scaling, rolling updates, and multi-zone distribution.
 
-```
-Instance Template (blueprint)
-    │
-    ▼
-Managed Instance Group
-    ├── VM-1 (identical)
-    ├── VM-2 (identical)
-    └── VM-3 (identical)
-         ↑ GCP auto-recreates any that fail health checks
+```mermaid
+graph TD
+    classDef template fill:#2c3e50,stroke:#1a252f,color:#fff,rx:6
+    classDef mig fill:#2980b9,stroke:#1f618d,color:#fff,rx:6
+    classDef vm fill:#27ae60,stroke:#1e8449,color:#fff,rx:6
+
+    TPL["Instance Template<br/>blueprint: machine type, image,<br/>service account, startup script"]:::template --> MIG["Managed Instance Group"]:::mig
+    subgraph MIG_GROUP["Identical VMs, spread across zones"]
+        V1["VM-1"]:::vm
+        V2["VM-2"]:::vm
+        V3["VM-3"]:::vm
+    end
+    MIG --> V1
+    MIG --> V2
+    MIG --> V3
+    V1 -.->|"fails health check →<br/>GCP auto-recreates from template"| MIG
 ```
 
 **AWS analog:** Auto Scaling Group + Launch Template.
@@ -384,6 +553,12 @@ gcloud compute instance-groups managed set-autoscaling my-mig \
   --custom-metric-utilization=metric=pubsub.googleapis.com/subscription/num_undelivered_messages,utilization-target=100,utilization-target-type=GAUGE
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">A MIG has both a health check (auto-healing) and an autoscaling policy attached. One VM starts failing its health check. Does the MIG scale up, recreate that VM, or both?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Auto-healing recreates just that one VM — after unhealthy-threshold consecutive failures, GCP tears it down and boots a fresh one from the instance template. Autoscaling is a separate mechanism driven by load metrics (CPU, load-balancing utilization, custom metrics) and only changes the size of the group; a single unhealthy VM doesn't by itself trigger a scale-up.</div>
+</div>
+
 #### Rolling Updates
 
 ```bash
@@ -406,6 +581,54 @@ gcloud compute instance-groups managed rolling-action start-update my-mig \
   --region=us-central1
 ```
 
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Stable.</strong> The MIG runs N healthy VMs, all built from
+      instance template v1, serving traffic normally.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Surge.</strong> New VMs are created from template v2, up to
+      <code>--max-surge</code> extra instances — so total group capacity never
+      drops below its starting size during the rollout.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Health-check the new VMs.</strong> Each new v2 VM has to pass
+      the MIG's attached health check before it's considered ready to take
+      traffic — the same auto-healing mechanism, applied during a rollout.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Retire an old VM.</strong> Once a new VM is confirmed
+      healthy, GCP removes one old v1 VM — respecting
+      <code>--max-unavailable</code> (0 means a v1 VM is never removed before
+      its v2 replacement is healthy).
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Repeat until done.</strong> Steps 2–4 repeat until every VM
+      in the group is on template v2. A canary run does the same thing but
+      stops after only <code>target-size</code>% of VMs are updated, so you
+      can validate the new version before continuing the rollout.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Rollback if needed.</strong> Starting another rolling update
+      pointed back at template v1 undoes the change the exact same way,
+      instance by instance — there's no separate "rollback" primitive.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Which flag combination guarantees the MIG's serving capacity never drops during a rolling update: <code>--max-surge=3 --max-unavailable=0</code>, or <code>--max-surge=0 --max-unavailable=1</code>?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>--max-surge=3 --max-unavailable=0</code>. It creates extra VMs on the new template before removing any old ones, so total capacity never dips below the starting size. <code>--max-surge=0 --max-unavailable=1</code> does the opposite — it removes an old VM before its replacement exists, so capacity temporarily drops by one VM at each step of the rollout.</div>
+</div>
+
 #### Stateful MIG (for databases and stateful apps)
 
 By default, when a VM in a MIG is recreated, its disk is wiped. Stateful MIG preserves per-VM state:
@@ -418,17 +641,28 @@ gcloud compute instance-groups managed update my-stateful-mig \
 # Each VM keeps its disk and IP across restarts/updates
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">By default, what happens to a MIG VM's disk when auto-healing recreates it after a failed health check?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It's wiped — a default MIG VM is meant to be identical and disposable, rebuilt fresh from the instance template every time. Configuring the MIG as stateful (<code>--stateful-disk=...,auto-delete=never</code>) is what changes this: it preserves that specific VM's disk (and optionally its IP) across recreation, which is required for databases or anything else that can't lose local state.</div>
+</div>
+
 ---
 
 ### Unmanaged Instance Group (UIG)
 
 A UIG is just a **label/grouping** for existing VMs. GCP does nothing automatically — no auto-healing, no auto-scaling, no rolling updates. You manually add and remove VMs. VMs in a UIG can have different machine types, images, and configs.
 
-```
-Unmanaged Instance Group
-    ├── VM-A (n2-standard-4, debian)
-    ├── VM-B (e2-standard-2, ubuntu)   ← different configs allowed
-    └── VM-C (n1-standard-8, custom)
+```mermaid
+graph TD
+    classDef uig fill:#7f8c8d,stroke:#616a6b,color:#fff,rx:6
+    classDef vma fill:#2980b9,stroke:#1f618d,color:#fff,rx:6
+    classDef vmb fill:#e67e22,stroke:#ba6018,color:#fff,rx:6
+    classDef vmc fill:#8e44ad,stroke:#6c3483,color:#fff,rx:6
+
+    UIG["Unmanaged Instance Group<br/>just a label — no automation"]:::uig --> A["VM-A<br/>n2-standard-4, debian"]:::vma
+    UIG --> B["VM-B<br/>e2-standard-2, ubuntu<br/>different config allowed"]:::vmb
+    UIG --> C["VM-C<br/>n1-standard-8, custom image"]:::vmc
 ```
 
 **The only real use case:** attaching a set of heterogeneous or pre-existing VMs to a load balancer. Load balancers require a backend to be an instance group or NEG — if your VMs already exist and aren't identical, UIG is how you group them.
@@ -471,6 +705,12 @@ gcloud compute instance-groups unmanaged remove-instances my-uig \
 
 **Rule of thumb:** always use MIG. UIG is a legacy escape hatch for VMs you can't recreate from a template.
 
+<div class="quiz-card">
+  <p class="quiz-q">When is a UIG actually the right choice over a MIG?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Only when you already have a set of heterogeneous or pre-existing VMs — different machine types, images, or configs — that need to sit behind a load balancer as a single backend, and you can't or don't want to rebuild them from a common instance template. For anything that can be templated, always use a MIG instead, for the auto-healing, auto-scaling, and rolling updates a UIG will never give you.</div>
+</div>
+
 ---
 
 ## Logging and Serial Ports
@@ -502,15 +742,32 @@ A serial port (COM port) is a **low-level hardware communication channel** that 
 - During kernel panics and OS crashes
 - When the VM is completely unresponsive
 
-```
-Boot sequence and serial port visibility:
-  BIOS/UEFI → GRUB → kernel → initramfs → systemd → sshd → your app
-  ────────────────────────────────────────────────────
-  Serial port captures EVERYTHING above this line
-  SSH only works after sshd starts (far right)
+```mermaid
+graph LR
+    classDef serial fill:#e67e22,stroke:#ba6018,color:#fff,rx:6
+    classDef sshok fill:#27ae60,stroke:#1e8449,color:#fff,rx:6
+
+    BIOS["BIOS / UEFI POST"]:::serial --> GRUB["GRUB bootloader"]:::serial
+    GRUB --> KERNEL["Kernel boot<br/>network not up yet"]:::serial
+    KERNEL --> INITRAMFS["initramfs"]:::serial
+    INITRAMFS --> SYSTEMD["systemd starts units"]:::serial
+    SYSTEMD --> SSHD["sshd starts"]:::sshok
+    SSHD --> APP["Your application"]:::sshok
+
+    subgraph LEGEND["Visibility"]
+        direction LR
+        L1["Serial port captures all of this"]:::serial
+        L2["SSH only works from here on"]:::sshok
+    end
 ```
 
 Think of it as plugging a physical monitor into a server in a datacenter — the only way to see what's happening when nothing else works.
+
+<div class="quiz-card">
+  <p class="quiz-q">Why can serial port access help debug a VM even before the network stack or sshd is up — something SSH can never do?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Because a serial port is a low-level hardware channel independent of the OS and network stack — it works during BIOS/UEFI POST, during kernel boot before the network is up, during kernel panics, and even when the VM is completely unresponsive. SSH depends on the OS being alive, the network being up, and sshd having started — the very last thing in the boot sequence — so it simply isn't available for anything that happens before that point.</div>
+</div>
 
 ---
 
@@ -605,6 +862,12 @@ Available for custom use — rarely needed. Some specialized software uses these
 | **Port 3** | Interactive | Custom application debug output |
 | **Port 4** | Interactive | Custom use, rarely needed |
 
+<div class="quiz-card">
+  <p class="quiz-q">A VM keeps kernel-panicking during boot. Which serial port do you check first to see why, and which one would you use to actually connect and fix it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Port 1 first — it's read-only output that includes the full kernel panic stack trace, along with everything else in the boot sequence up to that point. Port 2 is where you'd actually get a login shell to fix the root cause, but it's disabled by default and has to be enabled via the <code>serial-port-enable</code> metadata key before you can connect to it.</div>
+</div>
+
 ---
 
 ### Stream Serial Port Output to Cloud Logging
@@ -642,15 +905,25 @@ gcloud logging metrics create kernel-panic \
 
 ### SSH vs Serial Port — Decision Tree
 
-```
-VM is unresponsive / can't SSH
-         │
-         ▼
-   Check Serial Port 1 output first
-         │
-         ├── Kernel panic / OOM → fix the root cause (memory, disk)
-         ├── fsck running → wait or force-skip (risky)
-         ├── systemd unit failed → fix unit config via port 2
-         ├── sshd not started → connect via port 2, restart sshd
-         └── Network config broken → connect via port 2, fix /etc/network
+```mermaid
+graph TD
+    classDef start fill:#2c3e50,stroke:#1a252f,color:#fff,rx:6
+    classDef check fill:#2980b9,stroke:#1f618d,color:#fff,rx:6
+    classDef bad fill:#c0392b,stroke:#922b21,color:#fff,rx:6
+    classDef warn fill:#f39c12,stroke:#ba6018,color:#fff,rx:6
+    classDef fix fill:#27ae60,stroke:#1e8449,color:#fff,rx:6
+
+    START["VM is unresponsive / can't SSH"]:::start --> CHECK["Check Serial Port 1 output first<br/>read-only, no setup needed"]:::check
+
+    CHECK --> PANIC["Kernel panic / OOM"]:::bad
+    CHECK --> FSCK["fsck running"]:::warn
+    CHECK --> UNIT["systemd unit failed"]:::warn
+    CHECK --> SSHD["sshd not started"]:::warn
+    CHECK --> NET["Network config broken"]:::warn
+
+    PANIC --> FIXPANIC["Fix root cause:<br/>memory or disk issue"]:::fix
+    FSCK --> FIXFSCK["Wait, or force-skip<br/>(risky)"]:::warn
+    UNIT --> FIXUNIT["Connect via Port 2,<br/>fix unit config"]:::fix
+    SSHD --> FIXSSHD["Connect via Port 2,<br/>restart sshd"]:::fix
+    NET --> FIXNET["Connect via Port 2,<br/>fix /etc/network"]:::fix
 ```

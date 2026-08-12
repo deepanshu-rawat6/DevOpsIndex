@@ -1,5 +1,10 @@
 # GCP CI/CD — Cloud Build, Artifact Registry, Cloud Deploy
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## CI/CD Service Map
@@ -94,6 +99,12 @@ steps:
     args: ['echo', 'Deploying ${_SERVICE_NAME} to ${_DEPLOY_ENV}']
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">What's the difference between $SHORT_SHA and $COMMIT_SHA, and which one does the Build Config example above actually use to tag images?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>$SHORT_SHA is the first 7 characters of the git commit SHA; $COMMIT_SHA is the full SHA. The Build Config example tags images with $SHORT_SHA (<code>my-app:$SHORT_SHA</code>) — short enough to be a readable, still-unique-per-commit tag, whereas the full $COMMIT_SHA is used where exact traceability matters more than a tidy tag.</div>
+</div>
+
 ### Triggers
 
 ```bash
@@ -120,19 +131,28 @@ gcloud builds submit \
 
 ### Accessing Secrets in Build
 
-```yaml
-# Access Secret Manager secrets in Cloud Build
-steps:
+Two ways to get a Secret Manager value into a build step — pick one per step, not both.
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="inline-secret" class="active">Inline gcloud decode</button>
+    <button data-tab="avail-secret">availableSecrets block</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="inline-secret">
+      <p>Decode the secret inside a bash step and hand it to your own script. Works anywhere <code>gcloud</code> runs, but the plaintext exists as a shell variable for that step's whole lifetime.</p>
+      <pre><code>steps:
   - name: 'gcr.io/cloud-builders/gcloud'
     entrypoint: 'bash'
     args:
       - '-c'
       - |
           DB_PASSWORD=$$(gcloud secrets versions access latest --secret=db-password)
-          ./deploy.sh --password=$$DB_PASSWORD
-
-# Or use availableSecrets block (cleaner)
-availableSecrets:
+          ./deploy.sh --password=$$DB_PASSWORD</code></pre>
+    </div>
+    <div class="tab-panel" data-tab-panel="avail-secret">
+      <p>Declare the secret once in <code>availableSecrets</code>, then reference it by name in <code>secretEnv</code> on whichever step needs it. Cloud Build injects it as an environment variable scoped to just that step — no explicit <code>gcloud secrets versions access</code> call in your script.</p>
+      <pre><code>availableSecrets:
   secretManager:
     - versionName: projects/$PROJECT_ID/secrets/db-password/versions/latest
       env: 'DB_PASSWORD'
@@ -141,8 +161,10 @@ steps:
   - name: 'gcr.io/cloud-builders/gcloud'
     secretEnv: ['DB_PASSWORD']
     script: |
-      echo "Using password from Secret Manager: ${DB_PASSWORD:0:3}***"
-```
+      echo "Using password from Secret Manager: ${DB_PASSWORD:0:3}***"</code></pre>
+    </div>
+  </div>
+</div>
 
 ### Build Caching
 
@@ -163,6 +185,12 @@ steps:
     args: ['cp', '-r', '/root/.cache/pip', 'gs://my-build-cache/pip-cache.tar.gz']
     waitFor: ['-']    # run after all steps
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">Why does this pattern round-trip the pip cache through a GCS bucket instead of just relying on the previous build reusing the same machine's disk?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Cloud Build workers aren't guaranteed to be the same machine (or even the same container) from one build to the next, so nothing left on local disk after a build is reliably there for the next one. Persisting the cache to GCS and explicitly restoring it at the start of the next build is what makes a warm cache possible across otherwise-stateless build runs — the comment "Cache dependencies between builds using GCS" is doing real work, not just labeling.</div>
+</div>
 
 ### Cloud Build vs AWS CodeBuild
 
@@ -239,6 +267,12 @@ gcloud artifacts repositories set-cleanup-policies my-repo \
   ]'
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">This cleanup policy's condition is scoped to tagState: UNTAGGED. If an old image still carries a tag nobody uses anymore, will this policy delete it after 14 days?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. The condition only matches images with no tag at all, so any image that still has a tag — even a stale one nobody references — is left alone regardless of age. Cleaning up old tagged images needs a separate policy (or untagging them first, which typically happens automatically once a newer tag replaces them on push).</div>
+</div>
+
 ### Helm Charts in Artifact Registry
 
 ```bash
@@ -264,22 +298,48 @@ helm install my-release \
 Cloud Deploy = AWS CodeDeploy + CodePipeline. Manages delivery pipelines with stages (dev → staging → prod), approval gates, and built-in rollback.
 
 ```mermaid
-graph LR
+graph TD
     classDef gcp fill:#4285f4,stroke:#2a56c6,color:#fff,rx:8
     classDef green fill:#2ecc71,stroke:#27ae60,color:#fff,rx:8
-    classDef orange fill:#e67e22,stroke:#d35400,color:#fff,rx:8
+    classDef amber fill:#e67e22,stroke:#d35400,color:#fff,rx:8
+    classDef gate fill:#9b59b6,stroke:#71368a,color:#fff,rx:8
+    classDef red fill:#e74c3c,stroke:#c0392b,color:#fff,rx:8
 
-    BUILD["Cloud Build\n(produces image)"]:::gcp
-    REL["Cloud Deploy Release"]:::gcp
-    DEV["dev cluster\n(auto-deploy)"]:::green
-    STAGING["staging cluster\n(auto-deploy)"]:::orange
-    PROD["prod cluster\n(manual approval)"]:::orange
+    subgraph CI["Continuous Integration"]
+        BUILD["Cloud Build<br/>runs tests, builds image,<br/>pushes to Artifact Registry"]:::gcp
+        REL["gcloud deploy releases create<br/>new Cloud Deploy Release"]:::gcp
+        BUILD --> REL
+    end
 
-    BUILD -->|"create release"| REL
-    REL -->|"stage 1"| DEV
-    DEV -->|"promote"| STAGING
-    STAGING -->|"approve → promote"| PROD
+    subgraph PIPE["Cloud Deploy — Delivery Pipeline"]
+        DEV["dev target<br/>auto-deploy, no approval"]:::green
+        STAGING["staging target<br/>auto-deploy, no approval"]:::amber
+        GATE{"requireApproval: true<br/>rollout paused"}:::gate
+        PROD["production target<br/>canary 10% → 25% → 50% → 100%<br/>verify: true at each step"]:::red
+    end
+
+    REL -->|"stage 1: deploy"| DEV
+    DEV -->|"gcloud deploy releases promote"| STAGING
+    STAGING -->|"gcloud deploy releases promote"| GATE
+    GATE -->|"gcloud deploy rollouts approve"| PROD
 ```
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="dev" class="active state-ok">dev target</button>
+    <button data-toggle-opt="staging" class="state-warn">staging target</button>
+    <button data-toggle-opt="prod" class="state-bad">production target</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="dev">
+    Auto-deploys on every release with no gate at all — the fastest feedback loop, meant to catch build-level breakage right after a merge. No <code>requireApproval</code>, no canary strategy: the whole image rolls out at once.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="staging">
+    Also auto-deploys with no human click required — but only once explicitly promoted from dev via <code>gcloud deploy releases promote --to-target=staging</code>. A release can sit in dev indefinitely without ever reaching staging.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="prod">
+    The only target with <code>requireApproval: true</code>. Promotion creates the rollout, but it stays paused until <code>gcloud deploy rollouts approve</code> runs against that specific rollout ID. Once approved, it still doesn't jump to 100% — the <code>canary</code> strategy staggers it through 10% → 25% → 50%, with <code>verify: true</code> checking health at each step before continuing.
+  </div>
+</div>
 
 ### Delivery Pipeline Config
 
@@ -360,37 +420,83 @@ gcloud deploy rollouts rollback \
   --to-target=production
 ```
 
+### Canary Rollout With Approval Gates, Step by Step
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Create the release.</strong> <code>gcloud deploy releases create</code> registers a new release and immediately kicks off stage 1 — auto-deploy to the <code>dev</code> target. No approval needed here.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Promote to staging.</strong> Once dev looks healthy, <code>gcloud deploy releases promote --to-target=staging</code> triggers another unattended auto-deploy — same mechanics as dev, just a second environment.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Promote to production — and stop.</strong> Promoting to <code>production</code> creates a rollout, but because that Target has <code>requireApproval: true</code>, Cloud Deploy pauses it before anything reaches production traffic. Zero percent has moved.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Approve the gate.</strong> A human (or an automated check hitting the same API) runs <code>gcloud deploy rollouts approve my-app-pipeline-...-to-production-0001</code>. Nothing about promoting from staging approves production automatically — this is a separate, explicit action.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Canary ramps: 10% → 25% → 50%.</strong> Approval unpauses the rollout, which now walks the <code>canaryDeployment.percentages</code> list one step at a time. Because <code>verify: true</code>, each percentage's health is checked before the next jump — traffic never doubles onto an unverified step.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Full rollout, or rollback.</strong> If every canary step verifies clean, the rollout completes to 100%. If something regresses instead, <code>gcloud deploy rollouts rollback ... --to-target=production</code> reverts production to the previous release without touching dev or staging.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Only the production Target sets requireApproval: true — dev and staging don't. What actually changes about the rollout process for production versus the other two stages?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>For dev and staging, running <code>gcloud deploy releases promote</code> deploys immediately — no human involved. For production, promoting only creates the rollout; it stays paused until someone explicitly runs <code>gcloud deploy rollouts approve</code> against that specific rollout ID. Nothing reaches production traffic, not even the first canary percentage, until that manual gate clears.</div>
+</div>
+
 ---
 
 ## Full CI/CD Pipeline Pattern
 
+```mermaid
+graph TD
+    classDef trigger fill:#4285f4,stroke:#2a56c6,color:#fff,rx:8
+    classDef build fill:#34495e,stroke:#212f3c,color:#fff,rx:8
+    classDef green fill:#2ecc71,stroke:#27ae60,color:#fff,rx:8
+    classDef amber fill:#e67e22,stroke:#d35400,color:#fff,rx:8
+    classDef gate fill:#9b59b6,stroke:#71368a,color:#fff,rx:8
+    classDef red fill:#e74c3c,stroke:#c0392b,color:#fff,rx:8
+
+    PUSH["Developer pushes to main"]:::trigger --> TRIGGER["Cloud Build trigger fires"]:::trigger
+
+    subgraph CI["Cloud Build"]
+        TEST["Run tests<br/>pytest / go test / jest"]:::build
+        DOCKER["Build Docker image"]:::build
+        PUSHAR["Push to Artifact Registry"]:::build
+        SCAN["Run vulnerability scan"]:::build
+        RELEASE["Create Cloud Deploy release"]:::build
+        TEST --> DOCKER --> PUSHAR --> SCAN --> RELEASE
+    end
+
+    TRIGGER --> TEST
+
+    RELEASE --> DEV["Auto-deploy to dev<br/>smoke test / integration test"]:::green
+    DEV --> STAGING["Promote to staging<br/>manual QA or automated regression"]:::amber
+    STAGING --> APPROVAL{"Approval gate<br/>Jira ticket / PR approval"}:::gate
+    APPROVAL --> PROD["Deploy to production<br/>canary 10% → 25% → 50% → 100%"]:::red
+    PROD --> MONITOR{"Monitor error rate<br/>for 10 min"}:::gate
+    MONITOR -->|"healthy"| FULL["Full rollout complete"]:::green
+    MONITOR -->|"regression"| ROLLBACK["Automatic rollback"]:::red
 ```
-Developer pushes to main
-    │
-    ▼
-Cloud Build trigger fires
-    ├── Run tests (pytest / go test / jest)
-    ├── Build Docker image
-    ├── Push to Artifact Registry
-    ├── Run vulnerability scan
-    └── Create Cloud Deploy release
-         │
-         ▼
-    Auto-deploy to dev
-         │  (smoke test / integration test)
-         ▼
-    Promote to staging
-         │  (manual QA or automated regression)
-         ▼
-    Approval gate (Jira ticket / PR approval)
-         │
-         ▼
-    Deploy to production
-    (canary: 10% → 25% → 50% → 100%)
-         │  (monitor error rate for 10min)
-         ▼
-    Full rollout or automatic rollback
-```
+
+<div class="quiz-card">
+  <p class="quiz-q">The vulnerability scan step runs after "Push to Artifact Registry," not before it. What does that ordering mean the scan alone can and can't prevent?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Since the image is already sitting in Artifact Registry by the time the scan runs, the scan on its own can't stop a vulnerable image from being pushed — it can only stop it from going further, by failing the build (and skipping "Create Cloud Deploy release") when a critical CVE turns up. In other words: it can gate what gets *deployed*, not what gets *stored* in the registry.</div>
+</div>
 
 ---
 
@@ -440,3 +546,33 @@ jobs:
 ```
 
 **GCP Workload Identity Federation for GitHub Actions** = AWS OIDC provider in IAM. No service account keys in GitHub secrets.
+
+### Workload Identity Federation: The Token Exchange
+
+`permissions: id-token: write` and `google-github-actions/auth@v2` aren't just boilerplate — they drive an actual token exchange, not a stored credential:
+
+```mermaid
+sequenceDiagram
+    participant GH as GitHub Actions job
+    participant OIDC as GitHub OIDC provider
+    participant WIF as GCP Workload Identity Pool
+    participant SA as github-actions@ service account
+    participant API as GCP APIs — Artifact Registry, Cloud Run
+
+    Note over GH: workflow declares permissions, id-token: write
+    GH->>OIDC: request short-lived OIDC ID token for this run
+    OIDC-->>GH: signed JWT with repo, branch, run claims
+    GH->>WIF: present JWT to the configured workload identity provider
+    WIF->>WIF: verify JWT signature and attribute-condition mapping
+    WIF-->>GH: exchange for short-lived federated GCP token
+    GH->>SA: impersonate service account using federated token
+    SA-->>GH: short-lived GCP access token
+    GH->>API: call gcloud / docker push using that access token
+    Note over GH,API: no long-lived service account key ever stored in GitHub secrets
+```
+
+<div class="quiz-card">
+  <p class="quiz-q">Why does the workflow need permissions: id-token: write at all — what does that token actually get used for?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It lets the job request a short-lived OIDC ID token from GitHub's own token issuer, scoped to that specific workflow run. google-github-actions/auth then exchanges that token with GCP's Workload Identity Federation for a short-lived GCP access token tied to the configured service account. The point of the whole exchange is exactly the comment on that permissions line: no long-lived service account JSON key ever has to sit in GitHub secrets waiting to be leaked.</div>
+</div>
