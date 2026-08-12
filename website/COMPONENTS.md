@@ -151,6 +151,14 @@ reflow, don't highlight, and read worse on mobile — convert them to Mermaid
 than a couple of boxes and arrows. Keep ASCII only for genuinely
 character-grid content (byte layouts, terminal output).
 
+**Never put a literal `;` inside a sequenceDiagram message or Note.** Mermaid's
+sequence-diagram grammar treats `;` as a statement separator (it's how you
+chain multiple arrows on one line), not as literal text — so
+`A->>B: BEGIN; UPDATE x; COMMIT;` fails to parse ("Syntax error in text") the
+moment it hits the first semicolon, because whatever follows isn't a new
+valid arrow statement. This bites SQL-transaction examples especially often.
+Rewrite with commas or `then` instead: `A->>B: BEGIN, UPDATE x, COMMIT`.
+
 `scripts/sync-content.js`'s `fixMermaid()` auto-patches a few v11
 incompatibilities (`<br>` → `<br/>`, bare `{}`/`[]` labels containing special
 chars get quoted, `rx:` stripped from `classDef`) — write normal Mermaid and
