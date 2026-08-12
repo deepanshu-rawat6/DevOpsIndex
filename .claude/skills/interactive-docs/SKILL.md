@@ -66,6 +66,10 @@ into every file:
    failure/error state, similar node-naming to what's already in the file).
    Leave genuinely character-grid content (byte layouts, terminal output,
    numeric traces) as plain fences — that's COMPONENTS.md's stated exception.
+   **Never write a literal `;` inside a sequenceDiagram message or Note** —
+   Mermaid treats it as a statement separator, not text, and a SQL example
+   like `BEGIN; UPDATE x; COMMIT;` inside an arrow message will fail to parse.
+   Use commas instead.
 6. **Never remove** existing explanatory prose or already-good existing
    Mermaid diagrams. This skill adds interactivity and upgrades diagrams; it
    does not shorten a guide or change its voice.
