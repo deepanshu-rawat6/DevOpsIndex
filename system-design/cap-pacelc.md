@@ -1,5 +1,12 @@
 # CAP Theorem, PACELC, and Distributed System Tradeoffs
 
+A field guide to the tradeoffs every distributed system makes — during a network partition, and even when nothing is broken. What you give up, when, and why the "right" answer depends entirely on what a stale read actually costs you.
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## 1. CAP Theorem
@@ -18,30 +25,61 @@ So the real tradeoff is:
 - **CP**: When partitioned, reject requests to guarantee consistency (return error or block)
 - **AP**: When partitioned, serve potentially stale data to guarantee availability
 
+<div class="quiz-card">
+  <p class="quiz-q">CAP says you pick 2 of 3 properties. Why, in practice, do engineers really only choose between C and A?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Because Partition Tolerance isn't optional — networks fail regardless of what you'd prefer, and any distributed system deployed across nodes will experience partitions. You can't "choose" P away, so the only real decision is what happens to a request <em>when</em> a partition occurs: reject it to stay correct (CP), or answer it with possibly stale data to stay available (AP).</div>
+</div>
+
 ---
 
 ## 2. Network Partition: CP vs AP Behavior
 
 ```mermaid
 graph TD
-    Client -->|write x=5| N1[Node_1_Primary]
-    N1 -->|replicate| N2[Node_2_Replica]
-    N1 -.->|PARTITION| N3[Node_3_Replica]
+    classDef primary fill:#2980b9,stroke:#1f618d,color:#fff,rx:6
+    classDef replica fill:#7f8c8d,stroke:#616a6b,color:#fff,rx:6
+    classDef cut fill:#e74c3c,stroke:#c0392b,color:#fff,rx:6
+    classDef cpResult fill:#c0392b,stroke:#922b21,color:#fff,rx:6
+    classDef apResult fill:#e67e22,stroke:#ba6018,color:#fff,rx:6
 
-    subgraph CP_behavior[CP System behavior during partition]
-        N1 -->|read request| R1[returns x=5 or ERROR]
-        N3 -->|read request| R2[returns ERROR cannot guarantee fresh data]
+    CLIENT["Client"] -->|"write x=5"| N1["Node 1 — Primary<br/>holds x=5"]:::primary
+    N1 -->|"replicate x=5"| N2["Node 2 — Replica<br/>in sync, holds x=5"]:::replica
+    N1 -.->|"NETWORK PARTITION<br/>replication link down"| N3["Node 3 — Replica<br/>cut off, still holds x=0"]:::cut
+
+    subgraph CP["CP system — during the partition"]
+        N3 -->|"read request"| CPR["Refuses to answer<br/>returns ERROR — can't guarantee freshness"]:::cpResult
     end
 
-    subgraph AP_behavior[AP System behavior during partition]
-        N1 -->|read request| R3[returns x=5 fresh]
-        N3 -->|read request| R4[returns x=0 stale but available]
+    subgraph AP["AP system — during the partition"]
+        N3 -->|"read request"| APR["Answers anyway<br/>returns x=0, stale but available"]:::apResult
     end
 ```
 
 **CP** (ZooKeeper, etcd): Node 3 refuses to serve reads — it may be out of sync. Client gets an error.
 
 **AP** (Cassandra, DynamoDB): Node 3 serves stale data. Client gets a response, possibly wrong.
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="cp" class="active">CP — reject to stay correct</button>
+    <button data-toggle-opt="ap">AP — answer to stay available</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="cp">
+    <p>Node 3 is cut off from the primary and knows it might be stale. Rather than guess, it refuses the request — the client gets an error, or the request blocks until quorum is restored. <strong>Examples:</strong> ZooKeeper, etcd, Kafka when <code>min.insync.replicas</code> can't be met.</p>
+    <p>The system is betting that a wrong answer is worse than no answer. Once the partition heals, the isolated node simply catches up via normal replication — it never accepted any writes while cut off, so there's nothing to reconcile.</p>
+  </div>
+  <div class="toggle-panel" data-toggle-panel="ap">
+    <p>Node 3 keeps serving — it returns <code>x=0</code>, stale but a real response. <strong>Examples:</strong> Cassandra, DynamoDB.</p>
+    <p>The system is betting that a possibly-wrong answer beats none. Once the partition heals, the diverged replicas must reconcile — read repair, anti-entropy, hinted handoff, or a vector-clock/version-vector merge (see Section 9) — because Node 3 may have accepted writes the primary never saw.</p>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">During the partition, what does the cut-off node (Node 3) actually return in an AP system versus a CP system?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>AP: Node 3 still answers — it returns <code>x=0</code>, stale but a real response, because being available matters more than being right. CP: Node 3 refuses to answer at all and returns an error, because it can't guarantee its data is fresh and won't risk serving (or accepting) something wrong.</div>
+</div>
 
 ---
 
@@ -58,39 +96,64 @@ graph TD
 | **Kafka** | CP | Strong within partition (ISR) | Unavailable if leader + ISR lost | `min.insync.replicas` governs the tradeoff |
 | **MongoDB** | CP (default) | Strong on primary (w:majority) | Secondary reads = eventual | Read preference + write concern are tunable |
 
+<div class="quiz-card">
+  <p class="quiz-q">According to the classification table, is Kafka CP or AP, and what setting governs that tradeoff?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Kafka is CP — strong consistency within a partition via the in-sync replica set (ISR), but it becomes unavailable if the leader and enough ISR replicas are lost. <code>min.insync.replicas</code> is the knob: it sets how many replicas (including the leader) must be in the ISR for a write to be accepted at all.</div>
+</div>
+
 ---
 
 ## 4. Consistency Models Spectrum
 
 From strongest to weakest:
 
+```mermaid
+graph LR
+    classDef strong fill:#c0392b,stroke:#922b21,color:#fff,rx:6
+    classDef high fill:#e67e22,stroke:#ba6018,color:#fff,rx:6
+    classDef medium fill:#f1c40f,stroke:#b7950b,color:#000,rx:6
+    classDef weak fill:#27ae60,stroke:#1e8449,color:#fff,rx:6
+
+    LIN["Linearizable<br/>strongest — real-time global order"]:::strong --> SEQ["Sequential<br/>one shared order, no wall-clock guarantee"]:::high --> CAU["Causal<br/>only causally-related ops ordered"]:::medium --> EVT["Eventual<br/>weakest — converges given enough time"]:::weak
 ```
-Linearizability > Sequential > Causal > Eventual
-```
 
-### Linearizability (Strong)
-All operations appear instantaneous; reads always reflect the latest write globally.
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="linearizable" class="active">Linearizable</button>
+    <button data-tab="sequential">Sequential</button>
+    <button data-tab="causal">Causal</button>
+    <button data-tab="eventual">Eventual</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="linearizable">
+      <p><strong>Strongest model.</strong> All operations appear instantaneous; reads always reflect the latest write globally.</p>
+      <p><strong>Example:</strong> etcd reads. After a leader writes, any subsequent read anywhere returns that value.</p>
+      <p><strong>Cost:</strong> High latency — requires cross-node coordination.</p>
+    </div>
+    <div class="tab-panel" data-tab-panel="sequential">
+      <p>All nodes see operations in the same order, but not necessarily in real time.</p>
+      <p><strong>Example:</strong> A multi-player game where all clients see moves in the same sequence, but with some lag.</p>
+      <p><strong>Cost:</strong> Weaker than linearizability; no wall-clock guarantee, only a shared ordering.</p>
+    </div>
+    <div class="tab-panel" data-tab-panel="causal">
+      <p>Operations that are causally related (A happens before B) are seen in that order by all nodes. Concurrent operations may be seen in different orders on different nodes.</p>
+      <p><strong>Example:</strong> "Reply to a post" must appear after the original post. MongoDB with causal sessions.</p>
+      <p><strong>Cost:</strong> Lower than sequential; only tracks causally linked operations, everything else is unconstrained.</p>
+    </div>
+    <div class="tab-panel" data-tab-panel="eventual">
+      <p><strong>Weakest model.</strong> If no new updates, all replicas will converge to the same value — eventually.</p>
+      <p><strong>Example:</strong> DynamoDB default reads, Cassandra default, DNS propagation, S3 read-after-write on different regions.</p>
+      <p><strong>Cost:</strong> Reads may be stale; conflicts possible.</p>
+    </div>
+  </div>
+</div>
 
-- **Example:** etcd reads. After a leader writes, any subsequent read anywhere returns that value.
-- **Cost:** High latency (requires cross-node coordination).
-
-### Sequential Consistency
-All nodes see operations in the same order, but not necessarily real-time.
-
-- **Example:** A multi-player game where all clients see moves in the same sequence, but with some lag.
-- **Cost:** Weaker than linearizability; no wall-clock guarantee.
-
-### Causal Consistency
-Operations that are causally related (A happens before B) are seen in that order by all nodes. Concurrent operations may be seen in different orders.
-
-- **Example:** "Reply to a post" must appear after the original post. MongoDB with causal sessions.
-- **Cost:** Lower than sequential; only tracks causally linked operations.
-
-### Eventual Consistency
-If no new updates, all replicas will converge to the same value — eventually.
-
-- **Example:** DynamoDB default reads, Cassandra default, DNS propagation, S3 read-after-write on different regions.
-- **Cost:** Reads may be stale; conflicts possible.
+<div class="quiz-card">
+  <p class="quiz-q">What actually distinguishes causal consistency from sequential consistency?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Sequential consistency requires <em>every</em> node to agree on one global order for <em>all</em> operations, related or not. Causal consistency only orders operations that are causally related (like a reply appearing after its original post) — concurrent, unrelated operations can be seen in a different order on different nodes. Causal is the weaker, cheaper guarantee.</div>
+</div>
 
 ---
 
@@ -114,6 +177,27 @@ Even without failures, replicating synchronously costs latency.
 | **Spanner** | PC | EC | TrueTime-based global linearizability; latency is a known cost |
 | **Riak** | PA | EL | Designed for AP; vector clocks for conflict resolution |
 
+```mermaid
+graph TD
+    classDef question fill:#34495e,stroke:#212f3c,color:#fff,rx:6
+    classDef cpath fill:#c0392b,stroke:#922b21,color:#fff,rx:6
+    classDef apath fill:#e67e22,stroke:#ba6018,color:#fff,rx:6
+
+    START{"Is the system<br/>currently partitioned?"}:::question
+    START -->|"Yes"| PICKAC{"Pick: Availability<br/>or Consistency?"}:::question
+    START -->|"No — normal operation"| PICKLC{"Pick: Latency<br/>or Consistency?"}:::question
+    PICKAC -->|"Choose A"| PA["PA — serve stale data,<br/>stay available (Cassandra, DynamoDB)"]:::apath
+    PICKAC -->|"Choose C"| PC["PC — refuse requests,<br/>stay correct (ZooKeeper, etcd)"]:::cpath
+    PICKLC -->|"Choose L"| EL["EL — respond fast,<br/>replicate asynchronously (Cassandra, DynamoDB)"]:::apath
+    PICKLC -->|"Choose C"| EC["EC — wait for sync replication,<br/>pay the latency (ZooKeeper, etcd, Spanner)"]:::cpath
+```
+
+<div class="quiz-card">
+  <p class="quiz-q">Does the PACELC latency-vs-consistency tradeoff only kick in during a network partition?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — that's the entire point of PACELC extending CAP. CAP only describes behavior during a partition. PACELC adds the "Else" branch: even during totally normal operation with no partition at all, synchronous replication for consistency still costs latency (E → L or C). A system like Spanner or a PostgreSQL synchronous standby pays that latency tax on every write, partition or not.</div>
+</div>
+
 ---
 
 ## 6. Consistency vs Availability Tradeoffs in Practice
@@ -128,13 +212,26 @@ At 100k req/s: eventually consistent = 2x throughput capacity
 DynamoDB's default eventual consistency means your shopping cart may show a stale item count — acceptable. A banking balance cannot use this.
 
 ### ZooKeeper: CP costs availability
+
+```mermaid
+graph TD
+    classDef healthy fill:#27ae60,stroke:#1e8449,color:#fff,rx:6
+    classDef degraded fill:#f39c12,stroke:#ba6018,color:#fff,rx:6
+    classDef down fill:#e74c3c,stroke:#c0392b,color:#fff,rx:6
+
+    A["All 3 nodes healthy<br/>quorum = 3/3<br/>leader serves reads + writes ✓"]:::healthy -->|"1 node fails"| B["1 node down<br/>quorum intact = 2/3<br/>still fully operational ✓"]:::degraded
+    B -->|"2nd node fails"| C["2 nodes down<br/>quorum lost = 1/3<br/>ALL reads + writes REFUSED ✗"]:::down
+    B -->|"failed node recovers"| A
+    C -->|"a node recovers"| B
 ```
-3-node ZooKeeper cluster:
-- All 3 healthy: leader serves reads/writes ✓
-- 1 node down: quorum intact (2/3), still operational ✓
-- 2 nodes down: quorum lost → ALL reads/writes REFUSED ✗
-```
+
 ZooKeeper refuses to serve rather than risk inconsistency. This is correct for distributed locking and leader election — a stale lock is worse than no lock.
+
+<div class="quiz-card">
+  <p class="quiz-q">In a 3-node ZooKeeper cluster, what happens the moment a second node goes down?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Quorum drops to 1/3, which is a minority — so ALL reads and writes are refused across the entire cluster, not just degraded. ZooKeeper would rather be completely unavailable than risk serving or accepting data without majority agreement, because for its use case (distributed locking, leader election) a stale lock is worse than no lock at all.</div>
+</div>
 
 ---
 
@@ -192,9 +289,38 @@ This guarantees at least one node in the read set saw the latest write.
 | 5 | 2 | 2 | 4 < 5 | **Eventual** |
 | 5 | 1 | 5 | 6 > 5 | **Strong** — reads scan everything, very slow |
 
+```mermaid
+graph TD
+    classDef write fill:#e67e22,stroke:#ba6018,color:#fff,rx:6
+    classDef read fill:#3498db,stroke:#2471a3,color:#fff,rx:6
+    classDef overlap fill:#27ae60,stroke:#1e8449,color:#fff,rx:6
+    classDef idle fill:#7f8c8d,stroke:#616a6b,color:#fff,rx:6
+
+    subgraph CLUSTER["3-node cluster — W=2 write acks, R=2 read replicas (W+R=4, N=3: overlap guaranteed)"]
+        N1["Node 1<br/>acked the write, has latest value"]:::overlap
+        N2["Node 2<br/>acked the write, has latest value"]:::write
+        N3["Node 3<br/>never received the write, stale"]:::idle
+    end
+
+    WSET["Write set (W=2)<br/>Node 1 + Node 2"]:::write
+    RSET["Read set (R=2)<br/>Node 1 + Node 3"]:::read
+
+    N1 --> WSET
+    N2 --> WSET
+    N1 --> RSET
+    N3 --> RSET
+    WSET -.->|"shared member: Node 1 —<br/>the read set always includes<br/>at least one node from the write set"| RSET
+```
+
 **Availability tradeoff:** Higher W = slower writes (more nodes must respond). Higher R = slower reads. Tune based on whether reads or writes are on the hot path.
 
 **Fault tolerance:** With W+R>N and N=3, W=2, R=2 → you can lose **1 node** and still have quorum. With N=5, W=3, R=3 → tolerate **2 node failures**.
+
+<div class="quiz-card">
+  <p class="quiz-q">For N=3 with W=1, R=1, is this configuration strongly consistent?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. W+R = 2, which is not greater than N = 3, so there's no guaranteed overlap between the node that received the write and the node a later read hits. A read can land on a replica that never got the latest write — this is the eventual-consistency row in the quorum table, not the strong one.</div>
+</div>
 
 ---
 
@@ -207,13 +333,31 @@ Each node maintains a counter per node. On every event:
 - Increment own counter
 - Merge (take max) on receive
 
-```
-Node A:  [A:1, B:0, C:0]  →  write x=5
-Node B:  [A:0, B:1, C:0]  →  write x=9 (concurrent with A's write)
-
-A sends to C: C sees [A:1, B:0, C:0]
-B sends to C: C sees [A:0, B:1, C:0]
-```
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Identical starting state.</strong> Node A, Node B, and Node C each hold the same vector clock <code>[A:0, B:0, C:0]</code> — one counter per node, all zeroed.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Node A writes.</strong> A increments its own counter and writes <code>x=5</code>. Its clock becomes <code>[A:1, B:0, C:0]</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Node B writes concurrently.</strong> Without having seen A's write, B increments its own counter and writes <code>x=9</code>. Its clock becomes <code>[A:0, B:1, C:0]</code> — a different write, from a different starting point, at roughly the same time.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Both replicate to Node C.</strong> A sends its update: C sees <code>[A:1, B:0, C:0]</code>. B sends its update: C sees <code>[A:0, B:1, C:0]</code>. Neither vector clock is a superset of the other.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Conflict detected.</strong> C cannot tell which write "happened first" — the two clocks are causally concurrent, not ordered. The system must reconcile: last-write-wins, keep both as siblings, merge, or surface the conflict to the application.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 C cannot determine which write happened first → **conflict detected**. System must reconcile (last-write-wins, merge, or surface to application).
 
@@ -232,6 +376,12 @@ C cannot determine which write happened first → **conflict detected**. System 
 
 DynamoDB uses version vectors internally. Cassandra uses timestamps (LWW), not vector clocks — simpler but can lose data on concurrent writes.
 
+<div class="quiz-card">
+  <p class="quiz-q">Nodes A and B each write concurrently, then both replicate to Node C. Can C tell which write happened first just by comparing the vector clocks?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. <code>[A:1, B:0, C:0]</code> and <code>[A:0, B:1, C:0]</code> — neither is a superset of the other, so they're causally concurrent, not ordered. C detects a conflict and must reconcile it with a strategy (last-write-wins, multi-value siblings, application merge, CRDTs), it cannot derive a "first" write from the clocks alone.</div>
+</div>
+
 ---
 
 ## 10. Practical Guidance: CP vs AP by Use Case
@@ -246,19 +396,36 @@ DynamoDB uses version vectors internally. Cassandra uses timestamps (LWW), not v
 
 ### Decision Framework
 
-```
-Is stale data dangerous (security, money, inventory)?
-  YES → CP. Accept availability degradation on partition.
-  NO  → AP. Accept stale reads for higher availability.
+```mermaid
+graph TD
+    classDef question fill:#34495e,stroke:#212f3c,color:#fff,rx:6
+    classDef cp fill:#c0392b,stroke:#922b21,color:#fff,rx:6
+    classDef ap fill:#e67e22,stroke:#ba6018,color:#fff,rx:6
 
-Is the operation idempotent and retryable?
-  YES → AP is safer (client can retry on stale read).
-  NO  → CP required (double-charge, double-deduction).
+    subgraph H1["Heuristic 1 — blast radius of a stale read"]
+        Q1{"Is stale data dangerous?<br/>security, money, inventory"}:::question
+        Q1 -->|"Yes"| CP1["CP — accept availability<br/>degradation on partition"]:::cp
+        Q1 -->|"No"| AP1["AP — accept stale reads<br/>for higher availability"]:::ap
+    end
 
-Is low latency more important than perfect accuracy?
-  YES → AP + eventual consistency (feeds, analytics, caches).
-  NO  → CP (financial records, auth tokens, distributed locks).
+    subgraph H2["Heuristic 2 — can the caller just retry?"]
+        Q2{"Is the operation idempotent<br/>and safely retryable?"}:::question
+        Q2 -->|"Yes"| AP2["AP is safer —<br/>client retries on a stale read"]:::ap
+        Q2 -->|"No"| CP2["CP required —<br/>a retry could double-charge/deduct"]:::cp
+    end
+
+    subgraph H3["Heuristic 3 — latency vs. accuracy"]
+        Q3{"Is low latency more important<br/>than perfect accuracy?"}:::question
+        Q3 -->|"Yes"| AP3["AP + eventual consistency —<br/>feeds, analytics, caches"]:::ap
+        Q3 -->|"No"| CP3["CP —<br/>financial records, auth tokens, locks"]:::cp
+    end
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">Why is a shopping cart a good fit for AP while inventory count is not, even though both are "commerce" data?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Losing an item add to a cart (a stale merge) is a minor, recoverable UX issue — union/merge logic can fix it, so AP's availability wins. But a wrong inventory count can cause overselling, a real business/financial problem — so it needs CP's exact counts and transactions (Postgres, DynamoDB transactions, or Cassandra lightweight transactions).</div>
+</div>
 
 ---
 
