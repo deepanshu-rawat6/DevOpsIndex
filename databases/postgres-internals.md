@@ -231,7 +231,7 @@ sequenceDiagram
     participant WAL_RECV as WAL Receiver (replica)
     participant REP as Replica (postgres-1)
 
-    APP->>PRI: BEGIN; UPDATE orders SET status='paid'; COMMIT;
+    APP->>PRI: BEGIN, UPDATE orders SET status='paid', COMMIT
     PRI->>PRI: Write WAL record to WAL buffer
     PRI->>PRI: Flush WAL to disk (always, for durability)
 
