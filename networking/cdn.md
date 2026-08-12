@@ -2,6 +2,11 @@
 
 Edge caching, routing, security, and deep dives into CloudFront, Cloudflare, and GCP CDN.
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## 1. What is a CDN
@@ -17,24 +22,90 @@ A CDN is a geographically distributed network of **Points of Presence (PoPs)** t
 
 Cache hit rate directly determines how much traffic the origin absorbs. A 95% hit rate means origin sees only 5% of requests.
 
+<div class="quiz-card">
+  <p class="quiz-q">A CDN reports a 98% cache hit rate. Roughly what percentage of total requests does the origin actually have to handle?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>About 2%. Hit rate and origin load are complements — whatever fraction of requests is <em>not</em> satisfied from a cache tier is exactly the fraction that reaches the origin. A 98% hit rate means only ~2% of requests ever hit the origin server directly, which is why raising hit rate even a little has an outsized effect on origin capacity planning.</div>
+</div>
+
 ---
 
 ## 2. Request Flow Diagram
 
 ```mermaid
 flowchart LR
-    U[User] --> E[Edge_PoP]
-    E -- Cache_HIT --> U
-    E -- Cache_MISS --> R[Regional_Cache]
-    R -- Cache_HIT --> E
-    R -- Cache_MISS --> OS[Origin_Shield]
-    OS -- Cache_HIT --> R
-    OS -- Cache_MISS --> O[Origin]
-    O --> OS --> R --> E --> U
+    classDef user fill:#34495e,stroke:#212f3c,color:#fff,rx:6
+    classDef edge fill:#3498db,stroke:#2471a3,color:#fff,rx:6
+    classDef regional fill:#8e44ad,stroke:#6c3483,color:#fff,rx:6
+    classDef shield fill:#e67e22,stroke:#ba6018,color:#fff,rx:6
+    classDef origin fill:#c0392b,stroke:#922b21,color:#fff,rx:6
+
+    U["User<br/>browser / mobile client"]:::user
+
+    subgraph TIER1["L1 — Edge PoP (city-level, 100s of locations)"]
+        E["Edge cache<br/>key = scheme + host + path (+ query)"]:::edge
+    end
+    subgraph TIER2["L2 — Regional cache (continent-level, 10-30 nodes)"]
+        R["Regional cache<br/>aggregates many edge PoPs"]:::regional
+    end
+    subgraph TIER3["Origin Shield (single PoP per region)"]
+        OS["Origin shield<br/>coalesces concurrent misses into one request"]:::shield
+    end
+    subgraph TIER4["Origin"]
+        O["Origin server<br/>S3 / ALB / custom HTTP"]:::origin
+    end
+
+    U -->|"GET request"| E
+    E -->|"HIT, served in sub-ms"| U
+    E -.->|"MISS"| R
+    R -->|"HIT, populate edge then serve"| E
+    R -.->|"MISS"| OS
+    OS -->|"HIT, populate regional then serve"| R
+    OS -.->|"MISS, first request for object"| O
+    O -->|"200 OK plus Cache-Control"| OS
+    OS -->|"populate shield, regional, and edge caches"| R
+    R --> E --> U
 ```
 
-**HIT path:** User → Edge PoP → response (sub-ms from nearby PoP)  
+**HIT path:** User → Edge PoP → response (sub-ms from nearby PoP)
 **MISS path:** User → Edge → Regional → Origin Shield → Origin → full round trip
+
+The walkthrough below breaks the miss path into discrete steps — useful for seeing exactly where population happens on the way back down, versus where the lookup happens on the way up.
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Request hits the edge.</strong> The user's request lands at the nearest edge PoP via GeoDNS or anycast routing. The edge computes the cache key (scheme + host + path, plus any headers named in <code>Vary</code>) and checks its local store.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Cache miss, walk up the hierarchy.</strong> The key isn't in the edge PoP. Instead of the edge PoP hitting the origin directly, the request climbs one tier at a time: edge → regional cache → origin shield, each tier checking its own copy before going further.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Origin fetch, coalesced.</strong> Only the origin shield actually talks to the origin — and only once per object, even if hundreds of edge PoPs missed on it at the same instant. Concurrent identical requests queue behind the first; nobody duplicates the origin call.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Origin responds with cache directives.</strong> The origin returns the object plus <code>Cache-Control</code> (or equivalent) headers that tell every tier how long it's allowed to keep this object before checking again.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Populate on the way back down.</strong> The response is stored at the origin shield, then the regional cache, then the edge PoP — each tier keeping its own copy so the next request for the same object is satisfied without climbing all the way back up.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Serve, then go quiet.</strong> The edge returns the response to the original user. Every subsequent request for that object from that PoP is now a cache hit — until the TTL expires or someone purges it.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">On a cache HIT at the edge PoP, does the request ever reach the regional cache or the origin?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. A HIT at any tier stops right there and returns to the user immediately — the request only continues upward (edge → regional → origin shield → origin) when each tier in turn reports a MISS. The higher tiers exist purely to absorb the misses that lower tiers can't satisfy on their own.</div>
+</div>
 
 ---
 
@@ -54,27 +125,64 @@ Multiple PoPs advertise the **same IP prefix** into BGP. The internet routes pac
 
 ```mermaid
 flowchart TD
-    U1[User_Asia] --> P1[PoP_Singapore_1.2.3.4]
-    U2[User_EU] --> P2[PoP_Frankfurt_1.2.3.4]
-    U3[User_US] --> P3[PoP_Virginia_1.2.3.4]
-    P1 & P2 & P3 --> O[Origin]
+    classDef user fill:#34495e,stroke:#212f3c,color:#fff,rx:6
+    classDef pop fill:#3498db,stroke:#2471a3,color:#fff,rx:6
+    classDef origin fill:#c0392b,stroke:#922b21,color:#fff,rx:6
+
+    subgraph ANYCAST["Same anycast prefix 1.2.3.4 announced from every PoP"]
+        P1["PoP: Singapore<br/>advertises 1.2.3.4"]:::pop
+        P2["PoP: Frankfurt<br/>advertises 1.2.3.4"]:::pop
+        P3["PoP: Virginia<br/>advertises 1.2.3.4"]:::pop
+    end
+
+    U1["User in Asia"]:::user -->|"shortest AS path"| P1
+    U2["User in Europe"]:::user -->|"shortest AS path"| P2
+    U3["User in North America"]:::user -->|"shortest AS path"| P3
+    P1 & P2 & P3 -.->|"only on cache miss"| O["Origin"]:::origin
 ```
 
 Same IP `1.2.3.4` announced from all PoPs — BGP picks the shortest AS path.
+
+<div class="quiz-card">
+  <p class="quiz-q">GeoDNS and BGP Anycast both route users to the nearest PoP — what's the actual mechanism difference between them?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>GeoDNS decides at the DNS resolution step: the authoritative DNS server looks at the resolver's IP and hands back a <em>different</em> PoP IP address depending on location, so the routing decision happens once, before any packet is even sent to the CDN. BGP Anycast instead gives every PoP the <em>same</em> IP address — each one advertises the identical prefix into BGP, and ordinary internet routing (shortest AS path) delivers the packet to whichever PoP is topologically closest, with no DNS-level decision involved at all.</div>
+</div>
 
 ---
 
 ## 4. Cache Hierarchy
 
-```
-User
- └── L1 Edge PoP          (city-level, ~300+ PoPs globally)
-      └── L2 Regional     (continent-level, 10–30 nodes)
-           └── Origin Shield  (single PoP per region, collapses misses)
-                └── Origin
+```mermaid
+flowchart TD
+    classDef user fill:#34495e,stroke:#212f3c,color:#fff,rx:6
+    classDef l1 fill:#3498db,stroke:#2471a3,color:#fff,rx:6
+    classDef l2 fill:#8e44ad,stroke:#6c3483,color:#fff,rx:6
+    classDef shield fill:#e67e22,stroke:#ba6018,color:#fff,rx:6
+    classDef origin fill:#c0392b,stroke:#922b21,color:#fff,rx:6
+
+    U["User"]:::user --> L1
+
+    subgraph L1TIER["L1 — Edge PoP"]
+        L1["~300+ PoPs globally<br/>city-level, closest cache to the user"]:::l1
+    end
+    subgraph L2TIER["L2 — Regional cache"]
+        L2["10-30 nodes<br/>continent-level, aggregates many edge PoPs"]:::l2
+    end
+    subgraph SHIELDTIER["Origin Shield"]
+        SH["1 PoP per region<br/>collapses concurrent misses into one origin request"]:::shield
+    end
+
+    L1 -->|"miss"| L2 -->|"miss"| SH -->|"miss"| O["Origin"]:::origin
 ```
 
 **Origin shield** is critical for reducing origin load. Without it, a cache miss at 100 edge PoPs = 100 origin requests for the same object. With shield: 100 edge misses → 1 regional miss → 1 origin request (request coalescing).
+
+<div class="quiz-card">
+  <p class="quiz-q">Is there one single origin shield PoP for the entire CDN, or one per region?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>One per region. "A single PoP as a gate in front of origin" means each region's traffic funnels through that region's own shield PoP, not that the whole global CDN shares one shield. That's still enough to collapse, say, 100 edge misses in a region down to a single origin request for that region — it just isn't a single global chokepoint.</div>
+</div>
 
 ---
 
@@ -112,6 +220,12 @@ proxy_ignore_headers Set-Cookie;
 proxy_hide_header Set-Cookie;
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">Why does adding <code>Vary: Cookie</code> to a public, cacheable response usually kill your hit rate instead of improving anything?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>Vary: Cookie</code> tells the CDN to treat every distinct Cookie header value as a separate cache key. Since almost every visitor carries a different session or tracking cookie, each one effectively gets its own private cache entry instead of sharing one — the object is stored once per user rather than once for everyone, so the hit rate collapses toward zero.</div>
+</div>
+
 ---
 
 ## 6. Cache-Control Headers
@@ -139,12 +253,29 @@ Cache-Control: public, s-maxage=86400, stale-while-revalidate=3600, stale-if-err
 ### Revalidation flow
 ```mermaid
 sequenceDiagram
-    participant C as CDN_Edge
+    participant U as User
+    participant C as CDN Edge
     participant O as Origin
-    C->>O: GET /file.js If-None-Match: "abc123"
-    O-->>C: 304 Not Modified
-    Note over C: Resets TTL, keeps cached content
+
+    U->>C: GET /file.js
+    Note over C: Cached copy found, but s-maxage has expired
+    C->>O: GET /file.js with If-None-Match abc123
+    alt Content unchanged
+        O-->>C: 304 Not Modified
+        Note over C: Resets TTL, keeps existing cached bytes, no body re-sent
+        C-->>U: 200 OK, served from the still-cached copy
+    else Content changed
+        O-->>C: 200 OK, new body, new ETag def456
+        Note over C: Replaces cached object, stores the new ETag
+        C-->>U: 200 OK, new content
+    end
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q"><code>stale-while-revalidate</code> and <code>stale-if-error</code> both let the CDN serve a stale copy — what's the difference in when each one kicks in?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>stale-while-revalidate</code> fires on an ordinary TTL expiry: the CDN serves the stale copy immediately while it fetches a fresh one in the background, purely to hide revalidation latency from the user. <code>stale-if-error</code> only fires when the origin actually errors (5xx) during that revalidation attempt — it's a resilience fallback for origin failure, not a way to make routine revalidation feel instant.</div>
+</div>
 
 ---
 
@@ -155,9 +286,18 @@ TLS is terminated at the edge PoP, not at origin. This means:
 - Handshake happens close to the user (low RTT)
 - Origin connection can be HTTP or TLS (origin pull)
 
-```
-User ──TLS──► Edge PoP ──HTTP/TLS──► Origin
-        (terminated here)
+```mermaid
+sequenceDiagram
+    participant U as User
+    participant E as Edge PoP
+    participant O as Origin
+
+    U->>E: TLS ClientHello, low RTT to a nearby PoP
+    E-->>U: TLS handshake completes here
+    Note over U,E: TLS is terminated at the edge, not at origin
+    E->>O: Plain HTTP or a separate TLS session, origin pull
+    O-->>E: Response
+    E-->>U: Response sent over the already-established edge TLS session
 ```
 
 ### Certificate management
@@ -168,15 +308,34 @@ User ──TLS──► Edge PoP ──HTTP/TLS──► Origin
 ### OCSP Stapling
 Instead of the browser querying the CA's OCSP responder (extra RTT), the CDN periodically fetches the OCSP response and **staples** it to the TLS handshake.
 
-```
-Without stapling: Client → CA OCSP server → check cert status (adds 100–300ms)
-With stapling:    CDN pre-fetches OCSP response, includes in TLS handshake (0 extra RTT)
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant CDN as CDN Edge
+    participant CA as CA OCSP Responder
+
+    alt Without stapling
+        CDN->>C: Certificate, during TLS handshake
+        C->>CA: OCSP status check for this certificate
+        CA-->>C: Certificate is valid, adds 100 to 300ms
+        Note over C: Handshake is blocked on this extra round trip
+    else With OCSP stapling
+        CDN->>CA: Pre-fetch OCSP response on its own schedule, not per handshake
+        CDN->>C: Certificate plus the stapled OCSP response together
+        Note over C: Zero extra round trips, status arrived already attached
+    end
 ```
 
 ### TLS 1.3 advantages
 - **1-RTT** handshake (vs 2-RTT for TLS 1.2)
 - **0-RTT resumption** for returning connections (replay attack risk — avoid for non-idempotent requests)
 - Forward secrecy by default (ephemeral key exchange only)
+
+<div class="quiz-card">
+  <p class="quiz-q">TLS 1.3's 0-RTT resumption is risky for a non-idempotent request like a POST that transfers money. Why?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>0-RTT data is sent before the handshake actually completes, and can be captured and replayed by an attacker — the server has no cryptographic proof yet that this particular copy is a fresh request from the real client. Replaying a GET just re-fetches the same page, which is harmless. Replaying a non-idempotent request like a money transfer could mean the action happens twice, which is why 0-RTT should be avoided for anything that isn't safely repeatable.</div>
+</div>
 
 ---
 
@@ -215,21 +374,56 @@ Mark as stale but keep serving while revalidating in the background. Zero-downti
 
 ```mermaid
 sequenceDiagram
-    participant U as User
+    participant U1 as User A
+    participant U2 as User B
     participant E as Edge
     participant O as Origin
-    U->>E: GET /page
-    Note over E: TTL expired, stale-while-revalidate active
-    E-->>U: 200 stale content (immediate)
-    E->>O: Background revalidation
-    O-->>E: Fresh content stored
+
+    Note over E: TTL just expired, stale-while-revalidate window is active
+    U1->>E: GET /page
+    E-->>U1: 200, stale content served immediately
+    E->>O: Background revalidation request, only one in flight
+    U2->>E: GET /page, arrives while revalidation is still in progress
+    E-->>U2: 200, same stale content, no second origin call
+    O-->>E: 200, fresh content
+    Note over E: Cache updated, stale window closed
+    Note over E: The next request after this gets the fresh copy
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A product appears on 40 different pages (its own page, category pages, the homepage). What's wrong with purging it by URL, and what's the fix?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Purging by URL means enumerating and purging all 40 individual URLs — brittle, and easy to miss one on the next update. The fix is to tag the object with a surrogate key / cache tag (e.g. <code>product-123</code>) whenever it's cached, then purge by that single tag: every cached object anywhere that carries the tag is invalidated in one call, regardless of how many URLs it happens to be embedded in.</div>
+</div>
 
 ---
 
-## 9. CloudFront Deep Dive
+## 9. CDN Providers: CloudFront vs Cloudflare vs GCP Cloud CDN
 
-### Core concepts
+The three biggest managed CDNs solve the same problem — cache close to the user, protect the origin — with noticeably different integration models. Before the per-provider deep dives, here's how each one actually attaches to your infrastructure.
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="model-cf" class="active">CloudFront</button>
+    <button data-tab="model-cloudflare">Cloudflare</button>
+    <button data-tab="model-gcp">GCP Cloud CDN</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="model-cf">
+      <strong>Distribution + Behaviors.</strong> A CloudFront <em>distribution</em> is an explicit object you create, mapping path patterns (<code>/api/*</code>, <code>/static/*</code>) to origins via <em>behaviors</em>, each carrying its own cache policy. Nothing is proxied implicitly — every route is configured up front.
+    </div>
+    <div class="tab-panel" data-tab-panel="model-cloudflare">
+      <strong>Zone + orange-cloud proxying.</strong> A <em>zone</em> is just your domain, with DNS managed by Cloudflare. Flip any A/CNAME record to <em>Proxied</em> (orange cloud) and that record's traffic transparently routes through Cloudflare's network — there's no separate distribution object to create at all.
+    </div>
+    <div class="tab-panel" data-tab-panel="model-gcp">
+      <strong>Bolt-on to Cloud Load Balancing.</strong> Cloud CDN isn't a standalone product — it's a flag (<code>--enable-cdn</code>) on a Cloud Load Balancing backend service that's already pointed at your origin. There's no CDN-specific object; the cache lives inside the load balancer's config.
+    </div>
+  </div>
+</div>
+
+### CloudFront Deep Dive
+
+#### Core concepts
 
 | Concept | Description |
 |---|---|
@@ -239,14 +433,14 @@ sequenceDiagram
 | **Cache Policy** | What to include in cache key (headers, cookies, query strings) |
 | **Origin Request Policy** | What to forward to origin (can differ from cache key) |
 
-### Behaviors (path-based routing)
+#### Behaviors (path-based routing)
 ```
 /api/*      → ALB origin, TTL=0, forward all headers
 /static/*   → S3 origin, TTL=86400, strip cookies
 /*          → ALB origin, default TTL
 ```
 
-### Signed URLs vs Signed Cookies
+#### Signed URLs vs Signed Cookies
 
 | | Signed URL | Signed Cookie |
 |---|---|---|
@@ -263,7 +457,7 @@ aws cloudfront sign \
   --date-less-than 2026-07-01
 ```
 
-### Lambda@Edge vs CloudFront Functions
+#### Lambda@Edge vs CloudFront Functions
 
 | | CloudFront Functions | Lambda@Edge |
 |---|---|---|
@@ -274,7 +468,7 @@ aws cloudfront sign \
 | Cost | ~1/6th of Lambda@Edge | Per GB-sec |
 | Use cases | Header manipulation, redirects, A/B | Auth, body rewrite, dynamic routing |
 
-### Origin Access Control (OAC) for S3
+#### Origin Access Control (OAC) for S3
 Replaces legacy OAI. Allows CloudFront to sign requests to S3 with SigV4.
 
 ```json
@@ -292,18 +486,16 @@ Replaces legacy OAI. Allows CloudFront to sign requests to S3 with SigV4.
 }
 ```
 
-### Price classes
+#### Price classes
 | Class | PoPs included | Cost |
 |---|---|---|
 | All | All global PoPs | Highest |
 | 200 | All except South America, Australia | Medium |
 | 100 | US, Canada, Europe only | Lowest |
 
----
+### Cloudflare Deep Dive
 
-## 10. Cloudflare Deep Dive
-
-### Zones
+#### Zones
 A zone = a domain. DNS is managed by Cloudflare. Traffic proxied through Cloudflare when DNS record is **orange-clouded** (proxied).
 
 ```
@@ -311,7 +503,7 @@ example.com    A    1.2.3.4    [Proxied ✓]  → traffic goes through CF
 api.example    A    1.2.3.4    [DNS only]   → traffic goes direct
 ```
 
-### Cache Rules (new) vs Page Rules (legacy)
+#### Cache Rules (new) vs Page Rules (legacy)
 ```
 # Cache Rule example — cache all static assets for 30 days
 Match: hostname eq "example.com" AND extension in {jpg png css js}
@@ -322,7 +514,7 @@ Match: http.request.uri.path starts_with "/dashboard"
 Then:  Cache Level: Bypass
 ```
 
-### Cloudflare Workers
+#### Cloudflare Workers
 JavaScript/WASM running at every PoP (~300 locations). Handles request before it reaches origin.
 
 ```javascript
@@ -341,10 +533,10 @@ export default {
 }
 ```
 
-### Argo Smart Routing
+#### Argo Smart Routing
 Cloudflare's private backbone routes requests through optimized paths, bypassing congested public internet segments. Typically 30% latency improvement for cache misses (origin fetches).
 
-### R2 (Object Storage)
+#### R2 (Object Storage)
 S3-compatible storage with **zero egress fees**. Use as CDN origin instead of S3 to eliminate egress costs.
 
 ```bash
@@ -353,18 +545,16 @@ wrangler r2 bucket create my-assets
 # Bind to Worker or use as custom origin in Cache Rules
 ```
 
----
+### GCP Cloud CDN
 
-## 11. GCP Cloud CDN
-
-### Integration model
+#### Integration model
 Cloud CDN sits in front of **Cloud Load Balancing backend services** — not a standalone product.
 
 ```
 User → Cloud Load Balancer (anycast IP) → [Cloud CDN cache] → Backend Service → NEGs / Instance Groups
 ```
 
-### Cache modes
+#### Cache modes
 
 | Mode | Behavior |
 |---|---|
@@ -381,14 +571,14 @@ gcloud compute backend-services update my-backend \
   --global
 ```
 
-### Cache invalidation
+#### Cache invalidation
 ```bash
 gcloud compute url-maps invalidate-cdn-cache my-url-map \
   --path "/images/*" \
   --global
 ```
 
-### Signed URLs
+#### Signed URLs
 ```python
 import datetime, hashlib, hmac, base64
 from urllib.parse import urlencode
@@ -402,12 +592,18 @@ def sign_url(url, key_name, key, expiration_seconds=3600):
     return f"{url}?{params}&Signature={sig.decode()}"
 ```
 
-### CDN Interconnect
+#### CDN Interconnect
 Partner CDNs (Akamai, Fastly, CloudFlare) can peer directly with Google's network for reduced egress pricing. Used when you run a third-party CDN in front of GCP origins.
+
+<div class="quiz-card">
+  <p class="quiz-q">You need to rewrite a request body before it reaches the origin on CloudFront. Can a CloudFront Function do this, or do you need Lambda@Edge?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Lambda@Edge. CloudFront Functions only run on the viewer request/response path, have no body access, and are budgeted for 1ms of execution — built for lightweight jobs like header manipulation, redirects, and A/B routing. Rewriting a body needs an origin-facing trigger with real compute time, and only Lambda@Edge's origin request/response triggers provide that (up to 30 seconds, full Node.js/Python runtime).</div>
+</div>
 
 ---
 
-## 12. Comparison Table
+## 10. Comparison Table
 
 | Feature | CloudFront | Cloudflare | GCP Cloud CDN |
 |---|---|---|---|
@@ -425,7 +621,7 @@ Partner CDNs (Akamai, Fastly, CloudFlare) can peer directly with Google's networ
 
 ---
 
-## 13. CDN for APIs (Dynamic Caching)
+## 11. CDN for APIs (Dynamic Caching)
 
 APIs are trickier — responses are personalized or change frequently.
 
@@ -449,17 +645,25 @@ When a cached object expires, multiple simultaneous requests hit origin at the s
 
 ```mermaid
 flowchart TD
-    subgraph Without_Coalescing
-        R1[Req_1] --> O1[Origin]
-        R2[Req_2] --> O2[Origin]
-        R3[Req_3] --> O3[Origin]
+    classDef req fill:#34495e,stroke:#212f3c,color:#fff,rx:6
+    classDef origin fill:#c0392b,stroke:#922b21,color:#fff,rx:6
+    classDef edge fill:#3498db,stroke:#2471a3,color:#fff,rx:6
+
+    subgraph BAD["Without coalescing — thundering herd"]
+        R1["Request 1<br/>arrives at cache expiry"]:::req --> O1["Origin"]:::origin
+        R2["Request 2<br/>same object, same instant"]:::req --> O2["Origin"]:::origin
+        R3["Request 3<br/>same object, same instant"]:::req --> O3["Origin"]:::origin
     end
-    subgraph With_Coalescing
-        R4[Req_1] --> E[Edge_holds_requests]
-        R5[Req_2] --> E
-        R6[Req_3] --> E
-        E --> O4[Origin_single_request]
-        O4 --> E --> R4 & R5 & R6
+
+    subgraph GOOD["With coalescing — one origin request serves everyone"]
+        C1["Client 1"]:::req -->|"request"| E["Edge holds concurrent<br/>requests for the same key"]:::edge
+        C2["Client 2"]:::req -->|"request"| E
+        C3["Client 3"]:::req -->|"request"| E
+        E -->|"single request"| O4["Origin"]:::origin
+        O4 -->|"single response"| E
+        E -->|"same response fanned out"| C1
+        E -->|"same response fanned out"| C2
+        E -->|"same response fanned out"| C3
     end
 ```
 
@@ -468,9 +672,15 @@ CloudFront, Cloudflare, and GCP CDN all coalesce concurrent misses for the same 
 ### Edge-side includes (ESI)
 Assemble page fragments at the edge — cache static header/footer separately from dynamic content section.
 
+<div class="quiz-card">
+  <p class="quiz-q">A product page gets 1000 req/s and has <code>Cache-Control: s-maxage=5</code>. When that 5-second TTL expires, do all 1000 req/s in that instant each trigger a separate origin request?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Request coalescing means the CDN holds the concurrent requests that arrive right after expiry, makes exactly one origin request, and fans that single response back out to every queued request. Without coalescing you'd get a thundering herd of up to 1000 simultaneous origin hits; with it, a 5-second TTL under 1000 req/s still means roughly one origin request every 5 seconds, not 5000.</div>
+</div>
+
 ---
 
-## 14. Security at the Edge
+## 12. Security at the Edge
 
 ### WAF (Web Application Firewall)
 Runs at edge PoP — blocks OWASP Top 10, custom rules, before traffic reaches origin.
@@ -506,9 +716,15 @@ Cloudflare's anycast network absorbs **multi-Tbps** attacks by spreading across 
 ### IP reputation
 CDN vendors maintain threat intelligence feeds — known Tor exit nodes, abusive ASNs, scanner IPs blocked by default or challenged.
 
+<div class="quiz-card">
+  <p class="quiz-q">A SYN flood and an HTTP flood are both DDoS attacks — why does the CDN defend against them with completely different tools (anycast + rate limiting vs WAF + challenge pages)?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>A SYN flood is L3/L4 and volumetric — garbage packets aimed at exhausting connection state or bandwidth, and it doesn't need to look like a real HTTP request, so anycast simply spreads the raw volume across hundreds of PoPs and rate-limits by IP. An HTTP flood is L7 — well-formed requests that consume application resources one legitimate-looking request at a time, so spreading volume doesn't help. You have to inspect the request itself (WAF rules) or make the client prove it's a real browser (CAPTCHA/JS challenge).</div>
+</div>
+
 ---
 
-## 15. Debugging Cache Behavior
+## 13. Debugging Cache Behavior
 
 ### Key response headers
 
@@ -557,7 +773,7 @@ DYNAMIC     → not eligible for caching (POST, or Cache-Control: private)
 
 ---
 
-## 16. Common Issues
+## 14. Common Issues
 
 ### Cache poisoning
 Attacker causes a malicious response to be cached and served to other users.
@@ -594,7 +810,7 @@ Happens when a large object expires simultaneously across all edge PoPs, or a ne
 1. Origin shield — funnels all edge misses to a single shield PoP → 1 origin request
 2. Request coalescing — CDN holds concurrent misses, makes 1 origin request
 3. Stagger TTLs — add jitter: s-maxage = base_ttl + rand(0, 300)
-4. Cache warming script post-deploy (see section 13)
+4. Cache warming script post-deploy (see section 11)
 ```
 
 ### Geo-restriction debugging
@@ -624,3 +840,9 @@ curl -sI https://example.com/ | grep -i "vary\|set-cookie"
 # CloudFront: create Cache Policy, set Cookies = None
 # Cloudflare: Cache Rule → Ignore Query String / Cookie
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">After deploying new JS/CSS, some users still get the old file even though you purged the cache by URL. What's the more robust fix used above, and why does it work even if you forget to purge?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Content-hash filenames — e.g. <code>/app.a1b2c3.js</code>. Because the filename itself changes with every deploy, the new deploy is a brand-new URL that was never cached anywhere, so there's nothing stale to purge in the first place; the old cached file just becomes an unreferenced dead entry that eventually expires. Purging by surrogate key still works, but it depends on remembering to run it — hashed filenames remove that dependency on remembering entirely.</div>
+</div>

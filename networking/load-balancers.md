@@ -2,6 +2,11 @@
 
 Beginner to advanced reference covering L4/L7, algorithms, health checks, TLS, AWS ALB/NLB, GCP, nginx, HAProxy, and common failure modes.
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## 1. What a Load Balancer Does
@@ -13,6 +18,12 @@ A load balancer sits between clients and backend servers and provides:
 - **TLS termination** — decrypt HTTPS at the LB so backends speak plain HTTP
 - **Backend topology hiding** — clients see one VIP; backend IPs are never exposed
 - **Connection management** — keep persistent upstream pools, draining on deploys
+
+<div class="quiz-card">
+  <p class="quiz-q">An autoscaling event replaces half the backend fleet with new IPs. Does anything on the client side need to change?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. That's exactly what "backend topology hiding" buys you — clients only ever see one stable VIP (the load balancer's address); the real backend IPs are never exposed to them and can churn freely underneath. Health checking and connection management are what make that churn safe in practice, but the client-facing address itself never has to move.</div>
+</div>
 
 ---
 
@@ -31,9 +42,26 @@ A load balancer sits between clients and backend servers and provides:
 
 ### NAT vs Proxy Model
 
-**L4 NAT/DNAT**: The LB rewrites the destination IP in each packet. The backend server's reply goes back via the LB (SNAT) or directly to the client (DSR). One TCP connection end-to-end.
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="natmodel" class="active">L4 NAT/DNAT</button>
+    <button data-tab="proxymodel">L7 Proxy</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="natmodel">
+      <strong>The LB rewrites the destination IP in each packet.</strong> The backend server's reply goes back via the LB (SNAT) or directly to the client (DSR). One TCP connection end-to-end — the LB never terminates it, it just relabels packets in flight.
+    </div>
+    <div class="tab-panel" data-tab-panel="proxymodel">
+      <strong>The LB terminates the client TCP connection, parses HTTP, and opens a <em>new</em> TCP connection to the backend.</strong> Two connections exist simultaneously — client↔LB and LB↔backend — which is what lets the LB inspect and rewrite anything in between.
+    </div>
+  </div>
+</div>
 
-**L7 Proxy**: The LB terminates the client TCP connection, parses HTTP, and opens a *new* TCP connection to the backend. Two connections exist simultaneously.
+<div class="quiz-card">
+  <p class="quiz-q">In the L4 NAT/DNAT model, how many TCP connections exist between the client and the backend? What about L7 proxy?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>L4 NAT/DNAT: one connection end-to-end — the LB just rewrites the destination (and source, for SNAT) IP in each packet without ever terminating the TCP session. L7 proxy: two separate connections exist simultaneously, client↔LB and LB↔backend, because the LB fully terminates the client's connection, parses HTTP, and opens its own connection to the backend. That's also why L7 can inspect and rewrite headers/paths and L4 can't — it never sees a complete HTTP message, only packets.</div>
+</div>
 
 ---
 
@@ -41,17 +69,21 @@ A load balancer sits between clients and backend servers and provides:
 
 ```mermaid
 graph TD
-    subgraph L4_LB["L4 LB — TCP Passthrough with DNAT"]
-        C1[Client] -->|TCP SYN dst 10.0.0.1:443| LB4[L4 Load Balancer]
-        LB4 -->|DNAT: dst rewritten to 10.0.1.2:443| B1[Backend 1]
-        LB4 -->|DNAT: dst rewritten to 10.0.1.3:443| B2[Backend 2]
+    classDef client fill:#34495e,stroke:#212f3c,color:#fff,rx:6
+    classDef lb4 fill:#16a085,stroke:#117a65,color:#fff,rx:6
+    classDef lb7 fill:#8e44ad,stroke:#6c3483,color:#fff,rx:6
+    classDef backend fill:#2980b9,stroke:#1f618d,color:#fff,rx:6
+
+    subgraph L4_LB["L4 LB — TCP Passthrough with DNAT (one connection end-to-end)"]
+        C1["Client"]:::client -->|"TCP SYN<br/>dst 10.0.0.1:443"| LB4["L4 Load Balancer<br/>never terminates the TCP session"]:::lb4
+        LB4 -->|"DNAT: dst rewritten<br/>to 10.0.1.2:443"| B1["Backend 1"]:::backend
+        LB4 -->|"DNAT: dst rewritten<br/>to 10.0.1.3:443"| B2["Backend 2"]:::backend
     end
 
-    subgraph L7_LB["L7 LB — Full HTTP Proxy"]
-        C2[Client] -->|TCP conn 1 HTTPS| LB7[L7 Load Balancer]
-        LB7 -->|TLS termination inspect HTTP headers path host| LB7
-        LB7 -->|TCP conn 2 HTTP to backend| B3[Backend A]
-        LB7 -->|TCP conn 2 HTTP to backend| B4[Backend B]
+    subgraph L7_LB["L7 LB — Full HTTP Proxy (two decoupled connections)"]
+        C2["Client"]:::client -->|"TCP conn 1: HTTPS"| LB7["L7 Load Balancer<br/>terminates TLS, parses HTTP<br/>headers / path / host"]:::lb7
+        LB7 -->|"TCP conn 2: HTTP<br/>to chosen backend"| B3["Backend A"]:::backend
+        LB7 -->|"TCP conn 2: HTTP<br/>to chosen backend"| B4["Backend B"]:::backend
     end
 ```
 
@@ -59,40 +91,53 @@ graph TD
 
 ## 4. Load Balancing Algorithms
 
-### Round Robin
-Requests sent to backends in order: 1 → 2 → 3 → 1 → 2 → 3 …
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="rr" class="active">Round Robin</button>
+    <button data-tab="wrr">Weighted RR</button>
+    <button data-tab="lc">Least Connections</button>
+    <button data-tab="lrt">Least Response Time</button>
+    <button data-tab="iph">IP Hash</button>
+    <button data-tab="rand">Random</button>
+    <button data-tab="ch">Consistent Hashing</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="rr">
+      <strong>Round Robin.</strong> Requests sent to backends in order: 1 → 2 → 3 → 1 → 2 → 3 …
+      <br/><strong>Use when:</strong> backends are homogeneous and requests are equal-cost.
+    </div>
+    <div class="tab-panel" data-tab-panel="wrr">
+      <strong>Weighted Round Robin.</strong> Each backend gets a weight. Backend with weight 3 gets 3× the traffic of weight 1.
+      <br/><strong>Use when:</strong> backends have different capacity (e.g., mixing instance types).
+    </div>
+    <div class="tab-panel" data-tab-panel="lc">
+      <strong>Least Connections.</strong> New request goes to the backend with the fewest active connections.
+      <br/><strong>Use when:</strong> requests have variable duration (e.g., long-running uploads mixed with fast API calls).
+    </div>
+    <div class="tab-panel" data-tab-panel="lrt">
+      <strong>Least Response Time.</strong> Combines least connections + lowest measured latency.
+      <br/><strong>Use when:</strong> latency variance across backends matters (heterogeneous hardware, cross-AZ).
+    </div>
+    <div class="tab-panel" data-tab-panel="iph">
+      <strong>IP Hash (Sticky by IP).</strong> Hash of client IP determines the backend. Same client always hits the same backend.
+      <br/><strong>Use when:</strong> need session affinity without cookie support. Breaks badly behind NAT (all traffic → one backend).
+    </div>
+    <div class="tab-panel" data-tab-panel="rand">
+      <strong>Random.</strong> Randomly pick a backend per request.
+      <br/><strong>Use when:</strong> simple, stateless workloads where you want to avoid round-robin bias from burst patterns. "Power of two choices" (random pick of 2, take least-loaded) is better than pure random.
+    </div>
+    <div class="tab-panel" data-tab-panel="ch">
+      <strong>Consistent Hashing.</strong> Hash the request key (IP, URL, user-id) onto a ring. Backends occupy slots on the ring. Adding/removing a backend only remaps ~1/N of keys.
+      <br/><strong>Use when:</strong> caching layers (upstream cache hit rate), gRPC streams that must go to the same pod, Kafka-aware routing.
+    </div>
+  </div>
+</div>
 
-**Use when**: backends are homogeneous and requests are equal-cost.
-
-### Weighted Round Robin
-Each backend gets a weight. Backend with weight 3 gets 3× the traffic of weight 1.
-
-**Use when**: backends have different capacity (e.g., mixing instance types).
-
-### Least Connections
-New request goes to the backend with the fewest active connections.
-
-**Use when**: requests have variable duration (e.g., long-running uploads mixed with fast API calls).
-
-### Least Response Time
-Combines least connections + lowest measured latency.
-
-**Use when**: latency variance across backends matters (heterogeneous hardware, cross-AZ).
-
-### IP Hash (Sticky by IP)
-Hash of client IP determines the backend. Same client always hits the same backend.
-
-**Use when**: need session affinity without cookie support. Breaks badly behind NAT (all traffic → one backend).
-
-### Random
-Randomly pick a backend per request.
-
-**Use when**: simple, stateless workloads where you want to avoid round-robin bias from burst patterns. "Power of two choices" (random pick of 2, take least-loaded) is better than pure random.
-
-### Consistent Hashing
-Hash the request key (IP, URL, user-id) onto a ring. Backends occupy slots on the ring. Adding/removing a backend only remaps ~1/N of keys.
-
-**Use when**: caching layers (upstream cache hit rate), gRPC streams that must go to the same pod, Kafka-aware routing.
+<div class="quiz-card">
+  <p class="quiz-q">A service sits behind a corporate NAT gateway, so thousands of employees share one public IP. Why is IP Hash a risky algorithm choice here, and what would "power of two choices" random do instead?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>IP Hash keys off the client's source IP, and behind NAT every one of those employees looks like the same single IP to the load balancer — so IP Hash sends all of them to one backend instead of spreading load. "Power of two choices" doesn't have this failure mode: it picks two backends at random per request and sends it to whichever is less loaded, so it stays well-balanced regardless of how many distinct client IPs are actually behind the request stream.</div>
+</div>
 
 ---
 
@@ -123,6 +168,12 @@ Watch real traffic error rates. If backend returns 5xx above threshold, eject it
 
 Envoy / Istio call this **outlier detection**: consecutive 5xx count → eject for `base_ejection_time` (doubles each ejection).
 
+<div class="quiz-card">
+  <p class="quiz-q">A backend passes its active /healthz probe every 10 seconds, but is throwing 500s on one specific real endpoint. Will active health checks catch this? What will?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — active health checks only probe the /healthz path on a schedule, so a backend that's healthy on that path but broken on a different real endpoint looks perfectly fine to them. Passive health checks (the circuit breaker / outlier detection) are what catches this: they watch real traffic error rates and eject a backend once its 5xx rate crosses a threshold, regardless of what its dedicated health endpoint says.</div>
+</div>
+
 ---
 
 ## 6. Sticky Sessions
@@ -144,6 +195,12 @@ See §4. Unreliable behind NAT or IPv6 CGNAT.
 - **Defeats autoscaling**: new backends receive no traffic from existing sticky clients
 - **Recommendation**: prefer stateless services + external session store (Redis/DynamoDB) over sticky sessions
 
+<div class="quiz-card">
+  <p class="quiz-q">A sticky client's backend dies mid-session. What happens to that client's session state, and how do you prevent it from being a problem?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The session is gone — sticky routing only pins a client to a backend, it doesn't replicate that backend's in-memory state anywhere else, so when the backend dies the session dies with it. The fix isn't a smarter sticky algorithm; it's avoiding the dependency in the first place: keep services stateless and put session state in an external store (Redis/DynamoDB) that survives any one backend dying.</div>
+</div>
+
 ---
 
 ## 7. Connection Draining / Deregistration Delay
@@ -156,70 +213,103 @@ When a backend is removed from the pool (deploy, scale-down, health failure), in
 
 ```mermaid
 sequenceDiagram
-    participant Client
+    participant Client as Existing Client
+    participant NewClient as New Client
     participant LB
-    participant Backend
+    participant Backend as Backend (draining)
+    participant Healthy as Healthy Backend
 
-    Note over Backend: Marked for removal
-    LB->>LB: Stop sending NEW requests to Backend
-    Client->>LB: In-flight request (already routed)
-    LB->>Backend: Forward in-flight request
-    Backend->>LB: Response
-    LB->>Client: Response
-    Note over LB: Draining timeout expires (e.g. 30s)
-    LB->>Backend: Close connection
+    Note over Backend: Deploy / scale-down / health failure<br/>triggers removal from the pool
+    LB->>LB: Mark Backend as draining —<br/>stop routing NEW requests to it
+    NewClient->>LB: New request arrives
+    LB->>Healthy: Routed to a healthy backend instead
+    Healthy-->>LB: Response
+    LB-->>NewClient: Response
+
+    Client->>LB: In-flight request (already routed before draining)
+    LB->>Backend: Forward in-flight request — draining backends still finish work already in flight
+    Backend-->>LB: Response
+    LB-->>Client: Response
+
+    Note over LB,Backend: Deregistration delay window<br/>(default 300s on ALB, often tuned to 30s)
+    LB->>Backend: Timeout expires — forcefully close any remaining connections
 ```
 
-1. LB marks backend as **draining** — no new requests
-2. Existing in-flight requests complete normally
-3. After **deregistration delay** (default 300s on ALB, tune to 30s for fast deploys), LB forcefully closes remaining connections
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Marked draining.</strong> LB marks the backend as draining — no new requests are routed to it.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. In-flight requests complete.</strong> Requests already routed to this backend before draining started are allowed to finish normally — the LB doesn't cut them off mid-response.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Deregistration delay expires.</strong> After the configured window (default 300s on ALB, tune to 30s for fast deploys), the LB forcefully closes whatever connections are still open.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 **Tune to**: slightly above your p99 request duration. 30s is usually enough for APIs; leave 300s for long-running uploads.
+
+<div class="quiz-card">
+  <p class="quiz-q">The moment a backend is marked as draining, what happens to (a) brand-new requests and (b) requests already in flight to it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>New requests stop going to it immediately — the LB removes it from routing decisions right away. But requests already in flight are allowed to complete normally; the LB doesn't kill them. Only after the deregistration delay expires (default 300s on ALB) does the LB forcefully close whatever connections are still open, finished or not — that's the mechanism that turns "instant removal" into a client-visible 502/reset if the delay is set too short.</div>
+</div>
 
 ---
 
 ## 8. TLS Termination
 
-### Terminate at LB (Most Common)
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="terminate" class="active">Terminate at LB</button>
+    <button data-toggle-opt="passthrough">SSL Passthrough</button>
+    <button data-toggle-opt="bridge">SSL Bridge</button>
+    <button data-toggle-opt="mtls">mTLS</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="terminate">
+    <pre><code class="language-mermaid">graph LR
+    classDef enc fill:#c0392b,stroke:#922b21,color:#fff
+    classDef plain fill:#7f8c8d,stroke:#616a6b,color:#fff
+    Client["Client"]:::enc -->|"HTTPS - encrypted"| LB["LB - terminates TLS"]:::enc
+    LB -->|"HTTP - plaintext"| Backend["Backend"]:::plain</code></pre>
+    <strong>Most common.</strong> LB holds the certificate. Backends get plain HTTP → simpler backend config. LB can inspect HTTP headers, do content routing. Traffic on the internal network is unencrypted (acceptable inside VPC/private network with security groups).
+  </div>
+  <div class="toggle-panel" data-toggle-panel="passthrough">
+    <pre><code class="language-mermaid">graph LR
+    classDef enc fill:#c0392b,stroke:#922b21,color:#fff
+    Client["Client"]:::enc -->|"HTTPS - encrypted"| LB["L4 LB - SNI routing only, never decrypts"]:::enc
+    LB -->|"HTTPS - still encrypted"| Backend["Backend - holds the cert"]:::enc</code></pre>
+    LB never decrypts — forwards TLS bytes to backend. Backend holds the cert. LB cannot do L7 routing (only SNI hostname). Use when: compliance requires end-to-end encryption, or backend must see client cert.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="bridge">
+    <pre><code class="language-mermaid">graph LR
+    classDef enc fill:#c0392b,stroke:#922b21,color:#fff
+    Client["Client"]:::enc -->|"HTTPS - encrypted"| LB["LB - terminates, inspects, re-encrypts"]:::enc
+    LB -->|"HTTPS - re-encrypted"| Backend["Backend"]:::enc</code></pre>
+    LB terminates, inspects, then opens new TLS connection to backend. Use when: internal traffic must also be encrypted (zero-trust), and L7 routing is needed.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="mtls">
+    <pre><code class="language-mermaid">graph LR
+    classDef svc fill:#8e44ad,stroke:#6c3483,color:#fff
+    A["Service A"]:::svc -->|"mTLS - both sides present certs"| SA["Istio sidecar"]:::svc
+    SA -->|"mTLS"| SB["Service B sidecar"]:::svc</code></pre>
+    Both client and server present certificates. LB validates the client cert (or forwards it as a header). Used in service meshes (Istio, Linkerd) for pod-to-pod authentication without application code changes.
+  </div>
+</div>
 
-```
-Client ──HTTPS──► LB (terminate) ──HTTP──► Backend
-```
-
-- LB holds the certificate
-- Backends get plain HTTP → simpler backend config
-- LB can inspect HTTP headers, do content routing
-- Traffic on the internal network is unencrypted (acceptable inside VPC/private network with security groups)
-
-### SSL Passthrough
-
-```
-Client ──HTTPS──► L4 LB (SNI routing only) ──HTTPS──► Backend
-```
-
-- LB never decrypts — forwards TLS bytes to backend
-- Backend holds the cert
-- LB cannot do L7 routing (only SNI hostname)
-- Use when: compliance requires end-to-end encryption, or backend must see client cert
-
-### SSL Bridge (Re-encrypt)
-
-```
-Client ──HTTPS──► LB (terminate + re-encrypt) ──HTTPS──► Backend
-```
-
-- LB terminates, inspects, then opens new TLS connection to backend
-- Use when: internal traffic must also be encrypted (zero-trust), and L7 routing is needed
-
-### mTLS (Service-to-Service)
-
-Both client and server present certificates. LB validates the client cert (or forwards it as a header).
-
-```
-Service A ──mTLS──► Istio sidecar ──mTLS──► Service B sidecar
-```
-
-Used in service meshes (Istio, Linkerd) for pod-to-pod authentication without application code changes.
+<div class="quiz-card">
+  <p class="quiz-q">Which TLS model still leaves internal network traffic completely unencrypted between the LB and the backend?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Terminate at LB — the most common setup. The LB holds the cert and decrypts HTTPS from the client, but talks plain HTTP to the backend. That's fine inside a VPC secured with security groups, but if internal traffic must also be encrypted (zero-trust), you need SSL Bridge (re-encrypt) instead, which costs an extra TLS handshake but keeps every hop encrypted while still letting the LB do L7 routing.</div>
+</div>
 
 ---
 
@@ -229,11 +319,18 @@ Used in service meshes (Istio, Linkerd) for pod-to-pod authentication without ap
 
 ```mermaid
 graph LR
-    Client -->|HTTPS| ALB[ALB Listener port 443]
-    ALB -->|Rule: path /api/*| TG1[Target Group API pods]
-    ALB -->|Rule: path /static/*| TG2[Target Group S3 Lambda]
-    ALB -->|Rule: host app2.example.com| TG3[Target Group App2]
-    ALB -->|Default rule| TG4[Target Group Default]
+    classDef client fill:#34495e,stroke:#212f3c,color:#fff,rx:6
+    classDef alb fill:#8e44ad,stroke:#6c3483,color:#fff,rx:6
+    classDef tg fill:#2980b9,stroke:#1f618d,color:#fff,rx:6
+
+    Client["Client"]:::client -->|"HTTPS"| ALB["ALB Listener :443<br/>ordered rule evaluation"]:::alb
+
+    subgraph RULES["Listener rules"]
+        ALB -->|"Rule: path /api/*"| TG1["Target Group: API pods"]:::tg
+        ALB -->|"Rule: path /static/*"| TG2["Target Group: S3 / Lambda"]:::tg
+        ALB -->|"Rule: host app2.example.com"| TG3["Target Group: App2"]:::tg
+        ALB -->|"Default rule (no match above)"| TG4["Target Group: Default"]:::tg
+    end
 ```
 
 ### Listeners, Rules, Target Groups
@@ -267,6 +364,12 @@ Default:                                         → TG_main
 
 Enable per-listener to S3. Fields include: client IP, timestamp, target IP, request processing time, target processing time, response time, status codes, SSL cipher, user-agent, request ID.
 
+<div class="quiz-card">
+  <p class="quiz-q">A client connects to an ALB over HTTP/2. What protocol does the ALB use to talk to the backend target by default?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>HTTP/1.1. ALB supports HTTP/2 only between the client and the ALB itself — the ALB-to-backend leg defaults to HTTP/1.1 regardless of what the client used, unless you explicitly set the target group's protocol version to gRPC (which requires HTTP/2 end-to-end).</div>
+</div>
+
 ---
 
 ## 10. AWS NLB Deep Dive
@@ -283,15 +386,26 @@ Enable per-listener to S3. Fields include: client IP, timestamp, target IP, requ
 
 ### NLB vs ALB Decision
 
+```mermaid
+graph TD
+    classDef q fill:#34495e,stroke:#212f3c,color:#fff,rx:6
+    classDef alb fill:#8e44ad,stroke:#6c3483,color:#fff,rx:6
+    classDef nlb fill:#16a085,stroke:#117a65,color:#fff,rx:6
+
+    Q1{"Need content-based routing?"}:::q -->|"Yes"| ALB["Use ALB"]:::alb
+    Q2{"Need a static IP?"}:::q -->|"Yes"| NLB["Use NLB"]:::nlb
+    Q3{"Need UDP?"}:::q -->|"Yes"| NLB
+    Q4{"Need a PrivateLink endpoint?"}:::q -->|"Yes"| NLB
+    Q5{"Need WAF?"}:::q -->|"Yes"| ALB
+    Q6{"Need a Lambda target?"}:::q -->|"Yes"| ALB
+    Q7{"Is raw TCP performance the priority?"}:::q -->|"Yes"| NLB
 ```
-Need content-based routing?      → ALB
-Need static IP?                  → NLB
-Need UDP?                        → NLB
-Need PrivateLink endpoint?       → NLB
-Need WAF?                        → ALB
-Need Lambda target?              → ALB
-Raw TCP performance matters?     → NLB
-```
+
+<div class="quiz-card">
+  <p class="quiz-q">A backend behind an NLB sees the real client IP as the connection's source address. Would it see the same thing behind an ALB?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. NLB preserves the client's real IP by default (the backend's security group has to allow it), because it's a Layer 4 load balancer that never terminates the connection. ALB does terminate the connection and replaces the source IP with its own — that's the tradeoff for getting full HTTP-level content routing.</div>
+</div>
 
 ---
 
@@ -479,6 +593,12 @@ Safe pattern:
 - **Right-size deregistration/idle timeouts** — fewer half-open connections inflating the active-connection dimension
 - **Consolidate low-traffic ALBs** — each ALB carries the ~$0.0225/hour base regardless of traffic
 
+<div class="quiz-card">
+  <p class="quiz-q">An ALB's new-connections dimension comes out to 40 LCU, its active-connections dimension to 20 LCU, and its processed-bytes dimension to 5 LCU. How many LCUs get billed for that hour?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>40 — the maximum, not the sum. ELB bills the single highest-consumption dimension in each hour, so the other two dimensions being lower doesn't add anything to the bill; it just tells you they aren't your binding constraint. Here, new-connection rate is the bottleneck, so the fix is to reduce new connections (e.g. enable HTTP keep-alive), not to shave bytes or active-connection counts.</div>
+</div>
+
 ---
 
 ## 12. GCP Cloud Load Balancing
@@ -489,10 +609,19 @@ GCP's external HTTP(S) LB is **global** — a single IP is announced from all Go
 
 ```mermaid
 graph TD
-    UserUS[User US East] -->|Anycast 34.x.x.x| PoP_NY[Google PoP New York]
-    UserEU[User EU West] -->|Anycast 34.x.x.x| PoP_AM[Google PoP Amsterdam]
-    PoP_NY -->|Google backbone| BS[Backend Service us-central1]
-    PoP_AM -->|Google backbone| BS2[Backend Service europe-west1]
+    classDef user fill:#34495e,stroke:#212f3c,color:#fff,rx:6
+    classDef pop fill:#e67e22,stroke:#ba6018,color:#fff,rx:6
+    classDef backend fill:#2980b9,stroke:#1f618d,color:#fff,rx:6
+
+    subgraph ANYCAST["Single anycast IP announced from every Google PoP worldwide"]
+        UserUS["User — US East"]:::user -->|"Anycast 34.x.x.x<br/>routed to nearest PoP"| PoP_NY["Google PoP<br/>New York"]:::pop
+        UserEU["User — EU West"]:::user -->|"Anycast 34.x.x.x<br/>routed to nearest PoP"| PoP_AM["Google PoP<br/>Amsterdam"]:::pop
+    end
+
+    subgraph BACKBONE["Google's private backbone, not the public internet"]
+        PoP_NY -->|"Terminated at edge,<br/>forwarded over backbone"| BS["Backend Service<br/>us-central1"]:::backend
+        PoP_AM -->|"Terminated at edge,<br/>forwarded over backbone"| BS2["Backend Service<br/>europe-west1"]:::backend
+    end
 ```
 
 ### Components
@@ -536,6 +665,12 @@ NEGs decouple the LB from instance groups. Instead of routing to a VM, the LB ro
 | Latency | Lower (closest PoP → backbone) | Higher (ISP routing) |
 | Cost | Higher | Lower |
 | Use when | Global user base, latency-sensitive | Single-region, cost-sensitive |
+
+<div class="quiz-card">
+  <p class="quiz-q">A user in Amsterdam and a user in New York both hit the same GCP global HTTP(S) LB IP address. Do their requests take the same network path to reach a backend in us-central1?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No, and that's the point of anycast. Each user's request is routed via BGP to whichever Google PoP is physically nearest — Amsterdam for the EU user, New York for the US user — and TLS is terminated right there at the edge. From that point on, the request travels over Google's private backbone to the backend, not the public internet, so both users get low latency to the edge even though the backend itself lives in one region.</div>
+</div>
 
 ---
 
@@ -756,6 +891,12 @@ NLB passes the real client IP (src IP preserved). If the backend's response rout
 - Ensure backend instances route traffic destined to the client *back through* the NLB or same path
 - Or enable **source NAT on NLB** (NLB target group: `preserve_client_ip = false`) — but you lose the real client IP
 - Use security groups that allow the NLB's IP range, not just client IPs
+
+<div class="quiz-card">
+  <p class="quiz-q">A request fails with a 502. A different request fails with a 504. What's the fundamental difference between what the LB experienced in each case?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>502 means the backend responded (or the connection did something), but with an invalid or empty response the LB couldn't parse — e.g. the backend crashed mid-response or sent a protocol the LB didn't expect. 504 means the backend never responded in time at all — the LB's idle/read timeout expired while waiting, typically because of a slow query, external call, or an exhausted threadpool. One is "got garbage back," the other is "got nothing back before giving up."</div>
+</div>
 
 ---
 

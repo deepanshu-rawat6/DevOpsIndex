@@ -1,5 +1,10 @@
 # TLS, SSL, and Encryption
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ## Encryption — The Big Picture (Generic)
 
 Before TLS specifics, understand the three types of encryption and why HTTPS needs all three.
@@ -10,14 +15,19 @@ Both sides use the **same key** to lock and unlock.
 
 ```mermaid
 graph LR
-    PLAIN1["Hello World\n(plaintext)"]
-    KEY1["🔑 Key: ABC123"]
-    ENC1["Xk39dP#!\n(ciphertext)"]
-    DEC1["Hello World\n(plaintext)"]
+    classDef plain fill:#27ae60,stroke:#1e8449,color:#fff,rx:6
+    classDef key fill:#f39c12,stroke:#ba6018,color:#fff,rx:6
+    classDef cipher fill:#7f8c8d,stroke:#616a6b,color:#fff,rx:6
+
+    PLAIN1["Hello World<br/>(plaintext)"]:::plain
+    KEY1["🔑 Key: ABC123<br/>same key locks and unlocks"]:::key
+    ENC1["Xk39dP#!<br/>(ciphertext)"]:::cipher
+    DEC1["Hello World<br/>(plaintext, recovered)"]:::plain
 
     PLAIN1 -->|"encrypt with KEY1"| ENC1
     ENC1 -->|"decrypt with KEY1"| DEC1
     KEY1 -.->|"same key used both ways"| ENC1
+    KEY1 -.->|"same key used both ways"| DEC1
 ```
 
 **Problem:** How do you share the key? If an attacker intercepts it, they can decrypt everything.
@@ -30,19 +40,27 @@ Two mathematically linked keys. **Public key encrypts, private key decrypts.** T
 
 ```mermaid
 graph TD
-    SERVER["Server generates key pair once:<br>🔓 Public key  (share with everyone)<br>🔒 Private key (NEVER share, stays on server)"]
+    classDef keypair fill:#2c3e50,stroke:#1a252f,color:#fff,rx:6
+    classDef good fill:#27ae60,stroke:#1e8449,color:#fff,rx:6
+    classDef cipher fill:#7f8c8d,stroke:#616a6b,color:#fff,rx:6
+    classDef bad fill:#e74c3c,stroke:#c0392b,color:#fff,rx:6
 
-    subgraph "Anyone can send a secret message"
-        ALICE["Alice has a secret: 'my password'"]
-        ALICE -->|"encrypt with server's PUBLIC key 🔓"| CIPHER["Xk39dP#!\n(ciphertext)"]
-        CIPHER -->|"send over internet"| SERVER2["Server decrypts with PRIVATE key 🔒"]
-        SERVER2 --> PLAIN2["'my password'\n(recovered)"]
+    SERVER["Server generates key pair once:<br/>🔓 Public key (share with everyone)<br/>🔒 Private key (NEVER share, stays on server)"]:::keypair
+
+    subgraph OK["Anyone can send a secret message"]
+        ALICE["Alice has a secret:<br/>'my password'"]:::good
+        ALICE -->|"encrypt with server's PUBLIC key 🔓"| CIPHER["Xk39dP#!<br/>(ciphertext)"]:::cipher
+        CIPHER -->|"send over internet"| SERVER2["Server decrypts<br/>with PRIVATE key 🔒"]:::good
+        SERVER2 --> PLAIN2["'my password'<br/>(recovered)"]:::good
     end
 
-    subgraph "Attacker intercepts but cannot decrypt"
-        ATTACKER["Eve intercepts: Xk39dP#!"]
-        ATTACKER -->|"has public key 🔓\nbut NOT private key 🔒"| FAIL["❌ Cannot decrypt"]
+    subgraph BAD["Attacker intercepts but cannot decrypt"]
+        ATTACKER["Eve intercepts: Xk39dP#!"]:::cipher
+        ATTACKER -->|"has public key 🔓<br/>but NOT private key 🔒"| FAIL["❌ Cannot decrypt"]:::bad
     end
+
+    SERVER -.->|"public key distributed to everyone"| ALICE
+    SERVER -.->|"public key distributed to everyone"| ATTACKER
 ```
 
 **Problem:** 100× slower than symmetric. Can't use for bulk data.
@@ -56,19 +74,25 @@ sequenceDiagram
     participant C as Your Browser
     participant S as Server (e.g. google.com)
 
+    rect rgb(40, 55, 75)
     Note over C,S: Step 1 — Key Exchange (Asymmetric, happens once)
     S->>C: "Here's my PUBLIC KEY 🔓 (inside the certificate)"
     C->>C: Generate a random session key: 🔑 "7f3a9c..."
-    C->>S: Encrypt session key with server's PUBLIC KEY 🔓<br>→ send "Xk8dP#!" (only server can decrypt)
-    S->>S: Decrypt with PRIVATE KEY 🔒<br>→ recovers session key 🔑 "7f3a9c..."
+    C->>S: Encrypt session key with server's PUBLIC KEY 🔓<br/>→ send "Xk8dP#!" (only server can decrypt)
+    S->>S: Decrypt with PRIVATE KEY 🔒<br/>→ recovers session key 🔑 "7f3a9c..."
+    end
 
     Note over C,S: Both now have the same session key 🔑 — nobody else does
 
+    rect rgb(40, 60, 45)
     Note over C,S: Step 2 — Actual Data (Symmetric, blazing fast)
     C->>S: "GET /profile" encrypted with 🔑 session key
     S->>C: "200 OK {name: Alice}" encrypted with 🔑 session key
+    end
 
-    Note over C,S: If attacker intercepts step 1 — only sees encrypted session key<br>Cannot decrypt without private key 🔒
+    rect rgb(75, 40, 40)
+    Note over C,S: If attacker intercepts step 1 — only sees encrypted session key<br/>Cannot decrypt without private key 🔒
+    end
 ```
 
 **Summary of what each does in HTTPS:**
@@ -79,50 +103,62 @@ sequenceDiagram
 | Symmetric (AES-256-GCM) | All actual data | Fast enough for gigabytes |
 | Hashing (SHA-256) | Certificate signatures, MAC | Verify nothing was tampered with |
 
+<div class="quiz-card">
+  <p class="quiz-q">In the hybrid HTTPS flow above, once the session key exchange (Step 1) finishes, is the actual "GET /profile" request encrypted with the server's public key, or with the shared session key?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    With the symmetric session key. Asymmetric crypto in HTTPS is used exactly once, to
+    securely exchange the session key — it never encrypts bulk request/response data.
+    All the actual traffic afterward runs through AES-256-GCM (symmetric), because
+    asymmetric crypto is roughly 100x slower and can't keep up with gigabytes of data.
+  </div>
+</div>
+
 ---
 
 ## Symmetric vs Asymmetric — Side by Side
 
 ```mermaid
 graph TD
+    classDef sym fill:#3498db,stroke:#2471a3,color:#fff,rx:6
+    classDef asym fill:#8e44ad,stroke:#6c3483,color:#fff,rx:6
+    classDef hybrid fill:#27ae60,stroke:#1e8449,color:#fff,rx:6
+
     subgraph SYM["Symmetric Encryption"]
-        SA["🔑 One key<br>Same key encrypts AND decrypts<br>AES-256-GCM, ChaCha20<br>Speed: ~1 GB/s<br>Problem: how to share the key?"]
+        SA["🔑 One key<br/>Same key encrypts AND decrypts<br/>AES-256-GCM, ChaCha20<br/>Speed: ~1 GB/s<br/>Problem: how to share the key?"]:::sym
     end
 
     subgraph ASYM["Asymmetric Encryption"]
-        AS["🔓🔒 Key pair<br>PUBLIC key encrypts<br>PRIVATE key decrypts<br>RSA-2048, ECDSA, ECDH<br>Speed: ~10 MB/s<br>No key-sharing problem"]
+        AS["🔓🔒 Key pair<br/>PUBLIC key encrypts<br/>PRIVATE key decrypts<br/>RSA-2048, ECDSA, ECDH<br/>Speed: ~10 MB/s<br/>No key-sharing problem"]:::asym
     end
 
-    subgraph HYBRID["Hybrid (what TLS does)"]
-        HY["Use ASYM to exchange a symmetric key securely<br>Then use SYM for all data<br>Best of both: security + speed"]
+    subgraph HYBRID["Hybrid — what TLS actually does"]
+        H1["ECDHE (asymmetric)<br/>Securely agree on a shared secret"]:::hybrid
+        H2["AES-256-GCM (symmetric)<br/>Encrypt all actual data with that secret"]:::hybrid
+        H1 --> H2
     end
 
     SYM -->|"solves speed"| HYBRID
     ASYM -->|"solves key exchange"| HYBRID
 ```
 
----
-
-
-
-```mermaid
-graph TD
-    subgraph SYM["Symmetric — one key"]
-        A1["AES-256-GCM<br>Same key encrypts and decrypts<br>Fast: ~1 GB/s on modern CPU<br>Problem: how to share the key securely?"]
-    end
-    subgraph ASYM["Asymmetric — key pair"]
-        A2["RSA-2048 / ECDSA / ECDH<br>Public key encrypts, private key decrypts<br>Slow: ~10 MB/s<br>No key-sharing problem — public key is public"]
-    end
-    subgraph HYBRID["TLS uses HYBRID"]
-        H1["ECDHE (asymmetric)<br>Securely agree on a shared secret"]
-        H2["AES-256-GCM (symmetric)<br>Encrypt all actual data with that secret"]
-        H1 --> H2
-    end
-```
-
 **Why hybrid?** Asymmetric crypto solves the key exchange problem but is 100× slower than AES. TLS uses asymmetric only to agree on a shared session key, then switches to AES for all data.
 
 **Forward Secrecy (ECDHE):** Each session generates a new ephemeral key pair. The server's long-term private key is never used to encrypt data — only to authenticate. If the private key is stolen years later, past sessions cannot be decrypted.
+
+<div class="quiz-card">
+  <p class="quiz-q">A server's long-term private key is stolen a year after a TLS session that used ECDHE took place. Can the attacker now decrypt the recorded traffic from that old session?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No. ECDHE generates a brand-new, temporary key pair for every session and discards
+    the private half once the handshake finishes — the long-term private key is only
+    ever used to sign/authenticate the exchange, never to encrypt data directly.
+    Without that session's now-gone ephemeral private key, the recorded traffic can't
+    be decrypted even with the stolen long-term key. This is forward secrecy, and it
+    does <strong>not</strong> hold for static RSA key exchange, where the same
+    long-term private key decrypts every session ever recorded.
+  </div>
+</div>
 
 ---
 
@@ -130,15 +166,32 @@ graph TD
 
 ```mermaid
 graph LR
-    SSL2["SSL 2.0 (1995)<br>BROKEN — DROWN attack<br>Deprecated 1996"] --> SSL3
-    SSL3["SSL 3.0 (1996)<br>BROKEN — POODLE attack<br>Deprecated 2015"] --> TLS10
-    TLS10["TLS 1.0 (1999)<br>BEAST, POODLE variants<br>Deprecated 2021"] --> TLS11
-    TLS11["TLS 1.1 (2006)<br>Deprecated 2021"] --> TLS12
-    TLS12["TLS 1.2 (2008)<br>Current — widely deployed<br>2 RTT handshake"] --> TLS13
-    TLS13["TLS 1.3 (2018)<br>CURRENT PREFERRED<br>1 RTT, forward secrecy mandatory"]
+    classDef broken fill:#e74c3c,stroke:#c0392b,color:#fff,rx:6
+    classDef deprecated fill:#7f8c8d,stroke:#616a6b,color:#fff,rx:6
+    classDef current fill:#3498db,stroke:#2471a3,color:#fff,rx:6
+    classDef preferred fill:#27ae60,stroke:#1e8449,color:#fff,rx:6
+
+    SSL2["SSL 2.0 (1995)<br/>BROKEN — DROWN attack<br/>Deprecated 1996"]:::broken --> SSL3
+    SSL3["SSL 3.0 (1996)<br/>BROKEN — POODLE attack<br/>Deprecated 2015"]:::broken --> TLS10
+    TLS10["TLS 1.0 (1999)<br/>BEAST, POODLE variants<br/>Deprecated 2021"]:::deprecated --> TLS11
+    TLS11["TLS 1.1 (2006)<br/>Deprecated 2021"]:::deprecated --> TLS12
+    TLS12["TLS 1.2 (2008)<br/>Minimum acceptable today<br/>2 RTT handshake"]:::current --> TLS13
+    TLS13["TLS 1.3 (2018)<br/>CURRENT PREFERRED<br/>1 RTT, forward secrecy mandatory"]:::preferred
 ```
 
 **Minimum acceptable today:** TLS 1.2. Prefer TLS 1.3.
+
+<div class="quiz-card">
+  <p class="quiz-q">SSL 3.0 and TLS 1.0/1.1 are all deprecated. Is TLS 1.2 in that same "broken, don't use it" category?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No. TLS 1.2 is not deprecated — it's the current minimum acceptable version.
+    Only SSL 2.0/3.0 and TLS 1.0/1.1 are broken or deprecated (DROWN, POODLE, BEAST).
+    TLS 1.2 is still widely deployed and safe when configured with strong cipher
+    suites; TLS 1.3 is simply preferred where available for its 1-RTT handshake and
+    mandatory forward secrecy.
+  </div>
+</div>
 
 ---
 
@@ -149,15 +202,18 @@ sequenceDiagram
     participant C as Client
     participant S as Server
 
-    Note over C,S: Round Trip 1
-    C->>S: ClientHello<br>TLS version: 1.2<br>Random: 32 bytes<br>Cipher suites: [TLS_ECDHE_RSA_AES256_GCM_SHA384, ...]<br>Extensions: SNI=google.com, ALPN=h2
+    rect rgb(40, 55, 75)
+    Note over C,S: Round Trip 1 — negotiate + server proves identity
+    C->>S: ClientHello<br/>TLS version: 1.2<br/>Random: 32 bytes<br/>Cipher suites: [TLS_ECDHE_RSA_AES256_GCM_SHA384, ...]<br/>Extensions: SNI=google.com, ALPN=h2
 
-    S->>C: ServerHello<br>Chosen cipher: TLS_ECDHE_RSA_AES256_GCM_SHA384<br>Random: 32 bytes
-    S->>C: Certificate<br>*.google.com cert + intermediate CA chain
-    S->>C: ServerKeyExchange<br>ECDHE public key (ephemeral)<br>Signed with server private key
+    S->>C: ServerHello<br/>Chosen cipher: TLS_ECDHE_RSA_AES256_GCM_SHA384<br/>Random: 32 bytes
+    S->>C: Certificate<br/>*.google.com cert + intermediate CA chain
+    S->>C: ServerKeyExchange<br/>ECDHE public key (ephemeral)<br/>Signed with server private key
     S->>C: ServerHelloDone
+    end
 
-    Note over C,S: Round Trip 2
+    rect rgb(65, 50, 30)
+    Note over C,S: Round Trip 2 — client verifies, both derive keys
     C->>C: Verify cert chain against OS root store
     C->>C: Generate pre-master secret from ECDHE keys
     C->>C: Derive session keys (AES key + MAC key)
@@ -168,10 +224,62 @@ sequenceDiagram
     S->>S: Derive same session keys
     S->>C: ChangeCipherSpec
     S->>C: Finished
+    end
 
-    Note over C,S: Encrypted data flows — 2 RTTs spent
+    rect rgb(40, 60, 45)
+    Note over C,S: Encrypted data flows — 2 RTTs spent before the first byte
     C->>S: HTTP GET / (encrypted with AES-256-GCM)
+    end
 ```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. ClientHello.</strong> The client proposes TLS 1.2, a random nonce, a list of
+      cipher suites it supports, and extensions like SNI (which hostname it wants) and
+      ALPN (HTTP/2 vs HTTP/1.1).
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Server responds — still Round Trip 1.</strong> <code>ServerHello</code> picks
+      the cipher suite, <code>Certificate</code> sends the leaf + intermediate chain,
+      <code>ServerKeyExchange</code> sends a signed ephemeral ECDHE public key, and
+      <code>ServerHelloDone</code> ends the server's turn.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Client verifies and replies — Round Trip 2 begins.</strong> The client
+      validates the certificate chain against its OS trust store, computes the
+      pre-master secret from the ECDHE exchange, derives session keys, sends its own
+      <code>ClientKeyExchange</code>, then <code>ChangeCipherSpec</code> to switch on
+      encryption, then <code>Finished</code> — an HMAC over every handshake message so far.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Server confirms, data flows.</strong> The server independently derives the
+      same session keys, replies with its own <code>ChangeCipherSpec</code> and
+      <code>Finished</code>. Only now — after 2 full round trips — can the first
+      encrypted HTTP request go out.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Why does the client have to wait for a full second round trip (ClientKeyExchange → Finished) before sending its first encrypted HTTP request, instead of sending it right after ServerHelloDone?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    Because until Round Trip 2 completes, neither side has derived the actual session
+    keys yet, and the server hasn't confirmed it agrees with the client's key material.
+    The client only learns the server's ephemeral public key and certificate in RTT1;
+    it must then verify the cert, compute the pre-master secret, derive keys, and get
+    its own <code>Finished</code> message acknowledged before it's safe to send
+    encrypted data. TLS 1.3 removes this wait by having the server derive keys as soon
+    as it sees the client's <code>key_share</code> in a single round trip.
+  </div>
+</div>
 
 ---
 
@@ -182,8 +290,9 @@ sequenceDiagram
     participant C as Client
     participant S as Server
 
-    Note over C,S: Single Round Trip
-    C->>S: ClientHello<br>TLS 1.3<br>key_share: ECDHE public key (X25519)<br>supported_groups: X25519, P-256<br>SNI: google.com<br>ALPN: h2
+    rect rgb(40, 60, 45)
+    Note over C,S: Single Round Trip — most of the handshake, encrypted
+    C->>S: ClientHello<br/>TLS 1.3<br/>key_share: ECDHE public key (X25519)<br/>supported_groups: X25519, P-256<br/>SNI: google.com<br/>ALPN: h2
 
     Note over S: Server derives keys NOW from client's key_share
     S->>C: ServerHello + key_share (server ECDHE public key)
@@ -195,14 +304,52 @@ sequenceDiagram
     Note over C: Client derives same keys, verifies cert, sends Finished
     C->>S: Finished
     C->>S: HTTP GET / (already encrypted — sent with Finished!)
+    end
 
-    Note over C,S: 1 RTT total
+    Note over C,S: 1 RTT total — first encrypted byte leaves on flight #2
 
+    rect rgb(65, 50, 30)
     Note over C,S: 0-RTT Resumption (optional, replay risk)
     C->>S: ClientHello + early_data (HTTP GET immediately)
     Note over S: No handshake needed — use pre-shared session ticket
     S->>C: HTTP Response
+    end
 ```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. ClientHello guesses the key exchange group.</strong> The client sends its
+      ECDHE public key (<code>key_share</code>) in the very first flight, betting on a
+      group the server supports (X25519 or P-256) — no separate round trip needed just
+      to negotiate the group.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Server derives keys immediately.</strong> As soon as the server sees the
+      client's <code>key_share</code>, it computes the shared secret and derives session
+      keys before sending anything back. Everything from <code>EncryptedExtensions</code>
+      onward, including the <code>Certificate</code>, is already encrypted.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Client verifies and finishes.</strong> The client derives the same keys,
+      verifies the certificate and <code>CertificateVerify</code> signature, then sends
+      its own <code>Finished</code> — and can attach the actual HTTP request to that
+      same flight.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Optional 0-RTT resumption.</strong> On a repeat connection with a cached
+      session ticket, the client can send its HTTP request in the very first packet,
+      with no handshake round trip at all — at the cost of replay risk, since that
+      first request isn't yet protected by a fresh key exchange.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 **TLS 1.3 vs TLS 1.2:**
 
@@ -215,19 +362,58 @@ sequenceDiagram
 | Session resumption | Session ID or ticket | PSK (pre-shared key) |
 | Key exchange | RSA or ECDHE | ECDHE only (X25519, P-256) |
 
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="tls12" class="active state-warn">TLS 1.2 (2 RTT)</button>
+    <button data-toggle-opt="tls13" class="state-ok">TLS 1.3 (1 RTT)</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="tls12">
+    Two full round trips before the first encrypted application byte: RTT1 negotiates
+    the cipher and sends the server's certificate and ephemeral key <em>in the
+    clear</em>; RTT2 is spent on the client proving it derived the same keys before
+    either side is confident enough to send data. On a link with 100ms latency,
+    that's roughly 200ms of pure handshake overhead before any application data moves.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="tls13">
+    One round trip: the client guesses the key-exchange group and sends its key share
+    in flight #1; the server derives keys immediately and responds with everything —
+    including material for the first response — by flight #2. The same 100ms link
+    costs roughly 100ms of handshake overhead, half of TLS 1.2, and the certificate
+    itself travels encrypted instead of in plaintext.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">In TLS 1.2, the server's Certificate message is sent in the clear before encryption is turned on. Is that also true in TLS 1.3?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No. In TLS 1.3 the server derives session keys as soon as it sees the client's
+    <code>key_share</code>, so everything from <code>EncryptedExtensions</code>
+    onward — including the <code>Certificate</code> and <code>CertificateVerify</code>
+    messages — is already encrypted. TLS 1.2 sends the certificate chain in
+    plaintext, which is why a network observer can see which certificate (and
+    therefore which domain) a TLS 1.2 connection is negotiating, but not a TLS 1.3 one.
+  </div>
+</div>
+
 ---
 
 ## TLS Certificate Chain
 
 ```mermaid
 graph TD
-    ROOT["Root CA Certificate<br>DigiCert Global Root G2<br>Self-signed<br>Pre-installed in OS/browsers<br>Private key stored OFFLINE (air-gapped HSM)"]
-    INTER["Intermediate CA Certificate<br>DigiCert TLS RSA SHA256 2020 CA1<br>Signed by Root CA<br>Used for day-to-day signing"]
-    LEAF["Leaf Certificate<br>*.google.com<br>Public key for TLS<br>SANs: google.com, www.google.com<br>Valid: 2024-01-01 to 2025-01-01<br>Signed by Intermediate CA"]
+    classDef root fill:#2c3e50,stroke:#1a252f,color:#fff,rx:6
+    classDef inter fill:#8e44ad,stroke:#6c3483,color:#fff,rx:6
+    classDef leaf fill:#27ae60,stroke:#1e8449,color:#fff,rx:6
+    classDef endpoint fill:#3498db,stroke:#2471a3,color:#fff,rx:6
+
+    ROOT["Root CA Certificate<br/>DigiCert Global Root G2<br/>Self-signed<br/>Pre-installed in OS/browsers<br/>Private key stored OFFLINE (air-gapped HSM)"]:::root
+    INTER["Intermediate CA Certificate<br/>DigiCert TLS RSA SHA256 2020 CA1<br/>Signed by Root CA<br/>Used for day-to-day signing"]:::inter
+    LEAF["Leaf Certificate<br/>*.google.com<br/>Public key for TLS<br/>SANs: google.com, www.google.com<br/>Valid: 2024-01-01 to 2025-01-01<br/>Signed by Intermediate CA"]:::leaf
 
     ROOT -->|"signs"| INTER
     INTER -->|"signs"| LEAF
-    LEAF -->|"presented during TLS handshake"| SERVER["google.com"]
+    LEAF -->|"presented during TLS handshake"| SERVER["google.com"]:::endpoint
 ```
 
 **Certificate fields:**
@@ -247,14 +433,70 @@ Signature:  SHA256WithRSA
 
 ```mermaid
 flowchart TD
-    RECV["Client receives certificate"] --> SIG
-    SIG["Verify signature chain<br>Intermediate signed Leaf?<br>Root signed Intermediate?"] --> TRUST
-    TRUST["Root CA in OS trust store?<br>/etc/ssl/certs/ or system keychain"] --> EXPIRY
-    EXPIRY["Not Before <= now <= Not After?"] --> SAN
-    SAN["SAN matches requested hostname?<br>*.google.com matches google.com?"] --> REVOKE
-    REVOKE["Not revoked?<br>CRL or OCSP check"] --> OK["Certificate VALID<br>proceed with handshake"]
-    SIG & TRUST & EXPIRY & SAN & REVOKE -->|"any fail"| ERR["TLS handshake FAILED<br>connection aborted"]
+    classDef step fill:#3498db,stroke:#2471a3,color:#fff,rx:6
+    classDef ok fill:#27ae60,stroke:#1e8449,color:#fff,rx:6
+    classDef bad fill:#e74c3c,stroke:#c0392b,color:#fff,rx:6
+
+    RECV["Client receives certificate"]:::step --> SIG
+    SIG["Verify signature chain<br/>Intermediate signed Leaf?<br/>Root signed Intermediate?"]:::step --> TRUST
+    TRUST["Root CA in OS trust store?<br/>/etc/ssl/certs/ or system keychain"]:::step --> EXPIRY
+    EXPIRY["Not Before &lt;= now &lt;= Not After?"]:::step --> SAN
+    SAN["SAN matches requested hostname?<br/>*.google.com matches google.com?"]:::step --> REVOKE
+    REVOKE["Not revoked?<br/>CRL or OCSP check"]:::step --> OK["Certificate VALID<br/>proceed with handshake"]:::ok
+    SIG & TRUST & EXPIRY & SAN & REVOKE -->|"any fail"| ERR["TLS handshake FAILED<br/>connection aborted"]:::bad
 ```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Verify the signature chain.</strong> Cryptographically confirm the
+      intermediate CA's signature on the leaf certificate, and the root CA's
+      signature on the intermediate — a broken link anywhere invalidates the whole
+      chain.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Confirm the root is trusted.</strong> Walk up to the root CA
+      certificate and check it's one of the roots pre-installed in the OS or
+      browser's trust store. A chain that terminates in an unknown root fails here,
+      no matter how valid the signatures are.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Check the validity window.</strong> <code>Not Before &lt;= now &lt;= Not After</code>.
+      An expired (or not-yet-valid) certificate fails regardless of who signed it.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Match the hostname against the SAN.</strong> The Subject Alternative
+      Name list — not the legacy CN field — must match the hostname the client
+      actually requested (<code>*.google.com</code> matching <code>google.com</code>,
+      for example).
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Check revocation status.</strong> A CRL or OCSP lookup confirms the
+      CA hasn't revoked this certificate early (private key compromise,
+      mis-issuance). Any single failure across all five checks aborts the handshake
+      — none of them are optional.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A certificate's signature chain checks out, it's within its validity window, and the SAN matches — but the root CA isn't in the client's trust store. Does the handshake succeed?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No. Every check — signature chain, trust store membership, validity window, SAN
+    match, and revocation status — must pass independently; there's no partial
+    credit. An untrusted root fails validation and aborts the TLS handshake even if
+    every other check is perfect, which is exactly why self-signed certificates fail
+    by default in browsers: the signature is mathematically valid, but the root
+    isn't in anyone's trust store.
+  </div>
+</div>
 
 ---
 
@@ -307,20 +549,32 @@ sequenceDiagram
 
     Note over A,B: Public params agreed in advance: p=23, g=5
 
+    rect rgb(40, 55, 75)
+    Note over A: Private computation — never leaves Alice
     A->>A: Pick secret a=6 (never transmitted)
     A->>A: Compute A = g^a mod p = 5^6 mod 23 = 8
+    end
     A->>NET: Send A=8 (public)
     NET->>B: A=8
 
+    rect rgb(40, 55, 75)
+    Note over B: Private computation — never leaves Bob
     B->>B: Pick secret b=15 (never transmitted)
     B->>B: Compute B = g^b mod p = 5^15 mod 23 = 19
+    end
     B->>NET: Send B=19 (public)
     NET->>A: B=19
 
+    rect rgb(40, 60, 45)
+    Note over A,B: Both derive the same secret independently
     A->>A: Shared secret = B^a mod p = 19^6 mod 23 = 2
     B->>B: Shared secret = A^b mod p = 8^15 mod 23 = 2
     Note over A,B: Both computed the same secret = 2
-    Note over NET: Attacker sees p=23, g=5, A=8, B=19<br>Cannot find secret without solving discrete logarithm
+    end
+
+    rect rgb(75, 40, 40)
+    Note over NET: Attacker sees p=23, g=5, A=8, B=19<br/>Cannot find secret without solving discrete logarithm
+    end
 ```
 
 **Why it works — the math:**
@@ -335,6 +589,19 @@ No efficient algorithm known for large p (2048+ bits).
 ```
 
 **The Discrete Logarithm Problem:** Given `g`, `p`, and `A = g^a mod p`, find `a`. Easy in one direction (exponentiation: fast), computationally infeasible in reverse for large primes.
+
+<div class="quiz-card">
+  <p class="quiz-q">The attacker on the public network sees p, g, A, and B — the same public values Alice and Bob exchanged. Why can't they compute the shared secret the same way Alice and Bob do?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    Alice and Bob each compute the shared secret using their own private exponent
+    (a or b), which never crosses the network — Alice computes B^a mod p, Bob
+    computes A^b mod p. The attacker only has the public values A = g^a mod p and
+    B = g^b mod p; recovering a or b from those requires solving the discrete
+    logarithm problem, which has no known efficient algorithm for large primes.
+    Seeing every publicly exchanged number doesn't help without the private exponent.
+  </div>
+</div>
 
 ---
 
@@ -360,9 +627,13 @@ Smaller keys → faster computation, smaller TLS handshake messages, less CPU.
 
 ```mermaid
 graph LR
-    G["Generator point G<br>(public, on the curve)"] -->|"scalar multiplication"| PUB_A["Alice's public key<br>A = a × G<br>(a = Alice's private key scalar)"]
-    G -->|"scalar multiplication"| PUB_B["Bob's public key<br>B = b × G<br>(b = Bob's private key scalar)"]
-    PUB_A & PUB_B -->|"key agreement"| SECRET["Shared secret<br>S = a × B = b × A = ab × G"]
+    classDef gen fill:#7f8c8d,stroke:#616a6b,color:#fff,rx:6
+    classDef pub fill:#3498db,stroke:#2471a3,color:#fff,rx:6
+    classDef secret fill:#27ae60,stroke:#1e8449,color:#fff,rx:6
+
+    G["Generator point G<br/>(public, on the curve)"]:::gen -->|"scalar multiplication"| PUB_A["Alice's public key<br/>A = a × G<br/>(a = Alice's private key scalar)"]:::pub
+    G -->|"scalar multiplication"| PUB_B["Bob's public key<br/>B = b × G<br/>(b = Bob's private key scalar)"]:::pub
+    PUB_A & PUB_B -->|"key agreement"| SECRET["Shared secret<br/>S = a × B = b × A = ab × G"]:::secret
 ```
 
 **The math:**
@@ -398,6 +669,8 @@ sequenceDiagram
 
     Note over C2,S2: TLS 1.3 ECDHE with X25519 curve
 
+    rect rgb(40, 55, 75)
+    Note over C2,S2: Generate ephemeral key pairs — fresh every session
     C2->>C2: Generate ephemeral private key c_priv (random, 32 bytes)
     C2->>C2: Compute public key c_pub = c_priv × G
     C2->>S2: ClientHello: key_share = c_pub
@@ -408,15 +681,20 @@ sequenceDiagram
     S2->>C2: ServerHello: key_share = s_pub
 
     C2->>C2: Shared secret = c_priv × s_pub = c_priv × s_priv × G
+    end
 
+    rect rgb(40, 60, 45)
     Note over C2,S2: Both derived same shared secret
     Note over C2,S2: Derive session keys via HKDF:
     Note over C2,S2: client_key = HKDF(shared_secret, "client key")
     Note over C2,S2: server_key = HKDF(shared_secret, "server key")
+    end
 
+    rect rgb(75, 40, 40)
     Note over C2: c_priv discarded after handshake
     Note over S2: s_priv discarded after handshake
     Note over C2,S2: Forward secrecy: past sessions unrecoverable
+    end
 ```
 
 **Why "ephemeral" = forward secrecy:**
@@ -455,11 +733,15 @@ The raw ECDHE output (a point on the curve) is not directly used as an AES key. 
 
 ```mermaid
 graph LR
-    ECDHE_OUT["ECDHE shared secret<br>(32 bytes, the x-coordinate of ab×G)"] --> HKDF_EXT
-    HKDF_EXT["HKDF-Extract<br>salt + IKM --> PRK<br>(Pseudorandom Key)"] --> HKDF_EXP
-    TRANSCRIPT["Handshake transcript hash<br>(all messages so far, prevents replay)"] --> HKDF_EXP
-    HKDF_EXP["HKDF-Expand<br>PRK + label + context --> OKM<br>(Output Key Material)"] --> KEYS
-    KEYS["client_write_key (AES-256)<br>server_write_key (AES-256)<br>client_write_IV (96-bit nonce)<br>server_write_IV (96-bit nonce)"]
+    classDef input fill:#34495e,stroke:#212f3c,color:#fff,rx:6
+    classDef process fill:#f39c12,stroke:#ba6018,color:#fff,rx:6
+    classDef output fill:#27ae60,stroke:#1e8449,color:#fff,rx:6
+
+    ECDHE_OUT["ECDHE shared secret<br/>(32 bytes, the x-coordinate of ab×G)"]:::input --> HKDF_EXT
+    HKDF_EXT["HKDF-Extract<br/>salt + IKM --> PRK<br/>(Pseudorandom Key)"]:::process --> HKDF_EXP
+    TRANSCRIPT["Handshake transcript hash<br/>(all messages so far, prevents replay)"]:::input --> HKDF_EXP
+    HKDF_EXP["HKDF-Expand<br/>PRK + label + context --> OKM<br/>(Output Key Material)"]:::process --> KEYS
+    KEYS["client_write_key (AES-256)<br/>server_write_key (AES-256)<br/>client_write_IV (96-bit nonce)<br/>server_write_IV (96-bit nonce)"]:::output
 ```
 
 The **transcript hash** binds the keys to this specific handshake — prevents man-in-the-middle attacks where an attacker replays a valid key exchange from a different session.
@@ -475,6 +757,19 @@ client_handshake_traffic_secret = HKDF-Expand-Label(handshake_secret, "c hs traf
 server_handshake_traffic_secret = HKDF-Expand-Label(handshake_secret, "s hs traffic", transcript_hash)
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">Why does TLS 1.3 run the raw ECDHE shared secret through HKDF along with a handshake transcript hash, instead of using the shared secret directly as the AES key?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    Two reasons. First, the raw ECDHE output is a curve-point coordinate, not a
+    uniformly random 256-bit value suitable as a cipher key — HKDF-Extract turns it
+    into a proper pseudorandom key. Second, folding in the transcript hash binds the
+    derived keys to this exact handshake's messages, so an attacker can't replay a
+    valid key exchange captured from a different session and have it produce usable
+    keys elsewhere.
+  </div>
+</div>
+
 ---
 
 ## mTLS — Mutual TLS Between Services
@@ -483,20 +778,52 @@ Standard TLS: client verifies server's certificate. mTLS: **both sides present a
 
 ### mTLS handshake vs TLS handshake
 
-```
-TLS (one-way):
-  Client → Server: ClientHello
-  Server → Client: Certificate (server proves identity)
-  Client → Server: [key exchange, Finished]
-  Connection established. Server identity verified. Client anonymous.
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="tls" class="active state-warn">TLS (one-way)</button>
+    <button data-toggle-opt="mtls" class="state-ok">mTLS (two-way)</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="tls">
+    <pre><code class="language-mermaid">sequenceDiagram
+    participant Client
+    participant Server
 
-mTLS (two-way):
-  Client → Server: ClientHello
-  Server → Client: Certificate + CertificateRequest (server asks for client cert)
-  Client → Server: Certificate + CertificateVerify (client proves identity)
-  Server verifies client cert against its CA
-  Connection established. Both sides authenticated.
-```
+    Client->>Server: ClientHello
+    Server->>Client: Certificate (server proves its identity)
+    Client->>Client: Verify server certificate chain
+    Client->>Server: Key exchange, Finished
+    Note over Client,Server: Connection established
+    Note over Client,Server: Server identity verified — client remains anonymous</code></pre>
+  </div>
+  <div class="toggle-panel" data-toggle-panel="mtls">
+    <pre><code class="language-mermaid">sequenceDiagram
+    participant Client
+    participant Server
+
+    Client->>Server: ClientHello
+    Server->>Client: Certificate
+    Server->>Client: CertificateRequest (server asks for a client cert too)
+    Client->>Server: Certificate (client proves its identity)
+    Client->>Server: CertificateVerify
+    Server->>Server: Verify client certificate against its own CA
+    Note over Client,Server: Connection established
+    Note over Client,Server: Both sides authenticated</code></pre>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">In standard (one-way) TLS, is the client's identity verified by the server at all?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No. Standard TLS only has the client verify the server's certificate — the
+    server never asks the client to prove who it is, so the client remains
+    anonymous at the TLS layer (authentication, if any, happens later at the
+    application layer, e.g. a login form or API key). mTLS is what adds the missing
+    half: the server sends a <code>CertificateRequest</code> and the client must
+    respond with its own certificate and a <code>CertificateVerify</code> before the
+    server will consider the connection authenticated on both sides.
+  </div>
+</div>
 
 ### cert-manager — automated certificate lifecycle
 
@@ -681,6 +1008,20 @@ tlsConfig := &tls.Config{
 
 **Option 3 — Istio/Linkerd handle rotation transparently:**
 Service meshes manage cert issuance and rotation for you. Sidecars hold the mTLS identity; your app code makes plain HTTP/gRPC calls; the sidecar wraps them in mTLS. Rotation is invisible to the app.
+
+<div class="quiz-card">
+  <p class="quiz-q">A server uses the <code>GetCertificate</code> callback for zero-downtime rotation. The cert file on disk just got renewed by cert-manager. Do connections that were already established before the renewal start using the new certificate?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No. <code>GetCertificate</code> is only invoked on a new TLS handshake — an
+    already-established connection negotiated its certificate once, at connection
+    time, and keeps using that same cert for its lifetime. Only new connections made
+    after the rotation will trigger <code>GetCertificate</code> again and pick up the
+    fresh cert from disk. This is exactly why it's "zero-downtime": nothing has to
+    restart or drop existing connections, but the effect of a rotation is only fully
+    visible once old connections naturally cycle out.
+  </div>
+</div>
 
 ### Let's Encrypt with cert-manager (public services)
 

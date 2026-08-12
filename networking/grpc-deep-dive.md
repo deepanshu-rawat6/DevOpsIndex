@@ -2,6 +2,11 @@
 
 Implementation-level gRPC: wire format, streaming modes with full code, HTTP/2 mechanics, interceptors, deadlines, health checking, load balancing, gRPC-Web, and error handling. Conceptual overview lives in [grpc-graphql.md](./grpc-graphql.md) — this file goes underneath it.
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## 1. Protobuf Wire Format Internals
@@ -58,11 +63,17 @@ Encoding `Order{id: "A1", amount: 9.5, quantity: 300}`:
 
 gRPC frames each message with a 5-byte prefix before handing it to HTTP/2 DATA frames — this is the **Length-Prefixed Message** format defined by the gRPC wire protocol, independent of protobuf itself:
 
-```
-┌─────────────┬───────────────────────┬─────────────────────┐
-│ Compressed  │ Message Length        │ Message (protobuf   │
-│ Flag (1B)   │ (4B, big-endian uint) │ bytes, N bytes)      │
-└─────────────┴───────────────────────┴─────────────────────┘
+```mermaid
+graph LR
+    classDef flag fill:#e74c3c,stroke:#c0392b,color:#fff,rx:8
+    classDef len fill:#3498db,stroke:#2980b9,color:#fff,rx:8
+    classDef msg fill:#27ae60,stroke:#1e8449,color:#fff,rx:8
+
+    F["Compressed Flag — 1 byte<br>0x00 = identity (uncompressed)<br>0x01 = compressed per grpc-encoding header"]:::flag
+    L["Message Length — 4 bytes<br>big-endian uint32<br>exact byte count of the message that follows"]:::len
+    M["Message — N bytes<br>protobuf-encoded payload<br>(or compressed bytes if flag=1)"]:::msg
+
+    F --> L --> M
 ```
 
 This lets a receiver read exactly N bytes for one message even when several messages arrive back-to-back inside a single HTTP/2 DATA frame (frames don't align 1:1 with RPC messages — a large message can span multiple DATA frames, or several small messages can pack into one).
@@ -72,6 +83,12 @@ HTTP/2 DATA frame payload for a streamed response:
 [00][00 00 00 0C][... 12 bytes of Order protobuf ...][00][00 00 00 08][... 8 bytes ...]
  ^compressed=no  ^length=12                            ^flag        ^length=8
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A single HTTP/2 DATA frame arrives containing two back-to-back gRPC messages. How does the receiver know where the first message ends and the second begins, given that DATA frames don't align 1:1 with RPC messages?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The 5-byte length-prefix in front of every message. The receiver reads the 1-byte compressed flag and 4-byte big-endian length, consumes exactly that many bytes as the first message, then repeats the same read for whatever bytes remain — it never has to guess a boundary from the protobuf content itself. This is exactly what lets several small messages pack into one DATA frame, or a single large message span several frames.</div>
+</div>
 
 ---
 
@@ -101,6 +118,31 @@ message Order {
   double amount = 3;
 }
 ```
+
+Quick side-by-side before the full code for each — cardinality, the call shape, and how each side knows the stream is done:
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="unary" class="active">Unary</button>
+    <button data-tab="serverstream">Server streaming</button>
+    <button data-tab="clientstream">Client streaming</button>
+    <button data-tab="bidistream">Bidi streaming</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="unary">
+      <strong>1 request → 1 response.</strong> The handler signature is a plain function: takes a request, returns a response or an error. No stream object at all. Termination is implicit — the function returning <em>is</em> the end of the RPC.
+    </div>
+    <div class="tab-panel" data-tab-panel="serverstream">
+      <strong>1 request → N responses.</strong> The client sends one message; the server calls <code>stream.Send()</code> in a loop. The client's <code>stream.Recv()</code> loop ends when it sees <code>io.EOF</code> — the server signals "done" simply by returning <code>nil</code> from its handler.
+    </div>
+    <div class="tab-panel" data-tab-panel="clientstream">
+      <strong>N requests → 1 response.</strong> The client calls <code>stream.Send()</code> in a loop, then <code>stream.CloseAndRecv()</code> to signal it's finished and block for the aggregate response. The server's <code>stream.Recv()</code> loop detects <code>io.EOF</code> and replies once via <code>stream.SendAndClose()</code>.
+    </div>
+    <div class="tab-panel" data-tab-panel="bidistream">
+      <strong>N requests ↔ N responses, independently.</strong> Both sides send and receive on their own schedule — nothing forces a request/response pairing. The client's <code>stream.CloseSend()</code> is a <em>half-close</em>: it stops the client from sending more, but the server can keep replying until it independently decides to return.
+    </div>
+  </div>
+</div>
 
 ### 2.1 Unary — one request, one response
 
@@ -338,6 +380,12 @@ func main() {
 
 **Cancellation propagation:** cancelling `ctx` (timeout, explicit `cancel()`, or client process exit) tears down the underlying HTTP/2 stream — the server's `stream.Context().Done()` fires, and any blocked `stream.Recv()`/`stream.Send()` on both sides unblocks with an error. There is no leaked goroutine as long as both sides `select` on `ctx.Done()` as shown above.
 
+<div class="quiz-card">
+  <p class="quiz-q">In the bidi chat example, the client goroutine calls stream.CloseSend() after its last message. Does that end the RPC?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — CloseSend() is a half-close. It tells the server "no more messages coming from me," but the server can keep sending replies on the same stream for as long as it wants. The RPC only fully ends when the server's handler returns (or the client's receive loop sees io.EOF after the server closes its side, or ctx is cancelled). Conflating "I'm done sending" with "the call is over" is the easiest mistake to make with bidi streams.</div>
+</div>
+
 ---
 
 ## 3. gRPC over HTTP/2 Mechanics
@@ -347,11 +395,19 @@ graph TD
     classDef blue fill:#3498db,stroke:#2980b9,color:#fff,rx:8
     classDef purple fill:#9b59b6,stroke:#8e44ad,color:#fff,rx:8
     classDef orange fill:#e67e22,stroke:#d35400,color:#fff,rx:8
+    classDef conn fill:#2c3e50,stroke:#1a252f,color:#fff,rx:8
 
-    CONN["Single TCP connection<br>(one HTTP/2 connection)"]:::blue
-    CONN --> S1["Stream 1: RPC call A<br>HEADERS + DATA + trailing HEADERS"]:::purple
-    CONN --> S2["Stream 3: RPC call B<br>concurrent, independent"]:::purple
-    CONN --> S3["Stream 5: streaming RPC C<br>long-lived, many DATA frames"]:::orange
+    CONN["Single TCP connection<br>one HTTP/2 connection, negotiated once<br>via ALPN during the TLS handshake"]:::conn
+
+    subgraph MUX["Multiplexed streams — no head-of-line blocking between them"]
+        S1["Stream 1: RPC call A<br>HEADERS + DATA + trailing HEADERS<br>client-initiated, odd-numbered"]:::purple
+        S2["Stream 3: RPC call B<br>concurrent, independent frames<br>interleaved with Stream 1 and 5"]:::purple
+        S3["Stream 5: streaming RPC C<br>long-lived, many DATA frames<br>over the RPC's whole lifetime"]:::orange
+    end
+
+    CONN --> S1
+    CONN --> S2
+    CONN --> S3
 ```
 
 Each RPC call is **one HTTP/2 stream** (odd-numbered, client-initiated). Multiple RPCs multiplex over a single TCP connection with no head-of-line blocking between streams — this is the mechanism, not an add-on.
@@ -369,16 +425,27 @@ gRPC's status is sent as **HTTP/2 trailers** — a second HEADERS frame after th
 
 **Header compression (HPACK):** gRPC calls carry repetitive headers on every request (`content-type: application/grpc`, `grpc-timeout`, `grpc-encoding`, auth tokens). HTTP/2's HPACK maintains a per-connection dynamic table so repeated header values are sent as small index references after the first occurrence instead of full strings every time — meaningful savings at high RPC rates where header overhead would otherwise dominate small messages.
 
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    Note over C,S: Stream lifecycle for one unary RPC (HTTP/2 stream 1)
+    C->>S: HEADERS (:method POST, :path /order.v1.OrderService/GetOrder,<br>grpc-timeout: 5S, content-type: application/grpc)
+    C->>S: DATA (length-prefixed protobuf request)
+    Note over C: Client's half of the stream ends implicitly<br>after the last DATA frame (END_STREAM)
+    Note over S: Server processes the request
+    S->>C: HEADERS (:status 200, content-type: application/grpc)
+    S->>C: DATA (length-prefixed protobuf response)
+    S->>C: HEADERS, END_STREAM=true (trailers: grpc-status: 0, grpc-message: "")
+    Note over C,S: Trailers are what let the server report final status<br>only after the response body has already streamed
 ```
-Stream lifecycle for one unary RPC:
-HEADERS (:method POST, :path /order.v1.OrderService/GetOrder, grpc-timeout: 5S, ...)
-DATA (length-prefixed protobuf request)
-DATA END_STREAM=false  -- client's half of the stream ends implicitly after last DATA
-  ... server processes ...
-HEADERS (:status 200, content-type: application/grpc)
-DATA (length-prefixed protobuf response)
-HEADERS END_STREAM=true (trailers: grpc-status: 0, grpc-message: "")
-```
+
+<div class="quiz-card">
+  <p class="quiz-q">Why can't HTTP/1.1 carry grpc-status the way HTTP/2 does, and why does that specifically break streaming RPCs?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>HTTP/2 lets a HEADERS frame appear after the DATA frames as trailers — HTTP/1.1 has no real trailer mechanism outside chunked encoding, which is barely supported and never used this way. That matters for streaming specifically because the server doesn't know its final grpc-status until after it's already sent some (or all) of the response body — with no trailer support, there'd be nowhere left to put the status once the body has started streaming.</div>
+</div>
 
 ---
 
@@ -514,6 +581,12 @@ srv := grpc.NewServer(
 
 Interceptor execution order with `ChainUnaryInterceptor` is left-to-right on the way in (auth runs before metrics, so unauthenticated calls don't pollute latency histograms) and right-to-left unwinding on the way out.
 
+<div class="quiz-card">
+  <p class="quiz-q">grpc.ChainUnaryInterceptor(AuthUnaryInterceptor(...), MetricsUnaryInterceptor()) is wired in that order. Does the metrics interceptor record latency for a request that fails auth?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Chained interceptors run left-to-right on the way in, so auth executes first and returns an Unauthenticated error immediately — handler(ctx, req) inside the auth interceptor is never called, which means MetricsUnaryInterceptor (listed second) never even starts, let alone records a duration. Swap the order and every unauthenticated call would pollute the latency histograms instead.</div>
+</div>
+
 ---
 
 ## 5. Deadline Propagation
@@ -526,14 +599,52 @@ sequenceDiagram
     participant B as Service B (order)
     participant C as Service C (inventory)
 
+    rect rgb(40, 55, 75)
+    Note over A: Budget set once, at the top of the call chain
     A->>A: ctx, cancel := context.WithTimeout(ctx, 5s)
     A->>B: gRPC call, header: grpc-timeout: 5000m (5s remaining)
-    Note over B: 1.2s elapsed processing so far
+    end
+
+    rect rgb(55, 45, 30)
+    Note over B: 1.2s elapsed processing so far —<br>this is time A's budget is paying for
     B->>C: forwards ctx (derived), header: grpc-timeout: 3800m (~3.8s remaining)
-    Note over C: C only gets what's left of A's original budget, not a fresh 5s
-    C-->>B: response (or DEADLINE_EXCEEDED if it took too long)
-    B-->>A: response (or propagated DEADLINE_EXCEEDED)
+    Note over C: C only gets what's left of A's original budget,<br>not a fresh 5s of its own
+    end
+
+    alt C responds in time
+        C-->>B: response, well inside the ~3.8s it was handed
+        B-->>A: response, well inside A's original 5s
+    else C (or B) blows through the remaining budget
+        C-->>B: DEADLINE_EXCEEDED — C's ctx.Done() fired mid-work
+        B-->>A: propagated DEADLINE_EXCEEDED — B didn't invent a new error, it forwarded C's
+    end
 ```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Service A sets the top-level budget.</strong> <code>context.WithTimeout(context.Background(), 5*time.Second)</code> — this is the only place in the chain where a fresh 5-second budget is created from nothing.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. The budget serializes onto the wire.</strong> gRPC turns the context's remaining deadline into a <code>grpc-timeout: 5000m</code> request header on the call to Service B — the header <em>is</em> the propagation mechanism, not something the application code manages by hand.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Service B derives, never replaces.</strong> B's handler receives a ctx that already carries A's countdown, minus whatever time has already elapsed. As long as B calls <code>context.WithTimeout(ctx, ...)</code> — deriving from the incoming ctx — the downstream call to C can only ever get <code>min(B's own timeout, A's remaining time)</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Service C gets what's left, not a fresh clock.</strong> By the time the request reaches C, network latency and B's own processing have already eaten into A's original 5 seconds. C's <code>grpc-timeout</code> header reflects that — roughly 3.8s remaining, not 5.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Either everyone finishes, or the failure propagates as one signal.</strong> If C blows through its remaining budget, its own ctx fires <code>DEADLINE_EXCEEDED</code>; B doesn't reinterpret that as a different error, it forwards the same code back to A. One budget, one consistent failure mode across the whole chain.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ```go
 // Service A — sets the top-level budget
@@ -566,6 +677,12 @@ ctx2, cancel := context.WithTimeout(ctx, 2*time.Second) // capped at min(2s, ctx
 ```
 
 `grpc-timeout` header format is a number + unit suffix: `H` (hours), `M` (minutes), `S` (seconds), `m` (milliseconds), `u` (microseconds), `n` (nanoseconds) — e.g. `5000m` = 5000 milliseconds.
+
+<div class="quiz-card">
+  <p class="quiz-q">Service B receives a request from A with 3.8s left on the deadline. B calls context.WithTimeout(ctx, 10*time.Second) before forwarding to Service C. How much time does C actually get?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>~3.8s, not 10s. Deriving from ctx means the new deadline is capped at min(the new duration, ctx's remaining time) — a derived context can only shrink the deadline it inherited, never extend it. The 10*time.Second argument only matters if it's shorter than what's left; here it's longer, so A's original budget still wins. This is different from the WRONG example in the file, which creates a fresh context.Background() instead of deriving — that would actually hand C a full new 10s, silently breaking the cascade.</div>
+</div>
 
 ---
 
@@ -615,6 +732,65 @@ healthServer.SetServingStatus("order.v1.OrderService", healthpb.HealthCheckRespo
 | Readiness | `Check("<specific-service>")` | K8s readiness probe: if `NOT_SERVING`, pod removed from Service endpoints but not restarted |
 | `Watch` | Streaming variant | Client-side load balancers subscribe instead of polling `Check` repeatedly |
 
+```mermaid
+sequenceDiagram
+    participant DEP as Downstream dependency
+    participant SRV as order.v1.OrderService (mongod down!)
+    participant HS as grpc.health.v1.Health server
+    participant K8S as Kubernetes kubelet
+    participant LB as Client-side LB (Watch subscriber)
+
+    Note over SRV,HS: Startup — process alive, dependency not yet checked
+    SRV->>HS: SetServingStatus("", SERVING)
+    Note over SRV,HS: Liveness now reports healthy for the whole process
+
+    loop kubelet liveness probe, every periodSeconds
+        K8S->>HS: Check("")
+        HS-->>K8S: SERVING
+        Note over K8S: Container stays up
+    end
+
+    par LB subscribes once, not polling
+        LB->>HS: Watch("order.v1.OrderService")
+        HS-->>LB: stream: SERVING
+    end
+
+    DEP--xSRV: dependency connection lost
+    SRV->>HS: SetServingStatus("order.v1.OrderService", NOT_SERVING)
+    HS-->>LB: stream push: NOT_SERVING (no poll needed — Watch is a live stream)
+    Note over LB: Client-side LB stops routing new RPCs to this backend
+
+    K8S->>HS: Check("order.v1.OrderService") — readiness probe
+    HS-->>K8S: NOT_SERVING
+    Note over K8S: Pod pulled from Service endpoints,<br>but container is NOT restarted — only readiness failed, not liveness
+```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Process starts, liveness flips to SERVING.</strong> <code>SetServingStatus("", SERVING)</code> answers one question only: "is this process alive at all." It says nothing about whether any particular dependency works yet.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. kubelet polls liveness on a timer.</strong> Every <code>periodSeconds</code>, kubelet calls <code>Check("")</code>. As long as it gets back <code>SERVING</code>, the container is left alone — liveness is a "should this container be restarted" signal, nothing finer-grained.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Interested clients Watch instead of polling.</strong> A client-side load balancer subscribes once via the streaming <code>Watch</code> RPC and gets pushed updates as they happen — no repeated round-trips just to notice a status change.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. A downstream dependency dies; readiness flips independently of liveness.</strong> <code>SetServingStatus("order.v1.OrderService", NOT_SERVING)</code> only affects that specific service name — the overall process (<code>""</code>) can stay <code>SERVING</code> the entire time, because the process itself hasn't crashed.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Two different reactions to the same flip.</strong> The Watch subscriber (the load balancer) reacts immediately via the pushed stream update. Kubernetes' separate readiness probe eventually polls <code>Check("order.v1.OrderService")</code>, sees <code>NOT_SERVING</code>, and removes the pod from the Service's endpoint list — without touching liveness, so the container is never restarted for a problem a restart wouldn't fix.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 ```yaml
 # Kubernetes probe using grpc_health_probe binary (or native grpc probe in K8s 1.24+)
 livenessProbe:
@@ -632,6 +808,12 @@ grpcurl -plaintext localhost:50051 grpc.health.v1.Health/Check
 grpcurl -plaintext -d '{"service": "order.v1.OrderService"}' localhost:50051 grpc.health.v1.Health/Check
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">A pod's MongoDB connection drops. The service calls SetServingStatus("order.v1.OrderService", NOT_SERVING) but never touches SetServingStatus("", ...). Does Kubernetes restart the container?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. The liveness probe checks Check("") — the overall process status — which is untouched and still SERVING. Only the readiness probe, which checks the specific service name, sees NOT_SERVING; that pulls the pod out of the Service's endpoints (so it stops receiving new traffic) without restarting it. Restarting a healthy process wouldn't fix a dead database connection anyway — that's exactly why liveness and readiness are tracked as two separate signals in this protocol.</div>
+</div>
+
 ---
 
 ## 7. gRPC Load Balancing
@@ -640,19 +822,33 @@ grpcurl -plaintext -d '{"service": "order.v1.OrderService"}' localhost:50051 grp
 
 ```mermaid
 graph LR
+    classDef client fill:#2c3e50,stroke:#1a252f,color:#fff,rx:8
     classDef blue fill:#3498db,stroke:#2980b9,color:#fff,rx:8
     classDef orange fill:#e67e22,stroke:#d35400,color:#fff,rx:8
 
-    C1["Client (pick_first)"]:::blue -->|"all RPCs"| S1["Backend 1<br>(sticky — one conn)"]:::orange
-    C2["Client (round_robin)"]:::blue -->|"RPC 1,4,7"| S1b["Backend 1"]:::orange
-    C2 -->|"RPC 2,5,8"| S2b["Backend 2"]:::orange
-    C2 -->|"RPC 3,6,9"| S3b["Backend 3"]:::orange
+    subgraph PF["pick_first — one sticky connection"]
+        C1["Client (pick_first)<br>default policy, no config needed"]:::client -->|"every RPC, forever<br>(until this backend fails)"| S1["Backend 1<br>only connection ever opened"]:::orange
+    end
+
+    subgraph RR["round_robin — one connection per resolved address"]
+        C2["Client (round_robin)<br>opt-in via service config"]:::client -->|"RPC 1, 4, 7, ..."| S1b["Backend 1"]:::blue
+        C2 -->|"RPC 2, 5, 8, ..."| S2b["Backend 2"]:::blue
+        C2 -->|"RPC 3, 6, 9, ..."| S3b["Backend 3"]:::blue
+    end
 ```
 
-| Policy | Behavior | Default? |
-|---|---|---|
-| `pick_first` | Connects to the first resolved address, sends everything there until it fails | Yes, gRPC's default |
-| `round_robin` | Opens a connection to every resolved backend, distributes RPCs round-robin across all of them | Opt-in via service config |
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="pickfirst" class="active state-warn">pick_first (default)</button>
+    <button data-toggle-opt="roundrobin" class="state-ok">round_robin</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="pickfirst">
+    Connects to the first address the resolver returns and sends every RPC there until that connection fails. Cheapest option (one connection total) and gRPC's default with zero configuration — but it means all traffic sticks to a single backend for the connection's entire lifetime, which is exactly the failure mode that surprises people expecting even spread across a resolved backend set.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="roundrobin">
+    Opens a connection to <em>every</em> resolved backend up front, then distributes RPCs round-robin across all of them. Opt-in via <code>loadBalancingConfig</code> in the service config (shown below) — this is the policy that actually spreads load the way people assume gRPC does by default.
+  </div>
+</div>
 
 ```go
 conn, err := grpc.NewClient(
@@ -666,10 +862,22 @@ conn, err := grpc.NewClient(
 
 An L4 (TCP-level) load balancer distributes **connections**, not requests. HTTP/1.1 typically opens many short-lived connections, so L4 balancing naturally spreads load. gRPC deliberately reuses a **single long-lived HTTP/2 connection** for many multiplexed RPCs — an L4 LB balances that one connection to one backend, and every RPC on it goes to the same backend for the connection's lifetime. Ten gRPC clients each holding one persistent connection to a 3-backend L4-balanced target commonly produces wildly uneven load (e.g., all 10 pinned to 1-2 backends) rather than an even 3-way split.
 
-```
-L4 LB (e.g. plain TCP NLB) + gRPC == load concentrates on whichever backend
-each client's long-lived connection happened to land on. New backends added
-to the pool get ~0 traffic until existing connections cycle.
+```mermaid
+graph TD
+    classDef client fill:#2c3e50,stroke:#1a252f,color:#fff,rx:8
+    classDef lb fill:#8e44ad,stroke:#6c3483,color:#fff,rx:8
+    classDef hot fill:#e74c3c,stroke:#c0392b,color:#fff,rx:8
+    classDef cold fill:#7f8c8d,stroke:#616a6b,color:#fff,rx:8
+
+    subgraph CLIENTS["10 gRPC clients, each holding one persistent HTTP/2 connection"]
+        CL["10 clients"]:::client
+    end
+
+    CL --> L4["L4 (TCP-level) load balancer<br>balances CONNECTIONS, not RPCs —<br>picks a backend once per connection, then never revisits it"]:::lb
+
+    L4 -->|"7 connections pinned here"| B1["Backend 1<br>overloaded"]:::hot
+    L4 -->|"3 connections pinned here"| B2["Backend 2<br>overloaded"]:::hot
+    L4 -.->|"0 connections — added after clients<br>already connected elsewhere"| B3["Backend 3<br>~0 traffic until connections cycle"]:::cold
 ```
 
 **Solutions, in increasing sophistication:**
@@ -681,6 +889,12 @@ to the pool get ~0 traffic until existing connections cycle.
 | xDS (client-side, via Envoy's control plane API) | Client speaks xDS to a control plane, gets live backend endpoint updates, load balances itself without a proxy in the data path | No extra hop, but requires xDS-capable client stack (gRPC's built-in xDS resolver, or Istio/Envoy-integrated clients) |
 
 xDS is the production answer at scale — it gives client-side load balancing (no extra proxy hop, no L4-connection-pinning problem) while still getting centrally-managed, dynamically-updated backend membership the way a proxy-based LB would.
+
+<div class="quiz-card">
+  <p class="quiz-q">A team puts a plain TCP network load balancer in front of a 3-pod gRPC deployment, the same way they would for a REST service. Traffic is wildly uneven across pods. Why doesn't the L4 LB fix this the way it would for HTTP/1.1?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>An L4 LB balances connections, not individual requests. HTTP/1.1 clients typically open many short-lived connections, so connection-level balancing happens to spread load evenly. gRPC deliberately reuses one long-lived HTTP/2 connection for many multiplexed RPCs — the L4 LB only makes its balancing decision once, when that connection is established, and every RPC multiplexed on top of it goes to whichever backend got picked at that moment. Fixing this needs client-side round_robin, a gRPC-aware L7 proxy, or xDS — not a smarter L4 LB.</div>
+</div>
 
 ---
 
@@ -694,11 +908,41 @@ flowchart LR
     classDef orange fill:#e67e22,stroke:#d35400,color:#fff,rx:8
     classDef purple fill:#9b59b6,stroke:#8e44ad,color:#fff,rx:8
 
-    BROWSER["Browser<br>grpc-web client lib"]:::blue -->|"HTTP/1.1 or HTTP/2<br>base64 or binary,<br>no trailers needed"| PROXY["Envoy / grpc-web proxy<br>translates framing"]:::purple
-    PROXY -->|"real gRPC (HTTP/2 + trailers)"| BACKEND["gRPC backend service"]:::orange
+    subgraph BROWSERSIDE["Browser — can't speak real gRPC"]
+        BROWSER["Browser<br>grpc-web client lib<br>no HTTP/2 trailer access at all"]:::blue
+    end
+
+    subgraph PROXYTIER["Translating proxy"]
+        PROXY["Envoy grpc_web filter<br>(or dedicated grpcwebproxy)<br>reframes trailers into the body stream"]:::purple
+    end
+
+    subgraph BACKENDSIDE["Backend — unaware anything was translated"]
+        BACKEND["gRPC backend service<br>speaks real gRPC the whole time"]:::orange
+    end
+
+    BROWSER -->|"HTTP/1.1 or HTTP/2<br>base64 or binary,<br>no trailers needed"| PROXY
+    PROXY -->|"real gRPC<br>HTTP/2 + trailers"| BACKEND
+    BACKEND -->|"real gRPC response<br>+ trailers (grpc-status)"| PROXY
+    PROXY -->|"trailers repacked into<br>a trailer frame in the body"| BROWSER
 ```
 
 The `grpc-web` wire format moves trailers (`grpc-status`, `grpc-message`) into the message body stream itself (as a special trailer frame appended after the last data frame) instead of relying on HTTP/2 trailers — something a browser fetch response body can actually deliver. A translating proxy (Envoy's `grpc_web` filter, or a dedicated `grpcwebproxy`) converts between this browser-safe framing and real gRPC on the backend side.
+
+```mermaid
+sequenceDiagram
+    participant B as Browser (grpc-web client)
+    participant P as Envoy grpc_web filter
+    participant S as gRPC backend
+
+    B->>P: HTTP request (base64 or binary body,<br>no trailers, fetch/XHR-compatible)
+    P->>S: Real gRPC call over HTTP/2<br>(HEADERS + DATA)
+    Note over S: Backend has no idea this call<br>originated from a browser
+    S-->>P: DATA (response message)
+    S-->>P: HEADERS, END_STREAM=true (trailers: grpc-status, grpc-message)
+    Note over P: Proxy can't hand the browser real HTTP/2 trailers —<br>it repacks grpc-status/grpc-message as a trailer frame<br>appended to the end of the body itself
+    P-->>B: Response body: [message frame][trailer frame with grpc-status]
+    Note over B: grpc-web client library parses the trailer frame<br>out of the body it can actually read
+```
 
 ```yaml
 # Envoy grpc-web filter snippet
@@ -720,6 +964,12 @@ client.getOrder(request, {}, (err, response) => {
 ```
 
 Note: gRPC-Web does not support client-streaming or bidirectional streaming in browsers (no way to half-close a request stream over `fetch`) — only unary and server-streaming work end-to-end.
+
+<div class="quiz-card">
+  <p class="quiz-q">Why can't a browser just call a gRPC backend directly instead of going through a translating proxy?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No browser JS API can set HTTP/2 trailers, control frame-level flow control, or send arbitrary binary frames beyond what fetch/XHR allow — and critically, browsers don't expose trailer *read* access at all, which is exactly what gRPC's grpc-status reporting depends on. The grpc-web wire format works around this by moving grpc-status/grpc-message into a special trailer frame inside the body stream itself, which a browser response body actually can deliver — but something still has to translate that into real HTTP/2 trailers for the backend, which is the proxy's whole job.</div>
+</div>
 
 ---
 
@@ -747,9 +997,55 @@ Note: gRPC-Web does not support client-streaming or bidirectional streaming in b
 | DATA_LOSS | 15 | 500 | Unrecoverable data loss/corruption |
 | UNAUTHENTICATED | 16 | 401 | No/invalid credentials |
 
+The same 16 codes grouped by what they actually tell a caller to do — useful for deciding retry logic, since "is this safe to retry" cuts across the table above in a way the numeric ordering doesn't show:
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="success" class="active state-ok">Success</button>
+    <button data-toggle-opt="retryable" class="state-warn">Retryable / transient</button>
+    <button data-toggle-opt="clienterror" class="state-warn">Client-caused</button>
+    <button data-toggle-opt="servererror" class="state-bad">Server-caused</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="success">
+    <strong>OK (0).</strong> The only success code. Everything else in this table is some flavor of failure.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="retryable">
+    <strong>UNAVAILABLE (14), DEADLINE_EXCEEDED (4), ABORTED (10).</strong> The server was down (safe to retry), the call timed out (retry with a fresh deadline may succeed), or a concurrency conflict happened (an optimistic-lock-style retry can resolve it). These are the codes a generic retry policy should act on — the other categories generally shouldn't be blindly retried.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="clienterror">
+    <strong>INVALID_ARGUMENT (3), NOT_FOUND (5), ALREADY_EXISTS (6), PERMISSION_DENIED (7), FAILED_PRECONDITION (9), OUT_OF_RANGE (11), UNAUTHENTICATED (16), RESOURCE_EXHAUSTED (8), CANCELLED (1).</strong> The caller sent a malformed, unauthorized, or rate-limited request, or cancelled it themselves. Retrying the exact same request without changing anything will fail the same way again (except RESOURCE_EXHAUSTED, which can succeed later once quota frees up).
+  </div>
+  <div class="toggle-panel" data-toggle-panel="servererror">
+    <strong>UNKNOWN (2), UNIMPLEMENTED (12), INTERNAL (13), DATA_LOSS (15).</strong> Something went wrong on the server side that the client can't fix by changing its request — an unhandled exception, a method that doesn't exist, a broken invariant, or corrupted data. Worth alerting on; not worth blindly retrying.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A client gets FAILED_PRECONDITION on a request. Is it safe for a generic retry policy to immediately retry the exact same request?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. FAILED_PRECONDITION means the system isn't in a state the request requires — that's a client-caused condition, not a transient server problem. Retrying the identical request hits the same precondition failure again; only UNAVAILABLE, DEADLINE_EXCEEDED, and ABORTED are the codes a blind retry policy should act on, and even those only make sense with backoff, not an immediate resend.</div>
+</div>
+
 ### Rich error details via `google.rpc.Status`
 
 A bare gRPC status code + string message is often not enough — `google.rpc.Status` lets you attach structured, typed detail messages (field violations, retry hints, quota info) that clients can programmatically parse instead of string-matching error messages.
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server (CreateOrder handler)
+
+    C->>S: CreateOrder({amount: -5})
+    Note over S: Validation fails — amount must be > 0
+    S->>S: status.New(codes.InvalidArgument, "invalid order")
+    S->>S: attach typed detail: errdetails.BadRequest{FieldViolations: [{Field: "amount", ...}]}
+    S-->>C: gRPC error: status=INVALID_ARGUMENT<br>+ serialized google.rpc.Status with BadRequest detail
+
+    Note over C: Client doesn't string-match the message
+    C->>C: st := status.Convert(err)
+    C->>C: type-assert st.Details() back to *errdetails.BadRequest
+    C->>C: read FieldViolations programmatically —<br>field="amount", description="must be greater than zero"
+```
 
 ```protobuf
 import "google/rpc/error_details.proto";
@@ -798,3 +1094,9 @@ if err != nil {
 ```
 
 Other common `google.rpc` detail types: `RetryInfo` (how long to back off), `QuotaFailure` (which quota was exceeded), `DebugInfo` (stack trace, internal-only), `PreconditionFailure`, `ResourceInfo`. Prefer these over encoding structured data into the plain `message` string — they survive serialization across languages consistently since they're just protobuf messages.
+
+<div class="quiz-card">
+  <p class="quiz-q">Why does attaching a typed errdetails.BadRequest detail beat putting "field 'amount' must be greater than zero" directly into the status message string?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Because the client can extract it programmatically — type-asserting st.Details() back to *errdetails.BadRequest and reading FieldViolations — instead of string-matching or regex-parsing a human-readable sentence that could change wording at any time. google.rpc detail types are themselves protobuf messages, so they serialize and deserialize consistently across every language a gRPC client might be written in, unlike a free-text message meant for a human to read.</div>
+</div>
