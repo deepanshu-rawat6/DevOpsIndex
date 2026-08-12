@@ -1,3 +1,14 @@
+# Kubernetes Production Scenarios
+
+Twenty-plus Kubernetes failure patterns pulled from real on-call rotations — the symptom, the diagnostic commands, the cause tree, and the prevention that stops it recurring in the next incident.
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
+---
+
 ## CrashLoopBackOff: Debugging Runbook
 
 `CrashLoopBackOff` means the container starts, crashes (exits non-zero), Kubernetes restarts it, it crashes again — and Kubernetes applies exponential backoff between restarts (10s → 20s → 40s → 80s → 160s → 5min cap). It will keep retrying indefinitely.
@@ -36,34 +47,74 @@ kubectl logs <pod> -n <ns> -c <container-name> --previous
 
 ### Step 3: Work through the cause tree
 
+```mermaid
+flowchart TD
+    classDef oom fill:#e74c3c,stroke:#c0392b,color:#fff
+    classDef apperr fill:#e67e22,stroke:#ba6018,color:#fff
+    classDef binary fill:#8e44ad,stroke:#6c3483,color:#fff
+    classDef emptylog fill:#3498db,stroke:#2471a3,color:#fff
+    classDef probe fill:#f39c12,stroke:#ba6018,color:#fff
+
+    ROOT["CrashLoopBackOff"] --> OOM["Exit 137 — OOMKilled"]:::oom
+    ROOT --> APP["Exit 1 — App panic / error"]:::apperr
+    ROOT --> BIN["Exit 127 — binary not found"]:::binary
+    ROOT --> EMPTY["Exit 1, but --previous<br/>logs are empty"]:::emptylog
+    ROOT --> LIVE["Liveness probe killing an<br/>otherwise-healthy pod"]:::probe
+
+    subgraph OOMBranch["OOM branch"]
+        OOM --> OOM1["memory.limit too low<br/>→ increase resources.limits.memory"]:::oom
+        OOM --> OOM2["memory leak<br/>→ profile with pprof, check goroutine count"]:::oom
+        OOM --> OOM3["JVM heap not set<br/>→ add -Xmx flag"]:::oom
+    end
+
+    subgraph AppBranch["App-error branch"]
+        APP --> APP1["Missing env var<br/>→ describe pod, check envFrom / env"]:::apperr
+        APP --> APP2["Can't connect to DB/Redis on startup<br/>→ wrong SERVICE_NAME or port"]:::apperr
+        APP --> APP3["Failed DB migration in same container<br/>→ move to a separate init container"]:::apperr
+        APP --> APP4["Config file not found<br/>→ ConfigMap not mounted / wrong mountPath"]:::apperr
+        APP --> APP5["Secret not found<br/>→ Secret doesn't exist in this namespace"]:::apperr
+    end
+
+    subgraph BinBranch["Binary/build branch"]
+        BIN --> BIN1["Wrong command/args<br/>in Deployment spec"]:::binary
+        BIN --> BIN2["Multi-stage build forgot<br/>to copy the binary"]:::binary
+    end
+
+    subgraph EmptyBranch["Empty-log branch"]
+        EMPTY --> EMPTY1["App crashes before logger initializes<br/>→ add stderr logging early"]:::emptylog
+        EMPTY --> EMPTY2["Init container failing<br/>→ kubectl logs -c init-container"]:::emptylog
+        EMPTY --> EMPTY3["readinessProbe killing pod<br/>before app fully starts"]:::emptylog
+    end
+
+    subgraph LiveBranch["Liveness-probe branch"]
+        LIVE --> LIVE1["initialDelaySeconds too short<br/>→ app not ready when probe fires"]:::probe
+        LIVE --> LIVE2["Probe endpoint wrong<br/>→ 404 returns, pod killed"]:::probe
+        LIVE --> LIVE3["timeoutSeconds too low<br/>→ slow startup looks like failure"]:::probe
+    end
 ```
-CrashLoopBackOff
-├── Exit 137 (OOMKilled)
-│   ├── memory.limit too low → increase resources.limits.memory
-│   ├── memory leak → profile with pprof, check goroutine count
-│   └── JVM heap not set → add -Xmx flag
-│
-├── Exit 1 (App panic/error)
-│   ├── Missing env var → kubectl describe pod, check envFrom / env
-│   ├── Can't connect to DB/Redis on startup → wrong SERVICE_NAME, wrong port
-│   ├── Failed DB migration (runs in same container) → separate init container
-│   ├── Config file not found → ConfigMap not mounted, wrong mountPath
-│   └── Secret not found → Secret doesn't exist in namespace
-│
-├── Exit 127 (binary not found)
-│   ├── Wrong command/args in Deployment spec
-│   └── Multi-stage build forgot to copy the binary
-│
-├── Exit 1 but logs are empty
-│   ├── App crashes before logger initializes → add stderr logging early
-│   ├── Init container failing → kubectl logs <pod> -c <init-container>
-│   └── readinessProbe killing pod before app fully starts
-│
-└── Liveness probe killing healthy pod
-    ├── initialDelaySeconds too short → app not ready when probe fires
-    ├── Probe endpoint wrong → 404 returns, pod killed
-    └── timeoutSeconds too low → slow startup looks like failure
-```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Capture the evidence before touching anything.</strong> <code>kubectl get pod</code> for the restart count, <code>kubectl describe pod</code> for the exit code and event history, and <code>kubectl logs --previous</code> for what the crashed container actually printed. Skipping straight to a fix without this step is how people restart their way through 5 backoff cycles without learning anything.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Map the exit code to a category.</strong> The exit-code table above is the fork in the road — 137 means OOM, 1 means an app-level error, 127 means the entrypoint binary is missing, 143 means SIGTERM wasn't handled. Everything downstream depends on getting this branch right first.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Walk the cause tree for that one branch.</strong> Don't re-check every branch — follow only the sub-causes under the exit code from step 2 until one matches what <code>--previous</code> logs and <code>describe pod</code> events actually show.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Apply the fix, then confirm recovery.</strong> Watch <code>kubectl get pod -w</code> after the fix — the restart count should stop climbing and the pod should reach <code>Running</code> and stay there through at least one full backoff window, not just the next single restart.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ### Common contributors and fixes
 
@@ -199,6 +250,12 @@ docker buildx build --platform linux/amd64,linux/arm64 -t my-org/app:v1 --push .
 
 **Prevention:** Set `resources.limits.memory` on all containers — OOMKills become predictable, not random. Use `GOMEMLIMIT` for Go apps. Add startup probes with `failureThreshold: 30` so slow-starting apps don't get killed by liveness. In CI: run `kubectl apply --dry-run=server` to catch missing secrets/configmaps before deploy. Use `init containers` for dependency checks instead of fast-failing in the main container.
 
+<div class="quiz-card">
+  <p class="quiz-q">A pod is CrashLoopBackOff but <code>kubectl logs --previous</code> comes back completely empty — no stack trace, nothing. What two distinct explanations does this runbook give for that, and how do you tell them apart?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Either the app is crashing before its logger even initializes (nothing was ever written to stdout/stderr to capture), or a liveness/readiness probe is killing the pod before the app finishes starting — which looks identical to a crash from the outside but is really <code>kubectl describe pod</code> showing a "Liveness probe failed" event, not an application error at all. Check init container logs and the probe config/events in <code>describe pod</code> before assuming the app itself is broken — a startup probe with a generous <code>failureThreshold</code> fixes the second case without touching application code.</div>
+</div>
+
 ---
 
 ## Pod Stuck in `Pending`
@@ -254,12 +311,21 @@ kubectl get pods -l app=<name> -o wide
 
 ```mermaid
 flowchart TD
-    A["Deployment: 3 replicas,<br/>no anti-affinity/spread configured"] --> B["Scheduler places pod 1<br/>--> Node A (best score)"]
-    B --> C["Scheduler places pod 2<br/>--> Node A again<br/>(still best score, no rule against it)"]
-    C --> D["Scheduler places pod 3<br/>--> Node A again"]
-    D --> E["Node A dies<br/>(hardware fault / kernel panic / host issue)"]
-    E --> F["All 3/3 pods gone<br/>simultaneously = FULL OUTAGE"]
-    F --> G["vs. spread across 3 nodes:<br/>losing Node A only drops to 2/3 —<br/>degraded, not down"]
+    classDef config fill:#3498db,stroke:#2471a3,color:#fff
+    classDef place fill:#7f8c8d,stroke:#616a6b,color:#fff
+    classDef fail fill:#e74c3c,stroke:#c0392b,color:#fff
+    classDef good fill:#27ae60,stroke:#1e8449,color:#fff
+
+    A["Deployment: replicas: 3,<br/>no anti-affinity / spread configured"]:::config --> B
+
+    subgraph EXPOSURE["Scheduler concentrates all 3 pods —<br/>nothing in the default algorithm prevents this"]
+        B["Scheduler places pod 1<br/>→ Node A (best bin-pack score)"]:::place --> C["Scheduler places pod 2<br/>→ Node A again<br/>(still best score, no rule against it)"]:::place
+        C --> D["Scheduler places pod 3<br/>→ Node A again"]:::place
+    end
+
+    D --> E["Node A dies<br/>(hardware fault / kernel panic / host issue)"]:::fail
+    E --> F["All 3/3 pods gone simultaneously<br/>= FULL OUTAGE, not degradation"]:::fail
+    F -.->|"contrast"| G["With topologySpreadConstraints:<br/>losing Node A only drops to 2/3 —<br/>degraded, not down"]:::good
 ```
 
 ### Cause tree
@@ -271,6 +337,29 @@ flowchart TD
 | Not enough schedulable nodes to satisfy a hard spread | Add Cluster Autoscaler/Karpenter capacity, or the hard constraint just leaves pods `Pending` |
 | PodDisruptionBudget missing | A drain/eviction can re-collapse an already-spread set of pods back onto fewer nodes |
 | Replica count too low (e.g. `replicas: 2`) | Losing 1 of 2 is a 50% capacity loss even with perfect spread — use `>= 3` for mission-critical |
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Detect the exposure before it costs you an outage.</strong> <code>kubectl get pods -l app=&lt;name&gt; -o wide</code> — if every row shows the same node, you're exposed right now even though nothing has failed yet.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Understand why the scheduler allowed it.</strong> There is no default anti-affinity behavior. The Score plugins optimize for bin-packing and resource fit, not spread — if Node A scores highest for pod 1, it very likely still scores highest for pods 2 and 3 placed moments later.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Add a hard topology spread constraint.</strong> <code>topologySpreadConstraints</code> with <code>whenUnsatisfiable: DoNotSchedule</code> keyed on <code>kubernetes.io/hostname</code> makes single-node concentration structurally impossible instead of just unlikely.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Pair the constraint with capacity and a PDB.</strong> A hard constraint with no spare node capacity just produces <code>Pending</code> pods instead of a spread fleet — Cluster Autoscaler/Karpenter and a <code>PodDisruptionBudget</code> are not optional extras here, they're what makes the spread durable across drains and scale events.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ### The fix — make single-node concentration structurally impossible
 
@@ -316,6 +405,19 @@ spec:
 
 **Why `DoNotSchedule` (hard), not `ScheduleAnyway` (soft), for mission-critical services:** with the soft form, the scheduler *prefers* spreading but will still co-locate replicas if it has to — silently reintroducing the exact single-point-of-failure this is meant to prevent, with no warning at all. The hard form instead leaves a pod `Pending` if it truly can't satisfy the spread — which surfaces as a visible, alertable scheduling problem you can fix by adding capacity, instead of a silent landmine that only detonates when the node actually dies.
 
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="hard" class="active state-ok">DoNotSchedule (hard)</button>
+    <button data-toggle-opt="soft" class="state-bad">ScheduleAnyway (soft)</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="hard">
+    The scheduler <strong>refuses</strong> to place a pod beyond the configured <code>maxSkew</code>. If there isn't enough spread capacity, the pod stays <code>Pending</code> — visible, alertable, and fixable by adding nodes. Single-node concentration becomes structurally impossible, not just discouraged.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="soft">
+    The scheduler <em>prefers</em> spreading but will still co-locate replicas rather than leave one <code>Pending</code>. Under real capacity pressure it silently degrades back into exactly the single-point-of-failure this constraint exists to prevent — with zero warning until the node it collapsed onto actually dies.
+  </div>
+</div>
+
 **This must be paired with cluster capacity, or it just creates Pending pods instead:**
 
 ```
@@ -341,6 +443,12 @@ kubectl get pods -A -o json | jq -r '
 ```
 
 **Prevention:** Treat `topologySpreadConstraints` as a default, not opt-in, for every Deployment with more than 1 replica that matters for availability — enforce it fleet-wide via a Kyverno/OPA mutating policy so teams can't accidentally ship without it. Re-run the `jq` audit periodically (or wire it into a policy-as-code check), since a Deployment can drift into single-node concentration again after a later reschedule/drain even if it was correctly spread at initial rollout.
+
+<div class="quiz-card">
+  <p class="quiz-q">A Deployment had a correct hard <code>topologySpreadConstraints</code> at initial rollout — one replica per node. Six months later, all 3 replicas are found on the same node again, with no manifest change in between. How did that happen, and what's the fix for the process, not just the pods?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>A later reschedule or node drain can re-collapse an already-spread set of pods back onto fewer nodes — the spread constraint is enforced at scheduling time, not continuously, and nothing re-checks it afterward on its own. A missing PodDisruptionBudget makes this worse: a voluntary drain can evict 2 of 3 already-spread pods back onto the same remaining node. The fix isn't a one-time manifest edit — it's re-running the fleet-wide <code>jq</code> audit periodically (or wiring it into a policy-as-code check) so drift gets caught again, not just prevented once.</div>
+</div>
 
 ---
 
@@ -393,6 +501,29 @@ kubectl describe pod <pod> -n <ns>
 
 ### Causes
 
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="finalizer" class="active">Finalizer stuck</button>
+    <button data-tab="prestop">preStop hanging</button>
+    <button data-tab="volume">Volume unmount</button>
+    <button data-tab="node">Node unreachable</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="finalizer">
+      A controller registered a finalizer on the pod but crashed (or was uninstalled) before removing it — the API server won't actually delete the object while any finalizer remains, so the pod hangs forever with no natural timeout. This is the #1 cause of stuck Terminating pods in practice.
+    </div>
+    <div class="tab-panel" data-tab-panel="prestop">
+      <code>preStop</code> has a hard deadline of <code>terminationGracePeriodSeconds</code> (default 30s). If the hook itself runs longer than that, the pod is force-killed anyway once the grace period expires — but a hook that hangs indefinitely on something like a wedged network call can still make deletion feel stuck in the meantime.
+    </div>
+    <div class="tab-panel" data-tab-panel="volume">
+      The CSI/storage driver reports "Unable to unmount volumes" in events — usually because the underlying volume is wedged or the node's mount namespace is in a bad state. Force-deleting the pod is a last resort here since it can leave the volume itself in a bad state.
+    </div>
+    <div class="tab-panel" data-tab-panel="node">
+      If the node the pod lives on went offline, the pod object stays Terminating until the node either comes back or the node object itself is deleted — kubelet is the thing that's supposed to confirm the container is actually gone, and it's unreachable.
+    </div>
+  </div>
+</div>
+
 **1. Finalizer not being removed**
 ```bash
 kubectl get pod <pod> -n <ns> -o json | jq '.metadata.finalizers'
@@ -430,6 +561,12 @@ kubectl delete node <node>   # removes the node object, pods get rescheduled
 
 **Prevention:** Avoid finalizers unless necessary — they're the #1 cause of stuck Terminating pods. Set `terminationGracePeriodSeconds` to a realistic value (preStop duration + drain time + buffer). For node failures: enable `NonGracefulNodeShutdown` feature gate (GA in 1.28) so stuck Terminating pods are auto-cleaned up.
 
+<div class="quiz-card">
+  <p class="quiz-q">Of the four causes of a stuck Terminating pod in this runbook, which one has no built-in timeout at all — the API server will wait forever unless a human intervenes?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>A finalizer that never gets removed. preStop hooks are bounded by <code>terminationGracePeriodSeconds</code>, and (as of 1.28's <code>NonGracefulNodeShutdown</code> GA) a dead node's stuck pods can be auto-cleaned up — but a finalizer left behind by a crashed or uninstalled controller has no expiry. The API server will not delete the object while any finalizer remains, which is exactly why this runbook calls it the #1 cause and why the prevention advice is to avoid finalizers unless truly necessary.</div>
+</div>
+
 ---
 
 ## Node `NotReady`
@@ -445,33 +582,45 @@ kubectl describe node <node-name>
 
 ### Cause tree
 
-```
-Node NotReady
-├── kubelet stopped
-│   └── ssh to node: systemctl status kubelet
-│       journalctl -u kubelet -n 100
-│
-├── Disk pressure (DiskPressure=True)
-│   ├── Node full of logs/images → kubelet evicts pods
-│   └── Fix: kubectl drain + increase disk, or add imagePrunner CronJob
-│       docker system prune / crictl rmi --prune
-│
-├── Memory pressure (MemoryPressure=True)
-│   ├── System processes consuming memory
-│   └── Fix: kubectl drain + investigate, check for memory leak in DaemonSets
-│
-├── PID pressure (PIDPressure=True)
-│   ├── Too many processes (fork bomb, runaway threads)
-│   └── Fix: find the pod: kubectl top pods --sort-by=cpu
-│
-├── Network unreachable
-│   ├── CNI plugin crashed → pods can't get IPs
-│   └── kubectl logs -n kube-system -l k8s-app=aws-node (VPC CNI)
-│       kubectl logs -n kube-system -l app=calico-node
-│
-└── Cloud provider issue (EKS)
-    └── EC2 instance health check failing → terminate + replace node
-        aws ec2 describe-instance-status --instance-id <id>
+```mermaid
+flowchart TD
+    classDef proc fill:#8e44ad,stroke:#6c3483,color:#fff
+    classDef disk fill:#e67e22,stroke:#ba6018,color:#fff
+    classDef mem fill:#e74c3c,stroke:#c0392b,color:#fff
+    classDef pid fill:#f39c12,stroke:#ba6018,color:#fff
+    classDef net fill:#3498db,stroke:#2471a3,color:#fff
+    classDef cloud fill:#7f8c8d,stroke:#616a6b,color:#fff
+
+    ROOT["Node NotReady"] --> KUBELET["kubelet stopped"]:::proc
+    ROOT --> DISK["Disk pressure<br/>(DiskPressure=True)"]:::disk
+    ROOT --> MEM["Memory pressure<br/>(MemoryPressure=True)"]:::mem
+    ROOT --> PID["PID pressure<br/>(PIDPressure=True)"]:::pid
+    ROOT --> NET["Network unreachable"]:::net
+    ROOT --> CLOUD["Cloud provider issue (EKS)"]:::cloud
+
+    KUBELET --> KUBELET1["ssh to node:<br/>systemctl status kubelet,<br/>journalctl -u kubelet -n 100"]:::proc
+
+    subgraph DiskBranch["Disk pressure"]
+        DISK --> DISK1["Node full of logs/images<br/>→ kubelet evicts pods"]:::disk
+        DISK1 --> DISK2["Fix: kubectl drain + increase disk,<br/>or add an image-pruner CronJob<br/>(crictl rmi --prune)"]:::disk
+    end
+
+    subgraph MemBranch["Memory pressure"]
+        MEM --> MEM1["System processes<br/>consuming memory"]:::mem
+        MEM1 --> MEM2["Fix: kubectl drain + investigate,<br/>check for a leak in DaemonSets"]:::mem
+    end
+
+    subgraph PidBranch["PID pressure"]
+        PID --> PID1["Too many processes<br/>(fork bomb, runaway threads)"]:::pid
+        PID1 --> PID2["Fix: find the pod —<br/>kubectl top pods --sort-by=cpu"]:::pid
+    end
+
+    subgraph NetBranch["Network unreachable"]
+        NET --> NET1["CNI plugin crashed<br/>→ pods can't get IPs"]:::net
+        NET1 --> NET2["kubectl logs -n kube-system<br/>-l k8s-app=aws-node (VPC CNI)<br/>or -l app=calico-node"]:::net
+    end
+
+    CLOUD --> CLOUD1["EC2 instance health check failing<br/>→ terminate + replace node<br/>aws ec2 describe-instance-status"]:::cloud
 ```
 
 ```bash
@@ -500,6 +649,29 @@ kubectl top pods -n <ns>    # CPU throttled? Memory pressure?
 # Check if requests hit a specific pod (check per-pod metrics in Grafana/Datadog)
 # Is load balancer distributing unevenly?
 ```
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="cpu" class="active">CPU throttling</button>
+    <button data-tab="gc">GC pauses</button>
+    <button data-tab="pool">Connection pool</button>
+    <button data-tab="dns">DNS resolution</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="cpu">
+      The most common invisible cause. A CPU <code>limit</code> throttles the container even when cluster-wide CPU looks fine — check <code>container_cpu_cfs_throttled_periods_total / container_cpu_cfs_periods_total</code>; above 0.25 means a quarter of scheduling periods are being throttled. Fix: raise the limit, or remove it entirely and keep only <code>requests</code>.
+    </div>
+    <div class="tab-panel" data-tab-panel="gc">
+      Go or JVM garbage-collection pauses show up as latency spikes with no CPU or network smoking gun. Check GC frequency and pause time via pprof (Go) or GC logs (JVM). Fix for Go: set <code>GOMEMLIMIT</code> to give the collector headroom before it hits the k8s memory limit.
+    </div>
+    <div class="tab-panel" data-tab-panel="pool">
+      Symptoms: latency spikes specifically at high concurrency, logs showing "connection wait timeout" while the app itself is otherwise healthy — it's waiting for a free DB connection from the pool, not doing real work. Fix: increase pool size, or add read replicas / an RDS Proxy in front of the database.
+    </div>
+    <div class="tab-panel" data-tab-panel="dns">
+      Every service-name lookup takes an unexpectedly long time. Time a manual <code>nslookup</code> from inside a pod and check CoreDNS's own CPU and error logs. Fix: use fully-qualified domain names to skip search-domain iteration, or tune CoreDNS replica count.
+    </div>
+  </div>
+</div>
 
 ### Step 2 — CPU throttling (most common invisible cause)
 
@@ -567,6 +739,12 @@ kubectl logs -n kube-system -l k8s-app=kube-dns | grep -i error
 
 **Prevention:** Never set CPU limits on latency-sensitive services — use requests only. Alert on `container_cpu_cfs_throttled_periods_total / container_cpu_cfs_periods_total > 0.25`. Set `dnsConfig.options: [{name: ndots, value: "2"}]` on all pods. Use `GOMEMLIMIT` for Go services. Deploy NodeLocal DNSCache to eliminate DNS as a latency source.
 
+<div class="quiz-card">
+  <p class="quiz-q">A service's average CPU usage is comfortably under its limit, yet p99 latency has periodic spikes. A teammate says "CPU can't be the cause, usage isn't even close to the limit" — what's wrong with that reasoning?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>CPU limits are enforced per scheduling period (the CFS quota), not as a smooth average — a process can be well under its limit on average while still getting throttled hard during short bursts within individual periods, which is exactly what drives p99 (not average) latency. The averaged metric hides the throttling entirely. The real signal is <code>container_cpu_cfs_throttled_periods_total / container_cpu_cfs_periods_total</code>; above 0.25 is bad regardless of what the average CPU graph shows. This is why the prevention rule here is to remove CPU limits entirely for latency-sensitive services rather than trying to size them "generously."</div>
+</div>
+
 ---
 
 ## PVC Stuck in `Pending`
@@ -600,6 +778,12 @@ kubectl get storageclass
 
 **Prevention:** Use `WaitForFirstConsumer` volumeBindingMode on StorageClasses — prevents PVCs binding to the wrong AZ before the pod is scheduled. Set ResourceQuota for storage to prevent runaway PVC creation. Test CSI driver RBAC with `kubectl auth can-i` in staging before deploying new clusters.
 
+<div class="quiz-card">
+  <p class="quiz-q">A StorageClass uses the default (Immediate) volumeBindingMode. A PVC binds successfully to a PV in AZ-a, but then the pod that claims it gets stuck Pending. Why, and what StorageClass setting fixes it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>With Immediate binding, the PVC gets bound to a PV as soon as it's created — before the scheduler has any say in which AZ the pod ends up in. If the scheduler then places the pod in a different AZ (for entirely unrelated reasons, like resource fit), the pod can never actually reach its volume. <code>volumeBindingMode: WaitForFirstConsumer</code> fixes this by delaying binding until a pod actually claims the PVC, so the PV gets provisioned in whichever AZ the pod was already scheduled to.</div>
+</div>
+
 ---
 
 ## Resource Quota / LimitRange Blocking Pods
@@ -621,6 +805,21 @@ kubectl describe limitrange -n <ns>
 # See what defaults are being injected
 kubectl get limitrange -n <ns> -o yaml
 ```
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="quota" class="active">ResourceQuota</button>
+    <button data-tab="limitrange">LimitRange</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="quota">
+      Caps the <strong>total</strong> resource consumption across an entire namespace — e.g. <code>requests.cpu: 2000m</code> hard across all pods combined. A pod is rejected once the namespace as a whole would exceed the quota, even if that individual pod's own request is small. Shows up as "exceeded quota" in the create error.
+    </div>
+    <div class="tab-panel" data-tab-panel="limitrange">
+      Sets defaults and per-container min/max within a namespace — it acts on <strong>one pod at a time</strong>, not the namespace total. If a pod has no <code>resources</code> block and LimitRange requires one, the pod is rejected with "must specify limits" rather than a quota-exceeded error.
+    </div>
+  </div>
+</div>
 
 **Prevention:** Set LimitRange defaults in every namespace so pods without resource specs still get sane defaults. Alert on `kube_resourcequota{type="used"} / kube_resourcequota{type="hard"} > 0.80` to catch quota exhaustion before it blocks deployments. Document quota allocations per team in runbooks.
 
@@ -651,15 +850,20 @@ kubectl get limitrange -n <ns> -o yaml
 
 ```mermaid
 flowchart TD
-    A[Pod Running + Ready] --> B[curl inside pod]
-    B --> C{Response OK?}
-    C -- No --> D[Check app logs]
-    D --> E{Error in logs?}
-    E -- Yes --> F[Fix app / config]
-    E -- No --> G[Check probe endpoint<br/>vs real health path]
-    G --> H[Check env vars / ConfigMap]
-    H --> I[Check upstream dependency]
-    C -- Yes --> J[Issue is external<br/>ingress/svc layer]
+    classDef start fill:#3498db,stroke:#2471a3,color:#fff
+    classDef check fill:#f39c12,stroke:#ba6018,color:#fff
+    classDef fix fill:#27ae60,stroke:#1e8449,color:#fff
+    classDef trap fill:#e74c3c,stroke:#c0392b,color:#fff
+
+    A["Pod shows Running + Ready,<br/>probe is passing"]:::start --> B["curl the app directly<br/>from inside the pod"]:::check
+    B --> C{"Response actually<br/>correct?"}:::check
+    C -- No --> D["Check app logs"]:::check
+    D --> E{"Error visible<br/>in logs?"}:::check
+    E -- Yes --> F["Fix app / config"]:::fix
+    E -- No --> G["Probe path ≠ real health path —<br/>the probe is lying about health"]:::trap
+    G --> H["Check env vars / ConfigMap"]:::check
+    H --> I["Check upstream dependency"]:::check
+    C -- Yes --> J["Issue is external —<br/>ingress / Service layer, not the pod"]:::fix
 ```
 
 **Commands:**
@@ -696,6 +900,12 @@ Readiness:  http-get http://:8080/ready delay=5s timeout=1s period=10s
 
 **Prevention:** Separate liveness from readiness probes — readiness should check actual app health (e.g. DB ping), liveness should only check if the process is hung. Use `/readyz` for readiness (checks dependencies) and `/livez` for liveness (just checks process). Add integration tests in CI that deploy to staging and verify the probe endpoints return correct status codes.
 
+<div class="quiz-card">
+  <p class="quiz-q">A team makes their readiness and liveness probes hit the exact same endpoint, which pings the database. Under a brief DB blip, why is this worse than having two separate endpoints?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Liveness should only check whether the process itself is hung — not whether a downstream dependency is reachable. If liveness also pings the DB and the DB has a brief blip, kubelet sees the liveness probe fail and kills a perfectly healthy pod process over an external dependency issue it can't fix by restarting. A readiness failure would have been the correct response instead — just stop routing traffic to it until the DB recovers, without killing the process. That's exactly why the prevention rule is <code>/readyz</code> (checks dependencies) for readiness and <code>/livez</code> (just checks the process) for liveness, as two distinct endpoints.</div>
+</div>
+
 ---
 
 ## DNS Resolution Failures Inside Pods
@@ -706,16 +916,33 @@ Readiness:  http-get http://:8080/ready delay=5s timeout=1s period=10s
 sequenceDiagram
     participant P as Pod
     participant CD as CoreDNS
-    participant S as Service
-    participant E as Endpoints
+    participant S as Service object
+    participant E as Endpoints/EndpointSlice
 
-    P->>CD: nslookup my-svc
-    CD-->>P: NXDOMAIN? Check CoreDNS pods
+    Note over P,CD: Check 1 — is CoreDNS even reachable?
+    P->>CD: nslookup my-svc (via resolv.conf search domains)
+    rect rgb(80, 40, 40)
+    CD-->>P: NXDOMAIN, or timeout entirely
+    Note over P: If this fails, check CoreDNS pod status<br/>and NetworkPolicy egress to port 53 first
+    end
+
+    Note over CD,S: Check 2 — does the Service exist?
     CD->>S: Resolve my-svc.default.svc.cluster.local
-    S-->>CD: Service not found? Check svc exists
-    S->>E: Look up backends
-    E-->>S: Empty? Check pod labels + readiness
-    CD-->>P: Returns ClusterIP
+    rect rgb(80, 40, 40)
+    S-->>CD: Service not found in that namespace
+    Note over S: kubectl get svc — create it, or fix the namespace
+    end
+
+    Note over S,E: Check 3 — does the Service have live backends?
+    S->>E: Look up ready backend pod IPs
+    rect rgb(80, 40, 40)
+    E-->>S: Endpoints list is empty
+    Note over E: Compare svc selector vs pod labels,<br/>and confirm pods are actually Ready
+    end
+
+    rect rgb(30, 70, 45)
+    CD-->>P: Healthy path — returns ClusterIP
+    end
 ```
 
 **Commands:**
@@ -747,6 +974,12 @@ kubectl logs -n kube-system -l k8s-app=kube-dns --tail=50
 
 **Prevention:** Deploy NodeLocal DNSCache DaemonSet — each node caches DNS locally, eliminating CoreDNS as a SPOF. Set `ndots: 2` in pod dnsConfig to reduce DNS round trips. Alert on `coredns_dns_responses_total{rcode="SERVFAIL"}` and CoreDNS `OOMKilled`. Scale CoreDNS replicas proportional to cluster size (1 replica per 16 nodes minimum).
 
+<div class="quiz-card">
+  <p class="quiz-q">CoreDNS is running fine, but a node-level network blip briefly makes it unreachable from every pod on that node, causing a wave of DNS timeouts cluster-wide. What deployment pattern from this section's prevention rule removes CoreDNS as a single point of failure for that specific case?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>NodeLocal DNSCache — a DaemonSet that runs a DNS cache on every node, so lookups are served locally instead of crossing the network to a (possibly distant or momentarily unreachable) CoreDNS pod. This doesn't just add speed; it changes the failure mode from "any pod on any node can be hit by a CoreDNS-reachability blip" to "only a genuinely broken node loses DNS," since each node's own cache serves warm lookups even during a brief network hiccup elsewhere in the cluster.</div>
+</div>
+
 ---
 
 ## NetworkPolicy Blocking Traffic
@@ -755,17 +988,26 @@ kubectl logs -n kube-system -l k8s-app=kube-dns --tail=50
 
 ```mermaid
 flowchart TD
-    A[Pod A --> Pod B fails] --> B[kubectl exec -- curl pod-b]
-    B --> C{Timeout or refused?}
-    C -- Timeout --> D[Check NetworkPolicy exists]
-    D --> E[Check ingress rules<br/>on destination pod]
-    E --> F{Labels match<br/>podSelector?}
-    F -- No --> G[Fix policy selector<br/>or pod labels]
-    F -- Yes --> H[Check egress rules<br/>on source pod]
-    H --> I{Egress allows<br/>dest port?}
-    I -- No --> J[Add egress rule]
-    I -- Yes --> K[Check CNI plugin<br/>supports NetworkPolicy]
-    C -- Refused --> L[App not listening<br/>on that port]
+    classDef start fill:#3498db,stroke:#2471a3,color:#fff
+    classDef check fill:#f39c12,stroke:#ba6018,color:#fff
+    classDef fix fill:#27ae60,stroke:#1e8449,color:#fff
+    classDef trap fill:#e74c3c,stroke:#c0392b,color:#fff
+
+    A["Pod A → Pod B fails<br/>(no obvious error in either pod)"]:::start --> B["kubectl exec pod-a --<br/>curl pod-b"]:::check
+    B --> C{"Timeout,<br/>or connection refused?"}:::check
+
+    subgraph TimeoutBranch["Timeout — usually a policy problem"]
+        C -- Timeout --> D["Check NetworkPolicy<br/>objects exist at all"]:::check
+        D --> E["Check ingress rules<br/>on destination pod"]:::check
+        E --> F{"Labels match<br/>podSelector?"}:::check
+        F -- No --> G["Fix policy selector<br/>or pod labels"]:::fix
+        F -- Yes --> H["Check egress rules<br/>on source pod"]:::check
+        H --> I{"Egress allows<br/>the destination port?"}:::check
+        I -- No --> J["Add the missing<br/>egress rule"]:::fix
+        I -- Yes --> K["CNI plugin doesn't enforce<br/>NetworkPolicy at all"]:::trap
+    end
+
+    C -- Refused --> L["Not a policy issue —<br/>app isn't listening on that port"]:::trap
 ```
 
 **Commands:**

@@ -4,30 +4,39 @@ If you need exactly one active instance (not zero, not two), use Kubernetes **Le
 
 **Use cases:** distributed job scheduler, CDC consumer, singleton reconciler, any process that must not run concurrently.
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ### How It Works
 
 ```mermaid
 sequenceDiagram
     participant P1 as Pod 1 (candidate)
     participant P2 as Pod 2 (standby)
-    participant K8s as K8s API Server (Lease object in etcd)
+    participant K8s as K8s API Server<br/>(Lease object in etcd)
 
+    rect rgb(30, 65, 45)
+    Note over P1,K8s: Steady state — one leader, one idle standby
     P1->>K8s: Try to acquire Lease (create/update with holderIdentity=pod-1)
-    K8s-->>P1: Lease acquired — pod-1 is leader
+    K8s-->>P1: Lease acquired, pod-1 is leader
     P2->>K8s: Try to acquire Lease
-    K8s-->>P2: Lease held by pod-1, renewDeadline not expired — not acquired
+    K8s-->>P2: Lease held by pod-1, renewDeadline not expired, not acquired
 
     loop Every leaseDuration/2
         P1->>K8s: Renew lease (update renewTime)
         K8s-->>P1: OK
     end
+    end
 
+    rect rgb(74, 46, 46)
     Note over P1: Pod 1 OOM-killed / crashes
-    Note over K8s: Lease expires (no renewal within leaseDuration)
-
-    P2->>K8s: Try to acquire Lease — lease expired!
-    K8s-->>P2: Lease acquired — pod-2 is now leader
+    Note over K8s: Lease expires, no renewal within leaseDuration
+    P2->>K8s: Try to acquire Lease, lease expired!
+    K8s-->>P2: Lease acquired, pod-2 is now leader
     Note over P2: Pod 2 starts doing work
+    end
 ```
 
 ### Go Implementation with `client-go`
@@ -100,14 +109,14 @@ func main() {
 		Callbacks: leaderelection.LeaderCallbacks{
 			// Called when this pod becomes the leader — start your work here
 			OnStartedLeading: func(ctx context.Context) {
-				fmt.Printf("[%s] became leader — starting work<br>", id)
+				fmt.Printf("[%s] became leader — starting work\n", id)
 				runWork(ctx)
 			},
 
 			// Called when this pod loses leadership (lease expired, context cancelled)
 			// Stop your work here — MUST return quickly
 			OnStoppedLeading: func() {
-				fmt.Printf("[%s] lost leadership — stopping work<br>", id)
+				fmt.Printf("[%s] lost leadership — stopping work\n", id)
 				// If work goroutine is running, the ctx passed to OnStartedLeading
 				// is cancelled automatically by the leader election library
 				os.Exit(0) // let kubelet restart the pod to re-compete
@@ -118,7 +127,7 @@ func main() {
 				if identity == id {
 					return // we already know we're leader from OnStartedLeading
 				}
-				fmt.Printf("[%s] new leader elected: %s<br>", id, identity)
+				fmt.Printf("[%s] new leader elected: %s\n", id, identity)
 			},
 		},
 	})
@@ -135,7 +144,7 @@ func runWork(ctx context.Context) {
 			fmt.Println("work stopped — leadership lost or context cancelled")
 			return
 		case t := <-ticker.C:
-			fmt.Printf("doing singleton work at %s<br>", t.Format(time.RFC3339))
+			fmt.Printf("doing singleton work at %s\n", t.Format(time.RFC3339))
 			// e.g., process a job queue, run a reconciliation loop, etc.
 		}
 	}
@@ -206,6 +215,11 @@ spec:
 
 **`ReleaseOnCancel: true`** is critical for fast failover on graceful shutdown. When the pod receives SIGTERM (rolling update, scale-down), it cancels the context, the leader election library releases the Lease immediately, and a new leader is elected within `RetryPeriod` — not `LeaseDuration`. Without this, failover waits the full 15 seconds.
 
+<div class="quiz-card">
+  <p class="quiz-q">A pod is rolled during a normal deployment (SIGTERM, not a crash) and <code>ReleaseOnCancel</code> was left at its default (unset/false). Roughly how long before a standby pod takes over as leader?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Close to the full <code>LeaseDuration</code> (15s by default) — without <code>ReleaseOnCancel: true</code>, the outgoing pod doesn't release the Lease on graceful shutdown, so the standby has to wait for it to expire naturally, exactly as if the leader had crashed. With <code>ReleaseOnCancel: true</code> the Lease is released immediately on context cancellation and a new leader is elected within <code>RetryPeriod</code> (2s by default) instead — a ~7x faster failover for the common, planned case.</div>
+</div>
 
 ---
 
@@ -215,20 +229,27 @@ spec:
 
 ```mermaid
 graph LR
-    classDef blue fill:#3498db,stroke:#2980b9,color:#fff,rx:8
-    classDef green fill:#2ecc71,stroke:#27ae60,color:#fff,rx:8
-    classDef red fill:#e74c3c,stroke:#c0392b,color:#fff,rx:8
-    classDef orange fill:#e67e22,stroke:#d35400,color:#fff,rx:8
-    classDef purple fill:#9b59b6,stroke:#8e44ad,color:#fff,rx:8
-    classDef teal fill:#1abc9c,stroke:#16a085,color:#fff,rx:8
-    classDef dark fill:#2c3e50,stroke:#1a252f,color:#fff,rx:8
-    classDef yellow fill:#f39c12,stroke:#d68910,color:#000,rx:8
-    classDef k8s fill:#326ce5,stroke:#254ea8,color:#fff,rx:8
-    classDef aws fill:#ff9900,stroke:#cc7a00,color:#000,rx:8
-    SLI["SLI: the measured signal"]:::blue --> SLO["SLO: internal target, e.g. 99.9% over 30 days"]:::blue
-    SLO --> EB["Error Budget: 100% minus SLO = allowed failure"]:::green
-    SLO --> SLA["SLA: external contract, SLO must be tighter than SLA"]:::blue
-    EB --> BEHAVIOR["Budget remaining? Ship fast. Budget burned? Freeze and fix."]:::blue
+    classDef measure fill:#3498db,stroke:#2980b9,color:#fff,rx:8
+    classDef target fill:#9b59b6,stroke:#8e44ad,color:#fff,rx:8
+    classDef budget fill:#2ecc71,stroke:#27ae60,color:#fff,rx:8
+    classDef contract fill:#1abc9c,stroke:#16a085,color:#fff,rx:8
+    classDef ok fill:#2ecc71,stroke:#27ae60,color:#fff,rx:8
+    classDef bad fill:#e74c3c,stroke:#c0392b,color:#fff,rx:8
+
+    subgraph INTERNAL["Internal — what SRE actually manages"]
+        SLI["SLI: the measured signal<br/>e.g. % requests with status != 5xx"]:::measure --> SLO["SLO: internal target<br/>e.g. 99.9% over 30 days"]:::target
+        SLO --> EB["Error Budget = 100% − SLO<br/>the allowed amount of failure"]:::budget
+    end
+
+    subgraph EXTERNAL["External — what customers see"]
+        SLA["SLA: contractual promise<br/>breach ⇒ fines / service credits"]:::contract
+    end
+
+    SLO -.->|"SLO must be tighter than SLA"| SLA
+
+    EB --> CHECK{"Budget remaining<br/>this window?"}
+    CHECK -->|Yes| SHIP["Ship features aggressively"]:::ok
+    CHECK -->|"No — burned"| FREEZE["Freeze risky changes<br/>focus on reliability"]:::bad
 ```
 
 **SLI (Service Level Indicator):**
@@ -261,25 +282,27 @@ The budget is a **resource**: burn it fast (bad incident) -> freeze risky change
 **SLA (Service Level Agreement):**
 External contract with customers. Breaching it means fines/credits. SLOs should always be tighter than SLAs (buffer for detecting breaches before customers do).
 
+<div class="quiz-card">
+  <p class="quiz-q">A team sets its internal SLO to exactly the same number as its customer-facing SLA — both 99.9%. What's the problem?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>There's no buffer left to catch a breach internally before it becomes a paid, contractual SLA violation. The SLO is supposed to be tighter (stricter) than the SLA specifically so the team notices — and starts freezing risky changes — while they still have room to fix things before the SLA itself is breached. If both thresholds are identical, the first sign of trouble the team gets is the same moment the customer is owed a credit.</div>
+</div>
+
 ---
 
 ### MTTD, MTTR, MTTF
 
 ```mermaid
 graph LR
-    classDef blue fill:#3498db,stroke:#2980b9,color:#fff,rx:8
-    classDef green fill:#2ecc71,stroke:#27ae60,color:#fff,rx:8
-    classDef red fill:#e74c3c,stroke:#c0392b,color:#fff,rx:8
-    classDef orange fill:#e67e22,stroke:#d35400,color:#fff,rx:8
-    classDef purple fill:#9b59b6,stroke:#8e44ad,color:#fff,rx:8
-    classDef teal fill:#1abc9c,stroke:#16a085,color:#fff,rx:8
-    classDef dark fill:#2c3e50,stroke:#1a252f,color:#fff,rx:8
-    classDef yellow fill:#f39c12,stroke:#d68910,color:#000,rx:8
-    classDef k8s fill:#326ce5,stroke:#254ea8,color:#fff,rx:8
-    classDef aws fill:#ff9900,stroke:#cc7a00,color:#000,rx:8
-    INCIDENT_START["Incident starts (users affected)"]:::blue -->|"MTTD"| DETECTED["Team alerted"]:::blue
-    DETECTED -->|"MTTR"| RESOLVED["Service restored"]:::teal
-    RESOLVED -->|"MTTF"| NEXT["Next incident"]:::blue
+    classDef pain fill:#e74c3c,stroke:#c0392b,color:#fff,rx:8
+    classDef active fill:#e67e22,stroke:#d35400,color:#fff,rx:8
+    classDef healthy fill:#1abc9c,stroke:#16a085,color:#fff,rx:8
+
+    subgraph WINDOW["One incident, start to finish"]
+        START["Incident starts<br/>users affected, nobody knows yet"]:::pain -->|"MTTD — mean time to detect"| DETECTED["Team alerted<br/>impact now known"]:::active
+        DETECTED -->|"MTTR — mean time to recover"| RESOLVED["Service restored<br/>impact ends"]:::healthy
+    end
+    RESOLVED -->|"MTTF — mean time to failure"| NEXT["Next incident starts"]:::pain
 ```
 
 **MTTD (Mean Time To Detect):**
@@ -300,6 +323,12 @@ Improve by: reducing toil, better testing, chaos engineering, capacity planning.
 **Key insight:** MTTD and MTTR are separate problems.
 - Fast detection + slow recovery = still bad (you know it's broken but can't fix it)
 - Fast recovery + slow detection = users hurt for a long time before you knew
+
+<div class="quiz-card">
+  <p class="quiz-q">A team has excellent MTTD (alerts fire in 30 seconds) but poor MTTR (it takes 4 hours to actually fix things). Is that a reliable system from the user's point of view?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Fast detection only means the team finds out quickly — it does nothing for the user, who is still impacted for the full 4 hours regardless of how fast the alert fired. MTTD and MTTR are separate problems that both have to be optimized; a great MTTD paired with a bad MTTR is still a bad incident from the outside.</div>
+</div>
 
 ---
 
@@ -325,27 +354,37 @@ Improve by: reducing toil, better testing, chaos engineering, capacity planning.
 
 **Why cap at ~50%:** If toil isn't capped, the team drowns in ops as the service grows and never builds anything permanent. SRE dedicates the freed time to automating the toil away.
 
+<div class="quiz-card">
+  <p class="quiz-q">A task is manual and repetitive — but every time it's done, it also permanently fixes the underlying cause so that specific instance never recurs. Is it toil?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — <strong>all</strong> the traits must be true, and this task fails "no durable value." Toil is defined by leaving nothing behind: same problem, same manual steps, forever. A task that produces a lasting improvement isn't toil even if it's currently manual and repetitive, because it's trending toward eliminating itself rather than scaling linearly with growth.</div>
+</div>
+
 ---
 
 ### Incident Response Flow
 
 ```mermaid
 graph TD
-    classDef blue fill:#3498db,stroke:#2980b9,color:#fff,rx:8
-    classDef green fill:#2ecc71,stroke:#27ae60,color:#fff,rx:8
-    classDef red fill:#e74c3c,stroke:#c0392b,color:#fff,rx:8
-    classDef orange fill:#e67e22,stroke:#d35400,color:#fff,rx:8
-    classDef purple fill:#9b59b6,stroke:#8e44ad,color:#fff,rx:8
-    classDef teal fill:#1abc9c,stroke:#16a085,color:#fff,rx:8
-    classDef dark fill:#2c3e50,stroke:#1a252f,color:#fff,rx:8
-    classDef yellow fill:#f39c12,stroke:#d68910,color:#000,rx:8
-    classDef k8s fill:#326ce5,stroke:#254ea8,color:#fff,rx:8
-    classDef aws fill:#ff9900,stroke:#cc7a00,color:#000,rx:8
-    DETECT["1. DETECT: Alert fires on SLO burn rate. Goal: minimize MTTD"]:::blue --> TRIAGE
-    TRIAGE["2. TRIAGE: Assess severity SEV1/2/3, assign Incident Commander, open war room"]:::blue --> MITIGATE
-    MITIGATE["3. MITIGATE: Rollback, shift traffic, feature-flag off, shed load. Do NOT wait for root cause."]:::orange --> RECOVER
-    RECOVER["4. RECOVER: Confirm service restored, metrics normal, communicate status"]:::teal --> POSTMORTEM
-    POSTMORTEM["5. BLAMELESS POSTMORTEM: Timeline, contributing factors, 5 Whys, action items"]:::blue
+    classDef detect fill:#3498db,stroke:#2980b9,color:#fff,rx:8
+    classDef triage fill:#9b59b6,stroke:#8e44ad,color:#fff,rx:8
+    classDef mitigate fill:#e67e22,stroke:#d35400,color:#fff,rx:8
+    classDef recover fill:#1abc9c,stroke:#16a085,color:#fff,rx:8
+    classDef learn fill:#2c3e50,stroke:#1a252f,color:#fff,rx:8
+
+    subgraph ACTIVE["Active incident — real time, minutes matter"]
+        DETECT["1. DETECT<br/>Alert fires on SLO burn rate<br/>Goal: minimize MTTD"]:::detect --> TRIAGE
+        TRIAGE["2. TRIAGE<br/>Assess severity SEV1/2/3<br/>assign Incident Commander, open war room"]:::triage --> MITIGATE
+        MITIGATE["3. MITIGATE<br/>Rollback, shift traffic, feature-flag off, shed load<br/>Do NOT wait for root cause"]:::mitigate --> RECOVER
+        RECOVER["4. RECOVER<br/>Confirm service restored, metrics normal<br/>communicate status"]:::recover
+    end
+
+    subgraph LEARN["Learning loop — after the fire is out"]
+        POSTMORTEM["5. BLAMELESS POSTMORTEM<br/>Timeline, contributing factors, 5 Whys, action items"]:::learn
+    end
+
+    RECOVER --> POSTMORTEM
+    POSTMORTEM -.->|"action items harden<br/>alerts, runbooks, tests"| DETECT
 ```
 
 **Key principle of step 3:** Do NOT wait for root cause analysis. Mitigate first, investigate after. Rollback the deploy, shed load, feature-flag off — worry about why later.
@@ -356,6 +395,12 @@ graph TD
 - How did we detect it? Could we have detected it faster?
 - How did we mitigate? Could we have mitigated faster?
 - What prevents this class of failure from recurring? (action items)
+
+<div class="quiz-card">
+  <p class="quiz-q">During MITIGATE, the on-call engineer doesn't yet know why error rates spiked. Should they hold off on rolling back until they've confirmed the root cause?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — mitigate first, investigate after. Rollback, feature-flag off, shed load, or shift traffic immediately to stop user impact; root cause analysis happens later, in the postmortem step. Waiting to understand "why" before acting only extends the outage.</div>
+</div>
 
 ---
 
@@ -384,6 +429,12 @@ sum(rate(http_requests_total{status=~"5.."}[1h])) /
 sum(rate(http_requests_total[1h]))
 > (1 - 0.999) * 2     # 2x the error budget rate for 99.9% SLO
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">An alert pages whenever node CPU crosses 80%, regardless of whether any request is slow or failing. Does this follow the RED method's alerting rules?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — it alerts on a cause (CPU), not a symptom (user-facing impact measured via Rate, Errors, or Duration). Per the rules, alert on symptoms, not causes, and every page must be actionable: high CPU with no effect on error rate or latency often means nothing needs to happen, which makes it exactly the kind of alert that should be deleted in a quarterly audit.</div>
+</div>
 
 ---
 

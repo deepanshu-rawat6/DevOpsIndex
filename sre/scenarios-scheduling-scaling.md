@@ -2,6 +2,11 @@
 
 Companion to [k8s-scenarios.md](./k8s-scenarios.md), [linux-debugging.md](./linux-debugging.md), and [aws-scenarios.md](./aws-scenarios.md). Covers: pod scheduling failures caused by label/selector + resource pressure, why old pods survive a rolling update, `/var/log` "No space left on device" with free space showing, and ASG scaling strategies (predicted, warm pools, ALB/NLB LCU capacity planning, unpredictable bursts) — plus the exact math behind HPA/VPA rounding.
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## 1. Pod Not Scheduling — Label/Selector Mismatch + Insufficient CPU
@@ -25,16 +30,30 @@ Read this literally as: "of 5 nodes, 2 failed on label/selector, 3 failed on CPU
 
 ```mermaid
 flowchart TD
-    A["Pod Pending"] --> B["kubectl describe pod<br/>read Events bottom-up"]
-    B --> C{"Message mentions<br/>node affinity/selector?"}
-    C -- Yes --> D["kubectl get nodes --show-labels<br/>compare vs pod nodeSelector/affinity"]
-    D --> E{"Labels exist on<br/>any node?"}
-    E -- No --> F["Label the node OR<br/>fix the selector typo"]
-    E -- Yes but few --> G["Only few nodes carry the label<br/>— check if THOSE nodes are full"]
-    C -- Yes --> H{"Message also says<br/>Insufficient cpu?"}
-    H -- Yes --> I["kubectl describe nodes | grep -A5<br/>Allocated resources"]
-    I --> J["requests already ~= allocatable<br/>on the labelled nodes"]
-    J --> K["Fix: right-size requests,<br/>add nodes with that label,<br/>or trigger Cluster Autoscaler"]
+    classDef start fill:#7f8c8d,stroke:#616a6b,color:#fff
+    classDef check fill:#3498db,stroke:#2471a3,color:#fff
+    classDef decision fill:#f39c12,stroke:#ba6018,color:#fff
+    classDef bad fill:#e74c3c,stroke:#c0392b,color:#fff
+    classDef fix fill:#27ae60,stroke:#1e8449,color:#fff
+
+    A["Pod Pending"]:::start --> B["kubectl describe pod<br/>read Events bottom-up"]:::check
+    B --> C{"Message mentions<br/>node affinity/selector?"}:::decision
+
+    subgraph FILTERS["Two INDEPENDENT filter plugins —<br/>either one alone can reject a node"]
+        direction TB
+        F1["nodeSelector / nodeAffinity filter"]
+        F2["NodeResourcesFit (CPU/memory) filter"]
+    end
+    C -.->|"both can fail<br/>on the same node"| FILTERS
+
+    C -- Yes --> D["kubectl get nodes --show-labels<br/>compare vs pod nodeSelector/affinity"]:::check
+    D --> E{"Labels exist on<br/>any node?"}:::decision
+    E -- No --> F["Label the node OR<br/>fix the selector typo"]:::fix
+    E -- "Yes, but only<br/>a few nodes" --> G["Only few nodes carry the label<br/>— check if THOSE nodes are full"]:::bad
+    C -- Yes --> H{"Message ALSO says<br/>Insufficient cpu?"}:::decision
+    H -- Yes --> I["kubectl describe nodes | grep -A5<br/>Allocated resources"]:::check
+    I --> J["requests already ~= allocatable<br/>on the labelled nodes<br/>(scheduling-full, not usage-full)"]:::bad
+    J --> K["Fix: right-size requests,<br/>add nodes with that label,<br/>or trigger Cluster Autoscaler"]:::fix
 ```
 
 **Diagnosis commands:**
@@ -66,6 +85,35 @@ kubectl get nodes -o json | jq -r '.items[] | "\(.metadata.name) \(.status.alloc
 
 **Prevention:** Use `nodeAffinity` with `preferredDuringScheduling` instead of `required` where the constraint isn't a hard business requirement — it degrades to "best effort" instead of blocking. Tag node groups so Cluster Autoscaler's node-group templates carry the same labels the pod selects on, otherwise CA can't tell which group to expand for a label-constrained pod. Alert on `kube_node_status_allocatable_cpu_cores - kube_node_status_capacity_cpu_cores` trending to zero per label group, not just cluster-wide.
 
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Read the Events message literally.</strong> <code>kubectl describe pod</code> lists every reason a node was rejected, with a count — "2 node(s) didn't match... 3 Insufficient cpu... 2 node(s) had untolerated taint" is a tally across all nodes, and a single node can be counted under more than one reason.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Isolate the label/affinity problem first.</strong> <code>kubectl get nodes --show-labels</code> against the pod's <code>nodeSelector</code>/<code>affinity</code>. Zero matching nodes means fix the label or the selector typo — done, no infra change needed.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. If nodes DO carry the label, check whether those specific nodes are full.</strong> <code>kubectl describe nodes &lt;node&gt; | grep -A8 "Allocated resources"</code> — remember this is <strong>requested</strong> CPU, not live usage, so a node can be scheduling-full while <code>top</code> shows it mostly idle.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Fix in order of speed.</strong> Label typo/missing label first (instant, no infra change) → scale the labelled node group or let Cluster Autoscaler react (only works if CA's node-group template carries the same label) → lower over-provisioned <code>requests.cpu</code> if VPA/usage history shows headroom.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A node shows 10% CPU utilization in <code>top</code>, yet the scheduler reports "Insufficient cpu" and refuses to place a new pod there. Is the scheduler wrong?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. The scheduler only looks at <strong>requested</strong> CPU (the reservation via <code>resources.requests.cpu</code>), not actual usage — this is intentional, since requests are a reservation contract, not a live measurement. A node can be scheduling-full (sum of requests == allocatable) while utilization is 10%, because the pods running there simply aren't using all of what they reserved. Fixing this means right-sizing over-provisioned requests, not "waiting for CPU to free up."</div>
+</div>
+
 ---
 
 ## 2. Old Pod Stuck in Pending After Deployment Change — Rolling Update Math
@@ -90,20 +138,29 @@ Kubernetes **rounds maxSurge up and maxUnavailable down** — this is deliberate
 ```mermaid
 sequenceDiagram
     participant D as Deployment Controller
-    participant RSold as ReplicaSet (v1)
-    participant RSnew as ReplicaSet (v2)
+    participant RSold as ReplicaSet v1 (OLD)
+    participant RSnew as ReplicaSet v2 (NEW)
     participant SCHED as Scheduler
 
-    Note over D: desired=4, maxSurge=1, maxUnavailable=1<br/>Total ceiling = desired + maxSurge = 5
+    Note over D,SCHED: desired=4, maxSurge=1, maxUnavailable=1<br/>Ceiling = desired + maxSurge = 5 pods max<br/>Floor = desired - maxUnavailable = 3 Ready pods min
 
-    D->>RSnew: scale to 1 (surge slot)
-    RSnew->>SCHED: create pod v2-1 (Pending until scheduled+ready)
-    Note over SCHED: If v2-1 can't schedule (new resource request<br/>too big, new nodeSelector, taints)...
-    SCHED-->>RSnew: Pod stays Pending indefinitely
+    D->>RSold: scale down toward the floor<br/>(spend the maxUnavailable=1 budget up front)
+    activate RSold
+    RSold-->>D: now 3/3/3 — Ready count sits exactly at floor
+    D->>RSnew: scale to 1 (create the surge pod)
+    activate RSnew
+    RSnew->>SCHED: pod v2-1 created, currently Pending
 
-    Note over D: Deployment controller will NOT scale down RSold<br/>until RSnew's pod becomes Ready.<br/>maxUnavailable governs OLD pods, and controller<br/>only removes old pods to make room within maxUnavailable budget,<br/>but never drops below (desired - maxUnavailable) READY pods.
+    rect rgb(80, 30, 30)
+    Note over SCHED: v2-1 can't schedule — resource request too big,<br/>new nodeSelector, or a missing toleration
+    SCHED-->>RSnew: pod stays Pending indefinitely, never becomes Ready
+    end
 
-    Note over RSold: Old pod (v1) still counted as "available"<br/>— controller keeps it to protect availability<br/>since new pod never became Ready
+    Note over D: Every resync: removing one more old pod would drop<br/>Ready below floor (3) --> refused. The unavailable<br/>budget is already fully spent, so this is the stable<br/>(stalled) state until v2-1 becomes schedulable.
+    deactivate RSold
+    deactivate RSnew
+
+    Note over RSold,RSnew: Steady stalled state: 3 old (Ready) + 1 new (Pending).<br/>Not a leak — the controller is correctly refusing to<br/>breach the maxUnavailable contract while it waits<br/>forever for the new pod to become schedulable.
 ```
 
 **This is the key mechanic:** the Deployment controller only scales the **old** ReplicaSet down once the **new** pods are `Ready` (not just `Running` — `Ready` means passing readiness probes). If the new pod can never be scheduled (resource increase doesn't fit, new label selector doesn't match any node, new toleration required), the rollout **stalls with the surge pod Pending and the old pod deliberately kept alive** — because deleting the old pod would breach `maxUnavailable` and the controller refuses to do that.
@@ -137,6 +194,35 @@ kubectl get deployment <name> -o jsonpath='{.status.updatedReplicas}/{.status.re
 
 **Prevention:** Always set `progressDeadlineSeconds` well below your alert SLA so a bad rollout surfaces as a pipeline failure, not silent Pending pods days later. Use `kubectl apply --dry-run=server` in CI to catch new resource requests that clearly exceed node capacity before deploy. Pair rollout with a PodDisruptionBudget so `maxUnavailable` intent is enforced consistently even under voluntary disruptions (node drains) at the same time as a rollout.
 
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Confirm it's stalled, not just slow.</strong> <code>kubectl rollout status deployment/&lt;name&gt;</code> — if it's been sitting at "1 out of 4 new replicas have been updated" far longer than a normal rollout takes, move on to the next step instead of waiting it out.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Read both ReplicaSets side by side.</strong> <code>kubectl get rs -l app=&lt;name&gt;</code> — the old RS holding exactly <code>desired - maxUnavailable</code> Ready pods, next to a new RS with 0 Ready, is the fingerprint of this exact scenario, not a random glitch.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Find out why the new pod can't schedule.</strong> <code>kubectl describe pod &lt;new-pod&gt;</code> — the <code>FailedScheduling</code> reason is the same category of causes as Section 1 (resources, affinity, taints).
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Pick the fix that matches the cause.</strong> Resource bump that doesn't fit → right-size or add capacity. Bad image/crash → <code>kubectl rollout undo</code>. Either way, set <code>progressDeadlineSeconds</code> so the next bad rollout fails loudly instead of hanging silently.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A Deployment has 3 replicas, with maxSurge and maxUnavailable both set to the default 25%. During a stalled rollout, how many old pods is the controller allowed to remove, and how many extra surge pods can it create?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Zero old pods removable, one surge pod creatable. maxUnavailable = floor(3 × 0.25) = floor(0.75) = 0 — Kubernetes rounds unavailability DOWN, so at 3 replicas it guarantees zero forced unavailability. maxSurge = ceil(3 × 0.25) = ceil(0.75) = 1 — surge rounds UP, guaranteeing at least one extra slot even from a fraction. This asymmetric rounding is why small replica counts behave like "surge-only" rollouts: the controller can add capacity but is structurally forbidden from removing any old pod until the new one is Ready.</div>
+</div>
+
 ---
 
 ## 2b. Orphaned Pending Pod Survives After You Fix the Deployment (Second Edit, New ReplicaSet)
@@ -151,13 +237,26 @@ This is not the same problem as Section 2 — that was one rollout stalled waiti
 
 ```mermaid
 flowchart TD
-    A["RS-v1: bad CPU request<br/>pod stuck Pending"] --> B["Edit Deployment<br/>(fix CPU request)"]
-    B --> C["Controller creates RS-v2<br/>(new revision)"]
-    C --> D["RS-v2 pod schedules,<br/>becomes Ready"]
-    D --> E["Controller scales RS-v1<br/>desired --> 0"]
-    E --> F{"Did RS-v1's Pending<br/>pod actually terminate?"}
-    F -- "Usually yes,<br/>on next resync" --> G["Clean — nothing to do"]
-    F -- "No — still shows<br/>DESIRED:1 or pod lingers" --> H["Real anomaly:<br/>check RS status directly,<br/>don't tune maxSurge/maxUnavailable"]
+    classDef bad fill:#e74c3c,stroke:#c0392b,color:#fff
+    classDef action fill:#3498db,stroke:#2471a3,color:#fff
+    classDef decision fill:#f39c12,stroke:#ba6018,color:#fff
+    classDef good fill:#27ae60,stroke:#1e8449,color:#fff
+    classDef anomaly fill:#e74c3c,stroke:#c0392b,color:#fff
+
+    A["RS-v1: bad CPU request<br/>pod stuck Pending (Section 1/2 cause)"]:::bad --> B["Edit Deployment<br/>(fix the CPU request)"]:::action
+    B --> C["Controller creates RS-v2<br/>(brand-new revision, not a resume of RS-v1)"]:::action
+    C --> D["RS-v2 pod schedules cleanly,<br/>passes readiness, becomes Ready"]:::good
+    D --> E["Controller scales RS-v1<br/>desired --> 0 (abandoned, kept for history)"]:::action
+    E --> F{"Did RS-v1's Pending<br/>pod actually terminate?"}:::decision
+    F -- "Usually yes,<br/>on next resync" --> G["Clean — nothing to do"]:::good
+    F -- "No — still shows<br/>DESIRED:1, or pod object lingers" --> H["Real anomaly:<br/>check RS status directly —<br/>NOT a maxSurge/maxUnavailable problem"]:::anomaly
+
+    subgraph BUDGET["What maxSurge/maxUnavailable actually govern"]
+        direction TB
+        BG1["Only Ready pods counted<br/>as 'available' capacity"]
+        BG2["Only active during the<br/>CURRENT rollout's reconciliation"]
+    end
+    H -.->|"a Pending pod from an<br/>abandoned RS was never inside this budget"| BUDGET
 ```
 
 **Diagnosis — confirm whether it's actually stuck, or just cosmetic:**
@@ -232,6 +331,12 @@ Run this as a CronJob (or use a maintained tool like `kube-janitor`) so orphaned
 
 **Prevention:** Set `progressDeadlineSeconds` on every Deployment — it's the correct lever for "stop a bad rollout automatically," not `maxSurge`/`maxUnavailable`. Validate resource requests at CI/admission time so bad rollouts are rejected before they create Pending pods. If orphaned Pending pods are a recurring nuisance, add a scheduled sweep rather than tuning rollout percentages, since the percentages were never the mechanism responsible for cleanup in the first place.
 
+<div class="quiz-card">
+  <p class="quiz-q">A teammate tries to fix a lingering Pending pod from an abandoned ReplicaSet by changing maxUnavailable from a percentage to a fixed integer (0). It has no effect on the stuck pod. Why not?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>maxSurge/maxUnavailable are an availability budget that only governs Ready pods during the CURRENTLY active rollout's reconciliation. A Pending pod was never Ready, so it was never counted inside that budget in the first place — and once a second edit creates a new ReplicaSet, the controller's attention moves to reconciling that new revision; the old, abandoned ReplicaSet becomes historical bookkeeping (kept per revisionHistoryLimit), not part of the active surge/unavailable calculation. Changing the percentages only changes the pace/safety margin of FUTURE rollouts — it can't retroactively clean up debris from one that's already abandoned. The actual fix is confirming the anomaly (kubectl get rs -o wide) and either deleting the orphaned pod directly or scaling the old RS to 0.</div>
+</div>
+
 ---
 
 ## 3. `/var/log/app` — "No Space Left on Device" With Plenty of Free Space
@@ -242,18 +347,73 @@ This is the classic split between **space** (blocks) and **inodes** (the metadat
 
 ```mermaid
 flowchart TD
-    A["ENOSPC writing to<br/>/var/log/app"] --> B["df -h /var/log<br/>shows free space"]
-    B --> C["df -i /var/log<br/>check inode %"]
-    C --> D{"IUse% = 100%?"}
-    D -- Yes --> E["Inode exhaustion<br/>— millions of small files"]
-    D -- No --> F["lsof +L1<br/>deleted-but-open files?"]
-    F --> G{"Deleted files<br/>still holding space?"}
-    G -- Yes --> H["Process holding FD to<br/>deleted file — space not<br/>reclaimed until FD closes"]
-    G -- No --> I["Check reserved blocks<br/>tune2fs -l | grep Reserved"]
-    I --> J{"5% root reserve<br/>eating 'free' space?"}
-    J -- Yes --> K["Non-root write blocked<br/>even though root could write"]
-    J -- No --> L["Check separate mount:<br/>is /var/log/app on its<br/>own filesystem/quota?"]
+    classDef symptom fill:#e74c3c,stroke:#c0392b,color:#fff
+    classDef check fill:#3498db,stroke:#2471a3,color:#fff
+    classDef decision fill:#f39c12,stroke:#ba6018,color:#fff
+    classDef cause fill:#8e44ad,stroke:#6c3483,color:#fff
+    classDef fixed fill:#27ae60,stroke:#1e8449,color:#fff
+
+    A["ENOSPC writing to<br/>/var/log/app"]:::symptom --> B["df -h /var/log<br/>shows plenty of free space"]:::check
+
+    subgraph LIE["df -h only reports BLOCK usage —<br/>never inode usage"]
+        direction TB
+        B
+    end
+
+    B --> C["df -i /var/log<br/>check inode percentage instead"]:::check
+    C --> D{"IUse% = 100%?"}:::decision
+    D -- Yes --> E["Inode exhaustion<br/>— millions of small/zero-byte files<br/>ate every inode, blocks barely touched"]:::cause
+    D -- No --> F["lsof +L1<br/>look for deleted-but-open files"]:::check
+    F --> G{"df vs du totals<br/>don't match?"}:::decision
+    G -- "Yes — df higher" --> H["Process holding FD to a<br/>deleted (unlinked) file — space not<br/>reclaimed until that FD closes"]:::cause
+    G -- No --> I["Check reserved blocks<br/>tune2fs -l | grep Reserved"]:::check
+    I --> J{"5% root reserve<br/>eating the app's 'free' space?"}:::decision
+    J -- Yes --> K["Non-root write blocked<br/>even though root could still write"]:::cause
+    J -- No --> L["Check separate mount:<br/>is /var/log/app its own<br/>filesystem/quota, sized too small?"]:::check
 ```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Distrust `df -h` alone.</strong> It reports block usage only — it has no concept of "out of inodes." Free-looking block space and ENOSPC together are the tell that something else is exhausted.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Rule out inode exhaustion.</strong> <code>df -i /var/log</code> — if <code>IUse%</code> is at or near 100%, stop here: every file (even 0 bytes) burns exactly one inode, so a runaway file-creation pattern can starve the inode table while blocks stay nearly empty.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Rule out deleted-but-open file descriptors.</strong> Compare <code>df -h</code> against <code>du -sh</code> on the same directory — a gap between them is the signature. <code>lsof +L1</code> finds the process still holding an FD open on a file with <code>NLINK=0</code> (unlinked but not released).
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Rule out the ext4 root reserve.</strong> <code>tune2fs -l | grep "Reserved block count"</code> — the default 5% root-only reserve can look like "free" space in <code>df -h</code> that your non-root app is still blocked from using, especially on smaller partitions.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Apply the fix that matches the cause.</strong> Inodes → delete/rotate excess files and fix the creation pattern. Deleted-open FD → truncate the FD or make the app reopen on SIGHUP/rotation. Reserved blocks → <code>tune2fs -m 1</code> on a data partition (never on root).
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="inode" class="active state-bad">Inode exhaustion</button>
+    <button data-toggle-opt="deletedfd" class="state-warn">Deleted-but-open FD</button>
+    <button data-toggle-opt="reserved" class="state-ok">Reserved blocks</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="inode">
+    <strong>Signature:</strong> <code>df -i</code> shows <code>IUse% ≈ 100%</code> while <code>df -h</code> shows plenty of free space. <strong>Cause:</strong> an app creating one file per request/session/job instead of appending, a crashed log rotation leaving thousands of unclean segments, or a retry loop leaking one lock file per attempt. <strong>Fix:</strong> delete/rotate the excess files and fix the creation pattern — reformatting with more inodes is a last resort requiring downtime.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="deletedfd">
+    <strong>Signature:</strong> <code>df -h</code> and <code>du -sh</code> disagree — <code>df</code> reports more used space than any directory listing accounts for. <strong>Cause:</strong> a process (often the app itself, sometimes right after <code>logrotate</code> ran) still holds an open FD to a file that was <code>rm</code>'d; the kernel won't release the blocks until every FD on it closes. <strong>Fix:</strong> <code>lsof +L1</code> to find it, truncate the FD directly for an immediate fix, and get the app reopening its log file on rotation (SIGHUP handler or <code>copytruncate</code>) so it stops recurring.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="reserved">
+    <strong>Signature:</strong> the numbers are close but not quite adding up — a non-root write fails with ENOSPC on a filesystem that still has single-digit percent free, and root could write fine. <strong>Cause:</strong> ext4's default 5% root reserve, which is real free space non-root processes simply aren't allowed to touch. <strong>Fix:</strong> <code>tune2fs -m 1</code> to drop the reserve on a data partition — never on the root filesystem, where that reserve exists to let root recover from a full disk at all.
+  </div>
+</div>
 
 ### 3.1 Inode exhaustion (your hint, and the most common real cause)
 
@@ -274,6 +434,12 @@ find /var/log/app -xdev -printf '%h\n' | sort | uniq -c | sort -rn | head  # wor
 ```
 
 **Fix:** delete/rotate the excess files, then fix the app's file-creation pattern (append to a single file + external rotation via `logrotate`, or bound the number of segments). Reformatting with more inodes (`mkfs -N <count>`) is a last resort requiring downtime/remount.
+
+<div class="quiz-card">
+  <p class="quiz-q"><code>df -h</code> reports a filesystem at 40% used, but writes are failing with "No space left on device." What's the one command that would immediately confirm inode exhaustion, and why does df -h miss it entirely?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>df -i</code> — it reports inode usage percentage, a completely separate resource from block usage. <code>df -h</code> only ever reports block (space) usage; it has no visibility into how many of the filesystem's fixed inode count are still free. Since every file consumes exactly one inode regardless of its size — even a 0-byte file — a filesystem can be nearly empty in blocks (low df -h%) while its inode table is 100% exhausted (high df -i IUse%), typically from an app creating one file per request/session instead of appending to a rotated set.</div>
+</div>
 
 ### 3.2 Deleted-but-open file descriptors (space not actually free)
 
@@ -298,6 +464,12 @@ lsof +L1 /var/log/app 2>/dev/null
 # already-rotation-aware logging library)
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q"><code>df -h</code> reports 85% used on <code>/var/log</code>, but <code>du -sh /var/log/app/*</code> sums to far less than that. What does the gap between these two numbers tell you, and why doesn't just deleting more files fix it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The gap is disk blocks held by a deleted-but-still-open file — <code>df</code> reports actual block usage on the filesystem, while <code>du</code> only sums what's visible in the directory tree, and a file that's been <code>rm</code>'d no longer appears there even though its blocks are still allocated. Deleting more files doesn't help because the space isn't associated with any file you can find and remove — it's held by whatever process still has an open file descriptor (visible via <code>lsof +L1</code>, NLINK=0) pointing at the now-nameless inode. The blocks are only released when that FD closes, whether by killing/restarting the process or by truncating the FD directly (<code>: &gt; /proc/&lt;pid&gt;/fd/&lt;fd&gt;</code>).</div>
+</div>
+
 ### 3.3 Reserved blocks (ext4 5% root reserve)
 
 ext4 reserves ~5% of blocks for root by default (`tune2fs -l | grep "Reserved block count"`). On a large disk this is a lot of *real* free space that non-root processes are blocked from using — `df -h` shows it as used/unavailable to your app's `Use%` even though `root` could still write. This mostly bites on smaller partitions or containers with tight quotas.
@@ -314,17 +486,51 @@ tune2fs -m 1 /dev/xvda1   # drop reserve to 1% (do NOT do this on the root files
 
 ## 4. AWS Auto Scaling Group — Handling Predicted vs Unpredictable Scale
 
+Three different load shapes need three different scaling tools — using the wrong one means either wasted spend (over-provisioning for a spike that never comes) or a slow reaction (under-provisioning for one you should have seen coming):
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="predictable" class="active">Predictable / recurring</button>
+    <button data-tab="warmpool">Warm Pool (add-on)</button>
+    <button data-tab="unpredictable">Unpredictable / bursty</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="predictable">
+      <strong>Tool:</strong> Scheduled Scaling Action (deterministic, calendar-known) or Predictive Scaling (ML forecast from up to 14 days of history when the shape varies but the pattern repeats). <strong>Goal:</strong> capacity is already in place <em>before</em> the spike, instead of reacting to a CloudWatch threshold crossing after the fact.
+    </div>
+    <div class="tab-panel" data-tab-panel="warmpool">
+      <strong>Tool:</strong> a pool of pre-bootstrapped instances kept outside live capacity, Stopped or Running. <strong>Goal:</strong> removes the boot + bootstrap time tax that both predictable and unpredictable scaling still pay on a cold EC2 launch — pairs with either of the other two modes rather than replacing them.
+    </div>
+    <div class="tab-panel" data-tab-panel="unpredictable">
+      <strong>Tool:</strong> Target Tracking (self-tuning, preferred default) or Step Scaling (explicit breakpoints for well-understood tiers), driven by a metric that reflects real load — request count or queue depth, not just CPU. <strong>Goal:</strong> react fast and proportionally to a spike with no forecastable pattern.
+    </div>
+  </div>
+</div>
+
 ### 4.1 Predicted / scheduled load — Predictive Scaling + Scheduled Actions
 
 Use this when load has a **known recurring pattern** (daily peak at 9am, batch jobs at midnight, Monday-morning traffic) — you want capacity ready *before* the spike hits, not reacting after CloudWatch metrics cross a threshold (which is inherently a lagging signal).
 
 ```mermaid
 flowchart TD
-    A["Known/repeating load pattern?"] -->|"Yes, time-of-day/week"| B["Scheduled Scaling Action<br/>cron-based min/max/desired change"]
-    A -->|"Yes, but shape varies<br/>(forecastable from history)"| C["Predictive Scaling Policy<br/>ML forecast on CloudWatch history"]
-    A -->|"No, spiky/unknown"| D["Dynamic Scaling<br/>(target tracking / step scaling)"]
-    C --> E["Forecast mode: ForecastOnly<br/>— observe before trusting"]
-    E --> F["Switch to ForecastAndScale<br/>once forecast accuracy validated"]
+    classDef question fill:#7f8c8d,stroke:#616a6b,color:#fff
+    classDef scheduled fill:#3498db,stroke:#2471a3,color:#fff
+    classDef predictive fill:#8e44ad,stroke:#6c3483,color:#fff
+    classDef dynamic fill:#f39c12,stroke:#ba6018,color:#fff
+    classDef caution fill:#e67e22,stroke:#ba6018,color:#fff
+    classDef good fill:#27ae60,stroke:#1e8449,color:#fff
+
+    A["Known/repeating load pattern?"]:::question -->|"Yes, fixed time-of-day/week"| B["Scheduled Scaling Action<br/>cron-based min/max/desired change"]:::scheduled
+    A -->|"Yes, but shape varies<br/>(forecastable from history)"| C["Predictive Scaling Policy<br/>ML forecast on 14 days of<br/>CloudWatch history"]:::predictive
+    A -->|"No, spiky/unknown"| D["Dynamic Scaling<br/>(target tracking / step scaling —<br/>see Section 4.3)"]:::dynamic
+
+    subgraph ROLLOUT["Predictive scaling trust ladder"]
+        direction LR
+        E["Mode: ForecastOnly<br/>— observe forecast vs<br/>real traffic, take no action"]:::caution
+        F["Mode: ForecastAndScale<br/>— act on it, only once<br/>forecast accuracy is validated"]:::good
+        E --> F
+    end
+    C --> ROLLOUT
 ```
 
 **Scheduled scaling** — deterministic, for calendar-known events:

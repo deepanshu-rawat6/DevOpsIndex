@@ -2,6 +2,11 @@
 
 PagerDuty/Opsgenie configuration, Alertmanager integration, alert fatigue metrics, schedule design, and incident-command/ChatOps wiring. Complements [alerting-philosophy.md](../monitoring/alerting-philosophy.md) (what to alert on) and [alertmanager.md](../monitoring/alertmanager.md) (routing internals) — this file covers the on-call paging layer itself.
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## 1. PagerDuty Core Concepts
@@ -12,12 +17,20 @@ flowchart TD
     classDef purple fill:#9b59b6,stroke:#8e44ad,color:#fff,rx:8
     classDef orange fill:#e67e22,stroke:#d35400,color:#fff,rx:8
     classDef yellow fill:#f39c12,stroke:#d68910,color:#000,rx:8
+    classDef green fill:#2ecc71,stroke:#27ae60,color:#fff,rx:8
 
-    ALERT["Monitoring source<br>(Alertmanager, Datadog, CloudWatch)"]:::blue --> EVENT["Event Orchestration<br>route / dedupe / suppress"]:::purple
-    EVENT --> SVC["Service<br>(e.g. 'payments-api')"]:::orange
-    SVC --> EP["Escalation Policy"]:::orange
-    EP --> SCHED["Schedule<br>(who's on-call now)"]:::yellow
-    SCHED --> PAGE["Page: push/SMS/call/Slack"]:::blue
+    ALERT["Monitoring source<br>(Alertmanager, Datadog, CloudWatch)"]:::blue --> EVENT["Event Orchestration<br>route / dedupe / suppress<br>runs before an incident exists"]:::purple
+
+    subgraph CONFIG["Configured once, per service (not per alert)"]
+        SVC["Service<br>(e.g. 'payments-api')"]:::orange
+        EP["Escalation Policy<br>ordered list of who + when"]:::orange
+        SCHED["Schedule<br>who's on-call right now"]:::yellow
+    end
+
+    EVENT --> SVC
+    SVC --> EP
+    EP --> SCHED
+    SCHED --> PAGE["Page: push / SMS / call / Slack"]:::green
 ```
 
 | Concept | Definition |
@@ -27,6 +40,12 @@ flowchart TD
 | **Schedule** | Rotation defining who is "on-call" at any given moment — feeds into escalation policy layers |
 | **Event Orchestration** (formerly Event Rules) | Rule engine that processes incoming events *before* they become incidents — routing, deduplication, suppression, enrichment |
 | **Integration key (routing key)** | Per-service token used by senders (Alertmanager, CloudWatch, custom scripts) to submit events via the Events API v2 |
+
+<div class="quiz-card">
+  <p class="quiz-q">In the flow above, does Event Orchestration run before or after an event is assigned to a Service?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Before. Event Orchestration is the rule engine that processes incoming events <em>before</em> they become incidents — routing, deduplication, suppression, and enrichment all happen first. By the time an event reaches a Service, orchestration has already decided whether it should even exist as an incident.</div>
+</div>
 
 ---
 

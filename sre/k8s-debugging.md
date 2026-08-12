@@ -1,5 +1,10 @@
 # SRE: Debugging & Recovery
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## Debugging 5XX Errors — The SRE Way
@@ -20,39 +25,86 @@ graph TD
     classDef yellow fill:#f39c12,stroke:#d68910,color:#000,rx:8
     classDef k8s fill:#326ce5,stroke:#254ea8,color:#fff,rx:8
     classDef aws fill:#ff9900,stroke:#cc7a00,color:#000,rx:8
-    ALERT["Alert: 5XX rate above threshold"]:::blue --> L1
 
-    L1["Step 1: Check load balancer metrics first"]:::blue --> LB_CHECK{LB healthy?}
-    LB_CHECK -->|"ALB 5XX but target group healthy"| LB_ISSUE["ALB issue: listener rules, health check config, or expired SSL cert"]:::blue
+    ALERT["🚨 Alert fires:<br/>5XX rate above SLO burn-rate threshold"]:::red --> L1
+
+    subgraph LAYER1["Layer 1 — outermost: Load Balancer"]
+        L1["Step 1: Check load balancer metrics first"]:::blue --> LB_CHECK{"LB healthy?"}
+        LB_CHECK -->|"ALB 5XX but<br/>target group healthy"| LB_ISSUE["ALB issue: listener rules,<br/>health check config,<br/>or expired SSL cert"]:::orange
+    end
+
     LB_CHECK -->|"5XX from targets"| L2
 
-    L2["Step 2: kubectl get pods -n ns -l app=name"]:::blue --> POD_CHECK{All pods Running?}
-    POD_CHECK -->|CrashLoopBackOff| CRASH["App crashing on startup — kubectl logs pod --previous"]:::red
-    POD_CHECK -->|OOMKilled| OOM["Memory limit exceeded — check limits, heap profile"]:::blue
-    POD_CHECK -->|Pending| PENDING["Scheduling issue — kubectl describe pod, check Events"]:::blue
+    subgraph LAYER2["Layer 2 — Pod Status"]
+        L2["Step 2: kubectl get pods<br/>-n ns -l app=name"]:::blue --> POD_CHECK{"All pods Running?"}
+        POD_CHECK -->|CrashLoopBackOff| CRASH["App crashing on startup —<br/>kubectl logs pod --previous"]:::red
+        POD_CHECK -->|OOMKilled| OOM["Memory limit exceeded —<br/>check limits, heap profile"]:::purple
+        POD_CHECK -->|Pending| PENDING["Scheduling issue —<br/>kubectl describe pod, check Events"]:::yellow
+    end
+
     POD_CHECK -->|"Running but 5XX"| L3
 
-    L3["Step 3: kubectl describe pod name"]:::blue --> DESC_CHECK{Events clean?}
-    DESC_CHECK -->|"Readiness probe failing"| PROBE["App unhealthy internally — check startup errors in logs"]:::green
-    DESC_CHECK -->|"Resource pressure warnings"| RESOURCES["Node under pressure — kubectl top nodes / kubectl top pods"]:::blue
+    subgraph LAYER3["Layer 3 — Pod Events"]
+        L3["Step 3: kubectl describe pod name"]:::blue --> DESC_CHECK{"Events clean?"}
+        DESC_CHECK -->|"Readiness probe failing"| PROBE["App unhealthy internally —<br/>check startup errors in logs"]:::green
+        DESC_CHECK -->|"Resource pressure warnings"| RESOURCES["Node under pressure —<br/>kubectl top nodes / kubectl top pods"]:::yellow
+    end
+
     DESC_CHECK -->|"Clean events"| L4
 
-    L4["Step 4: kubectl logs pod -f --tail=200"]:::blue --> LOG_CHECK{Errors in logs?}
-    LOG_CHECK -->|"DB connection errors"| DB_ISSUE["Database issue — check RDS, connection pool exhaustion"]:::teal
-    LOG_CHECK -->|"Timeout errors to upstream"| UPSTREAM["Upstream dependency degraded — check circuit breaker metrics"]:::blue
-    LOG_CHECK -->|"panic / nil deref"| PANIC["Application bug — capture goroutine dump, fix and redeploy"]:::green
+    subgraph LAYER4["Layer 4 — Application Logs"]
+        L4["Step 4: kubectl logs pod<br/>-f --tail=200"]:::blue --> LOG_CHECK{"Errors in logs?"}
+        LOG_CHECK -->|"DB connection errors"| DB_ISSUE["Database issue —<br/>check RDS, connection pool exhaustion"]:::teal
+        LOG_CHECK -->|"Timeout errors to upstream"| UPSTREAM["Upstream dependency degraded —<br/>check circuit breaker metrics"]:::teal
+        LOG_CHECK -->|"panic / nil deref"| PANIC["Application bug —<br/>capture goroutine dump, fix and redeploy"]:::red
+    end
+
     LOG_CHECK -->|"Clean logs"| L5
 
-    L5["Step 5: kubectl top pods — check Prometheus/Grafana"]:::blue --> METRICS_CHECK{Resource exhaustion?}
-    METRICS_CHECK -->|"CPU throttled"| CPU_ISSUE["CPU limit too low — throttled pod causes slow responses and timeouts"]:::blue
-    METRICS_CHECK -->|"Memory near limit"| MEM_ISSUE["About to OOM — increase memory limit or fix leak"]:::blue
+    subgraph LAYER5["Layer 5 — Resource Metrics"]
+        L5["Step 5: kubectl top pods —<br/>check Prometheus/Grafana"]:::blue --> METRICS_CHECK{"Resource exhaustion?"}
+        METRICS_CHECK -->|"CPU throttled"| CPU_ISSUE["CPU limit too low —<br/>throttled pod causes slow responses and timeouts"]:::yellow
+        METRICS_CHECK -->|"Memory near limit"| MEM_ISSUE["About to OOM —<br/>increase memory limit or fix leak"]:::purple
+    end
+
     METRICS_CHECK -->|"Normal resources"| L6
 
-    L6["Step 6: kubectl exec pod -- curl upstream and nslookup service"]:::blue --> NET_CHECK{Connectivity OK?}
-    NET_CHECK -->|"DNS fails"| DNS_ISSUE["CoreDNS issue — kubectl get pods -n kube-system -l k8s-app=kube-dns"]:::blue
-    NET_CHECK -->|"Connection refused"| NET_POL["NetworkPolicy blocking — kubectl get networkpolicy -n ns"]:::red
-    NET_CHECK -->|"Timeouts"| UPSTREAM2["Upstream too slow — check service latency p99"]:::teal
+    subgraph LAYER6["Layer 6 — innermost: Network"]
+        L6["Step 6: kubectl exec pod -- curl upstream<br/>and nslookup service"]:::blue --> NET_CHECK{"Connectivity OK?"}
+        NET_CHECK -->|"DNS fails"| DNS_ISSUE["CoreDNS issue —<br/>kubectl get pods -n kube-system -l k8s-app=kube-dns"]:::dark
+        NET_CHECK -->|"Connection refused"| NET_POL["NetworkPolicy blocking —<br/>kubectl get networkpolicy -n ns"]:::red
+        NET_CHECK -->|"Timeouts"| UPSTREAM2["Upstream too slow —<br/>check service latency p99"]:::teal
+    end
 ```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Load balancer first.</strong> Check ALB/NLB metrics before touching anything in the cluster. If the LB shows 5XX but the target group itself is healthy, the problem is at the LB layer — listener rules, health check config, or an expired SSL cert — and nothing downstream matters yet.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Pod status.</strong> <code>kubectl get pods -n ns -l app=name</code>. <code>CrashLoopBackOff</code> means the app is crashing on startup (go straight to <code>kubectl logs --previous</code>). <code>OOMKilled</code> means the memory limit was exceeded. <code>Pending</code> means a scheduling issue. Only if pods are Running but still serving 5XX do you move inward.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Pod events.</strong> <code>kubectl describe pod name</code>. A failing readiness probe means the app is unhealthy internally — check its startup errors. Resource pressure warnings mean the node itself is under strain, not the app.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Application logs.</strong> <code>kubectl logs pod -f --tail=200</code>. DB connection errors point at the database; upstream timeouts point at a degraded dependency; a panic or nil dereference is an application bug that needs a fix and redeploy — not a config change.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Resource metrics.</strong> <code>kubectl top pods</code>, cross-checked against Prometheus/Grafana. CPU throttling causes slow responses and timeouts without ever triggering an OOM kill — it's a silent cause easy to miss if you only watch for OOMKilled events. Memory near the limit means you're about to OOM.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Network — innermost layer.</strong> <code>kubectl exec pod -- curl upstream</code> and <code>nslookup service</code>. DNS failures point at CoreDNS; connection refused often means a NetworkPolicy is blocking the traffic; timeouts mean the upstream itself is slow. By the time you're here, every outer layer has already been ruled out.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ### kubectl Runbook
 
@@ -102,6 +154,12 @@ kubectl port-forward pod/<pod-name> 8080:8080 -n <namespace>
 curl -v localhost:8080/healthz
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">A container exits with code 143. Was it OOMKilled?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Exit code 143 is 128 + signal 15 (SIGTERM) — a graceful shutdown request, not the kernel's OOM killer. OOMKilled is exit code 137 (128 + signal 9, SIGKILL) — no graceful shutdown at all. Mixing these up matters operationally: a 143 means your app got a chance to drain and shut down cleanly; a 137 means it was killed mid-request with zero warning.</div>
+</div>
+
 ### Common 5XX Root Causes
 
 | Symptom | Likely cause | Fix |
@@ -115,6 +173,12 @@ curl -v localhost:8080/healthz
 | `Pending` pods | Insufficient cluster capacity, PodAffinity mismatch, PV stuck | Check events: `FailedScheduling`, check `kubectl describe pod` |
 
 **Prevention:** Alert on SLO burn rate (not raw error count) so you're paged before users notice. Set `progressDeadlineSeconds` on all Deployments — failed rollouts self-report. Add a post-deploy smoke test in CI: `kubectl rollout status && curl /healthz`. Use `preStop: sleep 5` on all pods to prevent connection reset on rolling updates.
+
+<div class="quiz-card">
+  <p class="quiz-q">Why does this Prevention rule call for alerting on SLO burn rate rather than raw error count?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>A raw error-count threshold treats every service the same regardless of its traffic volume and its error budget, so it either pages too late for a high-traffic service (by the time raw errors cross a fixed number, users have already been affected for a while) or too often for a low-traffic one. Burn-rate alerting ties the threshold to how fast you're consuming your actual error budget, which is what lets you get paged <em>before</em> users notice instead of after.</div>
+</div>
 
 ---
 
@@ -144,6 +208,35 @@ aws elbv2 describe-target-health \
 # Common cause: security group on the node/pod doesn't allow
 # health check traffic from the ALB security group on the health check port
 ```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Find the ALB.</strong> <code>kubectl get ingress -n namespace</code>. The <code>kubernetes.io/ingress.class: alb</code> annotation confirms this Ingress is managed by the AWS Load Balancer Controller, not a generic ingress-nginx setup.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Get the ALB's address.</strong> <code>kubectl describe ingress name -n namespace</code> and read the <code>Address:</code> field — that's the ALB's DNS name, which you'll need to find the matching resource in the AWS console or CLI.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Check target group health.</strong> <code>aws elbv2 describe-target-health --target-group-arn ...</code>. Unhealthy targets report <code>State.Reason = "Target.FailedHealthChecks"</code> — this confirms the pods themselves aren't the problem, the ALB just can't reach them on the health check path/port.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Root-cause the failed health check.</strong> The most common cause: the security group on the node or pod doesn't allow traffic from the ALB's security group on the health check port. Pods can be perfectly healthy and still show as unhealthy targets if this one rule is missing.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Target group health shows <code>State.Reason = "Target.FailedHealthChecks"</code>, but <code>kubectl get pods</code> shows every pod Running and passing its own readiness probe. What's the most common cause?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>A security group on the node or pod that doesn't allow health-check traffic from the ALB's security group on the health check port. The pod being internally healthy is irrelevant if the ALB's health-check packets never reach it in the first place — this is a network-layer problem, not an application-layer one, and Kubernetes-side health signals won't show it.</div>
+</div>
 
 ### CloudWatch Container Insights
 
@@ -214,7 +307,38 @@ aws xray get-trace-summaries \
   --region us-east-1
 ```
 
+Four AWS-native tools, four different jobs — pick based on what you're trying to answer:
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="alb" class="active">ALB Target Group Health</button>
+    <button data-tab="ci">CloudWatch Container Insights</button>
+    <button data-tab="cp">EKS Control Plane Logs</button>
+    <button data-tab="xray">X-Ray / ADOT</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="alb">
+      Answers: "are my pods actually receiving traffic from the load balancer?" Checks target registration and health-check state at the AWS layer, outside Kubernetes entirely — catches the case where pods are Running and Ready but the ALB still thinks they're unhealthy.
+    </div>
+    <div class="tab-panel" data-tab-panel="ci">
+      Answers: "what happened inside the cluster, in aggregate, over time?" Once enabled, ships pod-level metrics and OOM events (via <code>aws-node</code>/ADOT) and application logs (via Fluent Bit) into CloudWatch Logs Insights, queryable with the same syntax shown above.
+    </div>
+    <div class="tab-panel" data-tab-panel="cp">
+      Answers: "why didn't the control plane do what I expected?" Scheduler logs explain <code>Pending</code> pods, the API server audit log answers "who changed this resource," and authenticator logs surface 403/unauthorized auth failures — none of this is visible from inside the cluster with kubectl alone.
+    </div>
+    <div class="tab-panel" data-tab-panel="xray">
+      Answers: "which service hop in the request path actually returned the 5XX?" Requires the app to already be instrumented with OpenTelemetry and shipping to X-Ray via the ADOT Collector — the service map and trace summaries pinpoint the failing hop instead of you guessing from logs.
+    </div>
+  </div>
+</div>
+
 **Prevention:** Enable Container Insights from cluster creation, not after an incident. Set ALB `deregistration_delay` to 30s (default 300s causes slow deployments and lingering 502s). Use IRSA for all pod-level AWS API access — eliminates the `401 Unauthorized` class of 5XX. Enable X-Ray tracing before you need it; retrofitting is painful.
+
+<div class="quiz-card">
+  <p class="quiz-q">A pod calling S3 gets intermittent <code>401 Unauthorized</code> errors that show up as 5XX to callers. Per this section's Prevention rule, what eliminates this entire class of error?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Using IRSA (IAM Roles for Service Accounts) for all pod-level AWS API access. IRSA gives each pod short-lived, automatically-rotated credentials scoped to a specific IAM role, instead of relying on static credentials or node-level instance roles that can go stale or be misconfigured — the Prevention rule calls this out specifically as eliminating the entire 401 Unauthorized class of 5XX, not just reducing its frequency.</div>
+</div>
 
 ---
 
@@ -225,6 +349,24 @@ aws xray get-trace-summaries \
 The Linux kernel's **OOM Killer** is invoked when a container exceeds its **memory limit** (cgroup memory limit set from `spec.containers[].resources.limits.memory`). The kernel sends `SIGKILL` (signal 9) to the process — not SIGTERM. There is no graceful shutdown. The process is immediately killed.
 
 Kubernetes detects the exit code 137 (128 + 9) and records the reason as `OOMKilled` in the pod's `lastState`.
+
+```mermaid
+sequenceDiagram
+    participant APP as Container process
+    participant CG as cgroup memory limit
+    participant KERNEL as Linux OOM Killer
+    participant KUBELET as kubelet
+    participant API as Kubernetes API
+
+    APP->>CG: Memory usage grows past limits.memory
+    CG->>KERNEL: cgroup limit exceeded, invoke OOM killer
+    KERNEL->>APP: SIGKILL (signal 9) — no graceful shutdown
+    Note over APP: Process dies immediately, no SIGTERM handler runs
+    KUBELET->>APP: Detect container exited with code 137
+    KUBELET->>API: Record lastState.reason = OOMKilled
+    KUBELET->>APP: restartPolicy Always, start a new container
+    Note over KUBELET,API: Zero capacity during image pull + startup —<br/>this is exactly the risk the Prevention<br/>section below is written to close
+```
 
 ```
 Containers:
@@ -240,6 +382,25 @@ Containers:
 - `requests.memory`: the amount the scheduler reserves on the node. Used for placement. Guaranteed to the container.
 - `limits.memory`: the hard ceiling the kernel enforces. Exceeding this = OOMKill.
 - Best practice: set requests = your p95 steady-state memory, limits = your p99.9 + buffer. Never set limits to 10x requests "just in case" — this causes node over-commitment and cascading OOM kills during memory pressure.
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="requests" class="active state-ok">requests.memory</button>
+    <button data-toggle-opt="limits" class="state-bad">limits.memory</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="requests">
+    What the <strong>scheduler</strong> reserves on the node when deciding where the pod can fit. Guaranteed to the container — the node won't over-subscribe this amount to other pods. Setting this too low doesn't cause an OOM kill by itself; it just means the scheduler may pack the node tighter than the pod's real steady-state usage warrants.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="limits">
+    The hard ceiling the <strong>kernel</strong> enforces via the cgroup. Exceeding it is what triggers the OOM killer and a <code>SIGKILL</code> — nothing graceful about it. This is the number that actually determines whether a memory spike becomes an outage.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Someone sets <code>limits.memory</code> to 10x <code>requests.memory</code> "just in case," reasoning that a generous limit gives the app plenty of headroom before ever risking an OOM kill. What does this best-practice note say actually goes wrong?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It causes node over-commitment: the scheduler places pods based on <code>requests</code>, so the node happily packs in far more pods than it could actually support if they all grew toward their generous <code>limits</code> at once. When several pods spike memory simultaneously, the node runs out of real memory and the kernel starts OOM-killing pods — potentially cascading across several pods on that node, not just the one that grew. The fix is realistic limits (p99.9 + buffer), not maximally generous ones.</div>
+</div>
 
 ### Diagnosing the Memory Issue
 
@@ -259,6 +420,29 @@ go tool pprof http://localhost:6060/debug/pprof/heap
 # 4. Check for goroutine leaks (goroutines hold stack memory)
 curl http://localhost:6060/debug/pprof/goroutine?debug=2 | head -100
 ```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Confirm the OOM kill.</strong> <code>kubectl describe pod pod-name</code> shows <code>lastState.reason = OOMKilled</code> and the historical container memory usage leading up to the kill — your starting evidence that this really was a memory limit, not something else.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Check current memory usage.</strong> <code>kubectl top pods -n namespace --containers</code> shows whether the replacement container (or other pods in the same workload) are trending toward the same limit right now.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Capture a heap profile, if the app is still running.</strong> Port-forward to a pprof endpoint and pull <code>/debug/pprof/heap</code> — <code>top20</code> and <code>list func</code> in the pprof shell point at exactly which allocations are dominating the heap.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Check for goroutine leaks.</strong> Goroutines hold stack memory even when idle, so a leak here shows up as slow, steady memory growth rather than a sudden spike — <code>/debug/pprof/goroutine?debug=2</code> dumps every goroutine's stack so you can spot ones that never should have stayed alive.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ### Recovery: Singleton Pod
 
@@ -330,6 +514,12 @@ spec:
           memory: "2Gi"
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">In the singleton mitigation manifest, the pod has both a <code>preStop</code> hook and a <code>readinessProbe</code>. During an OOM kill specifically, which of these two actually gets a chance to run, and why does the other one matter anyway?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Neither <code>preStop</code> nor graceful shutdown logic runs during an OOM kill — the kernel sends <code>SIGKILL</code> directly, with no warning and no lifecycle hook invoked. <code>preStop</code> only helps during voluntary terminations (rolling updates, node drains, scale-downs), not an OOM kill. The <code>readinessProbe</code> is what actually matters here: after the pod restarts, it keeps the pod out of Service endpoints until <code>/readyz</code> passes, so the restart window's zero capacity doesn't turn into requests being routed to a not-yet-ready container.</div>
+</div>
+
 ### Recovery: Distributed/Replicated Pod
 
 A **distributed** workload runs `replicas: N > 1`. When one pod OOM-kills, others continue serving. The key is ensuring:
@@ -390,6 +580,12 @@ spec:
 
 **Prevention:** Set memory `requests == limits` (Guaranteed QoS) for critical services — prevents the OOM killer from targeting them during node pressure. Set `GOMEMLIMIT` in Go services to ~90% of the K8s limit so GC reclaims memory before the kernel kills the process. Use VPA in `Off` mode first to get right-sizing recommendations before enabling `Auto`. Alert on `container_memory_working_set_bytes / container_spec_memory_limit_bytes > 0.85`.
 
+<div class="quiz-card">
+  <p class="quiz-q">A node is under memory pressure and the kubelet has to evict something. Why does setting <code>requests == limits</code> (Guaranteed QoS) protect a critical pod from being the one chosen?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Kubernetes assigns each pod a QoS class based on how requests and limits compare: Guaranteed (requests == limits on every resource, every container), Burstable (requests set but less than limits), or BestEffort (no requests/limits at all). Under node memory pressure, the kubelet evicts BestEffort pods first, then Burstable pods, and only reaches Guaranteed pods last. Setting requests == limits for a critical service moves it into the class that's evicted last — separate from, and in addition to, whatever GOMEMLIMIT does inside the Go runtime itself to reclaim memory before the kernel's OOM killer ever gets invoked.</div>
+</div>
+
 ---
 
 
@@ -398,6 +594,35 @@ spec:
 ## Debugging Services Without SSH or SSM Access
 
 In production EKS/GKE environments you often have no direct shell access to nodes. This is the full toolkit ordered from least to most invasive.
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>Layer 1 — kubectl, no exec required.</strong> Pod state, events, logs (current and <code>--previous</code>), endpoint health, and the namespace-wide events timeline. This alone answers most "why is this pod broken" questions without touching a shell at all.
+    </div>
+    <div class="stepper-panel">
+      <strong>Layer 2 — Port-forward to isolate the problem.</strong> Bypasses the entire LB → Ingress → Service → kube-proxy chain to test the pod (or the Service) directly. Still zero exec required — just a local TCP tunnel.
+    </div>
+    <div class="stepper-panel">
+      <strong>Layer 3 — Ephemeral debug containers (K8s 1.23+).</strong> First real "shell-like" access: inject a debug container into a running pod, sharing its namespaces without modifying or restarting the original container. Requires the target pod to actually be running.
+    </div>
+    <div class="stepper-panel">
+      <strong>Layer 4 — Temporary debug pod, same namespace.</strong> For when the target pod is CrashLoopBackOff and there's no running container to attach to. Runs netshoot as its own throwaway pod alongside the broken service instead of inside it.
+    </div>
+    <div class="stepper-panel">
+      <strong>Layer 5 — Privileged DaemonSet-style debug pod.</strong> For node-level problems (disk pressure, kernel issue, iptables corruption) — schedules a privileged pod onto the specific node with <code>hostPID</code>/<code>hostNetwork</code> and a chroot into the host filesystem. The most invasive kubectl-based option.
+    </div>
+    <div class="stepper-panel">
+      <strong>Layer 6 — AWS-specific tooling.</strong> When even <code>kubectl</code> access is unavailable: CloudWatch Logs Insights for application logs, ALB target health for traffic-layer visibility, EKS control plane logs for scheduler/auth/audit questions, and X-Ray for end-to-end trace visibility.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ### Layer 1 — kubectl (no exec required)
 
@@ -441,6 +666,20 @@ curl -v localhost:8080/healthz
 # pod PF works + svc PF works → problem is at Ingress or LB layer
 # pod PF works + svc PF fails → kube-proxy or endpoint selector issue
 # pod PF fails               → problem is in the application itself
+```
+
+```mermaid
+flowchart TD
+    classDef test fill:#3498db,stroke:#2471a3,color:#fff,rx:6
+    classDef good fill:#27ae60,stroke:#1e8449,color:#fff,rx:6
+    classDef bad fill:#e74c3c,stroke:#c0392b,color:#fff,rx:6
+
+    PODPF["kubectl port-forward pod/name"]:::test --> PODRESULT{"Pod responds<br/>directly?"}
+    PODRESULT -->|No| APPBUG["Problem is in the application itself —<br/>Service/Ingress/LB are not the cause"]:::bad
+    PODRESULT -->|Yes| SVCPF["kubectl port-forward svc/name"]:::test
+    SVCPF --> SVCRESULT{"Service<br/>responds?"}
+    SVCRESULT -->|No| PROXY["kube-proxy rules or<br/>endpoint selector issue"]:::bad
+    SVCRESULT -->|Yes| LBISSUE["Both layers work in isolation —<br/>problem is at Ingress or LB layer"]:::good
 ```
 
 ### Layer 3 — Ephemeral debug containers (K8s 1.23+)
@@ -496,6 +735,25 @@ traceroute payments-svc
 # Capture traffic (if you know which pod IP)
 tcpdump -i eth0 host <pod-ip> and port 8080
 ```
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="ephemeral" class="active state-ok">Ephemeral container (Layer 3)</button>
+    <button data-toggle-opt="tempPod" class="state-warn">Temporary debug pod (Layer 4)</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="ephemeral">
+    Injected directly into a <strong>running</strong> pod, sharing its namespaces without modifying or restarting the original container. Requires there to be a live container to attach to — no help if the pod is stuck in <code>CrashLoopBackOff</code>. One-way door: ephemeral containers are never restarted and can't be removed until the pod itself dies.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="tempPod">
+    A brand-new, disposable pod (usually netshoot) run in the <strong>same namespace</strong> as the broken service — not attached to it at all. Works even when the target pod is <code>CrashLoopBackOff</code> and has nothing running to attach to, because it doesn't depend on the broken pod having a live container. Gives full network tooling (DNS, connectivity, port scan, packet capture) from the same network vantage point as the broken service.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A pod is stuck in <code>CrashLoopBackOff</code> and you need netshoot's tooling to debug DNS and connectivity. Why won't <code>kubectl debug --target</code> (the ephemeral container approach) work here, and what's the alternative?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>An ephemeral debug container attaches to and shares the namespaces of an existing, running container in the target pod — but a <code>CrashLoopBackOff</code> pod has no live container to attach to, since it's repeatedly starting and immediately dying. The alternative is Layer 4: run netshoot as its own standalone pod (<code>kubectl run debug-pod --image=nicolaka/netshoot ...</code>) in the same namespace. It's not attached to the broken pod at all, so it doesn't need the broken pod to be running — it just needs to sit in the same namespace to reach the same Services and test DNS/connectivity from a comparable vantage point.</div>
+</div>
 
 ### Layer 5 — Debug a node problem (via privileged DaemonSet)
 
@@ -580,31 +838,50 @@ aws xray get-trace-summaries \
 
 ### Decision tree — which tool to use
 
-```
-Pod is CrashLoopBackOff
-├── kubectl logs --previous       ← always start here
-└── Logs empty?
-    └── kubectl describe pod      ← exit code 137=OOM, 1=app error
+```mermaid
+flowchart TD
+    classDef state fill:#2c3e50,stroke:#1a252f,color:#fff,rx:8
+    classDef cmd fill:#3498db,stroke:#2471a3,color:#fff,rx:6
+    classDef cause fill:#e67e22,stroke:#ba6018,color:#fff,rx:6
+    classDef fix fill:#27ae60,stroke:#1e8449,color:#fff,rx:6
+    classDef bad fill:#e74c3c,stroke:#c0392b,color:#fff,rx:6
 
-Pod is Running but 5XX
-├── kubectl port-forward pod      ← does pod respond directly?
-│   ├── YES → kubectl port-forward svc → check Service/endpoints
-│   └── NO  → application bug, check kubectl logs -f
-├── kubectl get endpoints         ← is Service backed by any pod?
-│   └── Empty → label mismatch on selector
-└── kubectl exec OR kubectl debug ← test internal connectivity
-    └── curl postgres-svc         ← DNS + connectivity in one shot
+    START{"What state is<br/>the pod in?"}:::state
 
-Pod is Pending
-└── kubectl describe pod          ← Events: FailedScheduling + reason
-    ├── Insufficient memory/cpu   ← kubectl top nodes
-    ├── No nodes match affinity   ← check nodeSelector/affinity
-    └── PVC unbound               ← kubectl describe pvc
+    START -->|CrashLoopBackOff| CRASH1
 
-No kubectl access (pure AWS)
-├── CloudWatch Logs Insights      ← application logs
-├── ALB target health             ← is pod receiving traffic?
-└── EKS control plane logs        ← auth failures, scheduling issues
+    subgraph CRASHLOOP["Pod is CrashLoopBackOff"]
+        CRASH1["kubectl logs --previous<br/>(always start here)"]:::cmd --> CRASH_EMPTY{"Logs empty?"}
+        CRASH_EMPTY -->|Yes| CRASH_DESC["kubectl describe pod —<br/>exit code 137=OOM, 1=app error"]:::cmd
+    end
+
+    START -->|"Running but 5XX"| RUN1
+
+    subgraph RUNNING5XX["Pod is Running but 5XX"]
+        RUN1["kubectl port-forward pod —<br/>does pod respond directly?"]:::cmd --> RUN_DIRECT{"Direct<br/>response?"}
+        RUN_DIRECT -->|Yes| RUN_SVC["kubectl port-forward svc —<br/>check Service/endpoints"]:::cmd
+        RUN_DIRECT -->|No| RUN_APP["Application bug —<br/>check kubectl logs -f"]:::bad
+        RUN2["kubectl get endpoints —<br/>is Service backed by any pod?"]:::cmd --> RUN_EMPTY{"Endpoints<br/>empty?"}
+        RUN_EMPTY -->|Yes| RUN_LABEL["Label mismatch on selector"]:::cause
+        RUN3["kubectl exec OR kubectl debug —<br/>test internal connectivity"]:::cmd --> RUN_CURL["curl postgres-svc —<br/>DNS + connectivity in one shot"]:::fix
+    end
+
+    START -->|Pending| PEND1
+
+    subgraph PENDING_G["Pod is Pending"]
+        PEND1["kubectl describe pod —<br/>Events: FailedScheduling + reason"]:::cmd --> PEND_CAUSE{"Reason?"}
+        PEND_CAUSE -->|"Insufficient<br/>memory/cpu"| PEND_TOP["kubectl top nodes"]:::cause
+        PEND_CAUSE -->|"No nodes<br/>match affinity"| PEND_AFFINITY["Check nodeSelector/affinity"]:::cause
+        PEND_CAUSE -->|"PVC<br/>unbound"| PEND_PVC["kubectl describe pvc"]:::cause
+    end
+
+    START -->|"No kubectl access<br/>(pure AWS)"| AWS_G
+
+    subgraph AWS_G["No kubectl access (pure AWS)"]
+        AWS1["CloudWatch Logs Insights →<br/>application logs"]:::fix
+        AWS2["ALB target health →<br/>is pod receiving traffic?"]:::fix
+        AWS3["EKS control plane logs →<br/>auth failures, scheduling issues"]:::fix
+    end
 ```
 
 ### Useful netshoot commands cheatsheet
@@ -637,3 +914,9 @@ ip addr
 openssl s_client -connect svc:443 -servername hostname
 curl -kv https://svc:443/          # ignore cert errors
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">From inside netshoot, <code>curl -v http://payments-svc:8080/healthz</code> hangs, but <code>curl -v http://10.96.45.20:8080/healthz</code> (the same Service's ClusterIP) responds instantly. What does that split result isolate?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It isolates the problem to DNS resolution, not connectivity. Hitting the ClusterIP directly bypasses name resolution entirely — if that works while the DNS name doesn't, the Service, its endpoints, and the network path between pods are all fine; the failure is specifically in resolving <code>payments-svc</code> to that IP, which points at CoreDNS or <code>/etc/resolv.conf</code>'s search domains rather than at the application or the network.</div>
+</div>
