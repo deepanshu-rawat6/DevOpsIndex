@@ -2,6 +2,11 @@
 
 Roles, collections, Ansible Vault, AWX/Tower, performance tuning, and testing strategies.
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## Roles
@@ -151,6 +156,19 @@ ansible-galaxy role init roles/nginx
 ansible-galaxy role init roles/myapp --offline
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">In the <code>site.yml</code> example above, <code>roles:</code> is listed before <code>tasks:</code> in the play. If a play instead listed <code>tasks:</code> first in the YAML file and <code>roles:</code> second, would the tasks run before the roles?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No. Regardless of the order the two blocks appear in the YAML, Ansible
+    always runs every role listed under <code>roles:</code> to completion
+    before running any task listed under a play's own <code>tasks:</code>
+    section. Ordering within <code>roles:</code> and within <code>tasks:</code>
+    matters; the relative position of the two block <em>keys</em> in the file
+    does not.
+  </div>
+</div>
+
 ---
 
 ## Collections
@@ -218,6 +236,20 @@ ansible-galaxy collection install -r requirements.yml
 collections_paths = ./collections:~/.ansible/collections
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">Why does <code>amazon.aws.ec2_instance</code> (FQCN) get recommended over the short name <code>ec2_instance</code>, when both run the exact same module?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    The short name only resolves if the collection happens to be discoverable
+    via <code>collections_paths</code> in <code>ansible.cfg</code> — move the
+    playbook to a different project, or have two collections ship a module
+    with the same short name, and it silently resolves to the wrong one (or
+    fails to resolve at all). The FQCN pins the exact namespace and
+    collection, so the playbook behaves identically no matter which machine
+    or CI runner executes it.
+  </div>
+</div>
+
 ---
 
 ## Ansible Vault
@@ -226,10 +258,23 @@ Vault encrypts sensitive data at rest. Encrypted files live in your repo — sec
 
 ```mermaid
 flowchart TD
-    A[Plain secret: db_password=s3cr3t] -->|ansible-vault encrypt| B[AES256 encrypted blob]
-    B -->|commit to git| C[Repository]
-    C -->|ansible-playbook --vault-password-file| D[Decrypt at runtime]
-    D --> E[Variable available in play]
+    classDef plain fill:#7f8c8d,stroke:#616a6b,color:#fff,rx:6
+    classDef encrypted fill:#e67e22,stroke:#ba6018,color:#fff,rx:6
+    classDef runtime fill:#27ae60,stroke:#1e8449,color:#fff,rx:6
+
+    subgraph DEV["Authoring — control node"]
+        A["Plain secret<br/>db_password = s3cr3t"]:::plain
+        A -->|"ansible-vault encrypt"| B["AES256 encrypted blob<br/>ANSIBLE_VAULT format, AES256 header"]:::encrypted
+    end
+
+    subgraph REPO["Git repository"]
+        B -->|"git commit"| C["Encrypted file at rest<br/>safe to commit, safe to leak"]:::encrypted
+    end
+
+    subgraph RUN["ansible-playbook run"]
+        C -->|"--vault-password-file or --ask-vault-pass"| D["Decrypted in memory only"]:::runtime
+        D --> E["Variable available inside the play<br/>never written back to disk in plaintext"]:::runtime
+    end
 ```
 
 ### Encrypting Files
@@ -326,6 +371,21 @@ group_vars/
 
 Convention: prefix all vault variables with `vault_`, reference them from plain vars files. This way you can view `vars.yml` without decrypting anything.
 
+<div class="quiz-card">
+  <p class="quiz-q">Why prefix vault variables with <code>vault_</code> and reference them from a separate plain <code>vars.yml</code>, instead of just encrypting the whole <code>vars.yml</code> file directly?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    Encrypting the entire vars file hides even the non-secret variable
+    <em>names</em> and structure from anyone browsing the repo — a reviewer
+    can't tell what variables exist without a vault password. Splitting into
+    a plain <code>vars.yml</code> (which just references
+    <code>vault_</code>-prefixed names) and an encrypted
+    <code>vault.yml</code> (which holds the actual secret values) means the
+    variable names, structure, and diffs stay reviewable in plaintext, while
+    only the sensitive values themselves ever need decrypting.
+  </div>
+</div>
+
 ---
 
 ## AWX / Ansible Tower
@@ -334,35 +394,40 @@ AWX is the open-source version of Red Hat Ansible Automation Platform (AAP/Tower
 
 ```mermaid
 graph TD
-    subgraph AWX
-        UI[Web UI / REST API]
-        JobTemplates[Job Templates]
-        Inventory[Managed Inventory]
-        Credentials[Credential Store]
-        Projects[Projects - Git repos]
-        Scheduler[Scheduler]
-        CallbackURL[Webhook / Provisioning Callback]
+    classDef control fill:#2c3e50,stroke:#1a252f,color:#fff,rx:6
+    classDef config fill:#3498db,stroke:#2471a3,color:#fff,rx:6
+    classDef exec fill:#e67e22,stroke:#ba6018,color:#fff,rx:6
+    classDef source fill:#7f8c8d,stroke:#616a6b,color:#fff,rx:6
+
+    subgraph AWX["AWX control plane"]
+        UI["Web UI / REST API<br/>primary operator entrypoint"]:::control
+        JobTemplates["Job Templates<br/>playbook + inventory + creds + extra_vars"]:::config
+        Inventory["Managed Inventory<br/>static or synced from cloud/LDAP"]:::config
+        Credentials["Credential Store<br/>SSH keys, IAM, Vault tokens — encrypted"]:::config
+        Projects["Projects<br/>Git repos containing playbooks"]:::config
+        Scheduler["Scheduler<br/>cron-style recurring launches"]:::control
+        CallbackURL["Webhook / Provisioning Callback<br/>external trigger, e.g. new VM boot"]:::control
     end
 
     UI --> JobTemplates
     JobTemplates --> Inventory
     JobTemplates --> Credentials
     JobTemplates --> Projects
-    Scheduler -->|triggers| JobTemplates
-    CallbackURL -->|triggers| JobTemplates
+    Scheduler -->|"triggers on schedule"| JobTemplates
+    CallbackURL -->|"triggers on event"| JobTemplates
 
-    subgraph Execution
-        EE[Execution Environment - container]
-        ManagedHosts[Managed Hosts]
+    subgraph Execution["Execution layer"]
+        EE["Execution Environment<br/>OCI container, pinned Ansible + collections"]:::exec
+        ManagedHosts["Managed Hosts"]:::exec
     end
 
     JobTemplates --> EE
-    EE -->|SSH/SSM/WinRM| ManagedHosts
+    EE -->|"SSH / SSM / WinRM"| ManagedHosts
 
-    subgraph Sources
-        Git[Git repo - playbooks]
-        Vault[HashiCorp Vault / AWS SM]
-        LDAP[LDAP / SSO]
+    subgraph Sources["External sources"]
+        Git["Git repo<br/>playbooks + roles"]:::source
+        Vault["HashiCorp Vault / AWS Secrets Manager"]:::source
+        LDAP["LDAP / SSO<br/>authentication backend"]:::source
     end
 
     Projects --> Git
@@ -439,34 +504,102 @@ ansible-builder build -t my-ee:1.0 -f execution-environment.yml
 docker push my-registry/my-ee:1.0
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">What replaced the old Python-venv approach for running Ansible jobs in AWX, and what specific problem does it solve?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    The Execution Environment (EE) — an OCI container image with a pinned
+    version of Ansible, its Python dependencies, and its collections all
+    baked in. A venv on the AWX host still shared the host's system Python
+    and OS packages, so two projects needing different Ansible or collection
+    versions could conflict. An EE isolates every job in its own container
+    image, so each project can pin exactly the Ansible/collection/Python
+    versions it needs without fighting any other project on the same
+    controller.
+  </div>
+</div>
+
 ---
 
 ## Performance Tuning
 
-### forks — Parallel Connections
+### forks and Pipelining
 
-```ini
-# ansible.cfg
+`forks` and pipelining tune two completely different axes of the same problem — how many hosts run at once, versus how many SSH round trips each host needs per task. They're independent knobs and, in practice, you want both turned up together rather than picking one.
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="forks-only" class="active">forks only</button>
+    <button data-tab="pipelining-only">pipelining only</button>
+    <button data-tab="both">both (recommended)</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="forks-only">
+      <p>Increases how many hosts Ansible connects to and runs a task on
+      <strong>simultaneously</strong> — the batch width, not the speed of any
+      single host. Default is <code>5</code>, which is painfully small once a
+      fleet grows past a couple dozen hosts.</p>
+      <pre><code class="language-ini"># ansible.cfg
 [defaults]
-forks = 50    # default is 5 — increase dramatically for large fleets
-```
+forks = 50    # default is 5 — increase dramatically for large fleets</code></pre>
+      <pre><code class="language-bash"># Override at runtime
+ansible-playbook site.yml -f 50</code></pre>
+      <p>Good for: wide fleets where each individual host's per-task round
+      trip is already fast. Doesn't help if every host is slow because of
+      the repeated SCP-upload-then-execute pattern — that's pipelining's job,
+      not this one.</p>
+    </div>
+    <div class="tab-panel" data-tab-panel="pipelining-only">
+      <p>Cuts the per-task overhead on <strong>each</strong> host. Without
+      pipelining, Ansible SCP-uploads the module to the remote host, then
+      runs it — two separate SSH round trips per task. With pipelining, the
+      module is sent over stdin of a single SSH session — one round trip.
+      Roughly a 3–5x speedup for playbooks with many small tasks, but it
+      doesn't change how many hosts run in parallel.</p>
+      <pre><code class="language-ini">[ssh_connection]
+pipelining = True    # ~3-5x faster for many tasks</code></pre>
+      <p><strong>Requires:</strong> <code>requiretty</code> must be disabled
+      in <code>/etc/sudoers</code> (or use <code>Defaults !requiretty</code>)
+      — sudo refuses to run a piped-in command if it insists on an
+      interactive tty.</p>
+    </div>
+    <div class="tab-panel" data-tab-panel="both">
+      <p>Since forks controls fleet width and pipelining controls per-host
+      round trips, they compound rather than compete: <code>forks = 50</code>
+      for parallelism, <code>pipelining = True</code> for per-task speed.
+      Layer SSH <code>ControlPersist</code> (below) and fact caching on top
+      and a run against hundreds of hosts goes from "roughly one SSH exec per
+      task, serialized across batches of 5 hosts at a time" to "50 hosts
+      running at once, one round trip per task, one TCP connection reused
+      for the whole play."</p>
+      <pre><code class="language-ini"># ansible.cfg
+[defaults]
+forks = 50
 
-```bash
-# Override at runtime
-ansible-playbook site.yml -f 50
-```
-
-### Pipelining
-
-Without pipelining: for each task Ansible SCP-uploads the module, then runs it (2 SSH round trips).  
-With pipelining: module is sent via stdin in one round trip.
-
-```ini
 [ssh_connection]
-pipelining = True    # ~3-5x faster for many tasks
-```
+pipelining = True</code></pre>
+      <p>There's no tradeoff to weigh here — unlike some tuning knobs, these
+      two don't conflict or compete for the same resource, so the "both"
+      configuration is the default recommendation for any fleet past a
+      handful of hosts.</p>
+    </div>
+  </div>
+</div>
 
-**Requires:** `requiretty` must be disabled in `/etc/sudoers` (or use `Defaults !requiretty`).
+<div class="quiz-card">
+  <p class="quiz-q">You set <code>pipelining = True</code> but every task under <code>become: true</code> now fails. Increasing <code>forks</code> at the same time doesn't fix it. What's the likely missing piece?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    <code>requiretty</code> is still enabled in <code>/etc/sudoers</code> on
+    the managed hosts. Pipelining sends the module over stdin instead of
+    opening a real interactive shell, and sudo's <code>requiretty</code>
+    setting refuses to elevate privileges without a tty — so every
+    <code>become</code> task fails specifically because of the pipelining
+    change, not the fork count. Disable it with <code>Defaults !requiretty</code>
+    (or remove the <code>requiretty</code> line entirely) before turning
+    pipelining on for privileged tasks.
+  </div>
+</div>
 
 ### SSH ControlMaster (Persistent Connections)
 
@@ -605,6 +738,45 @@ verifier:
         status_code: 200
 ```
 
+`molecule test` drives all four lifecycle stages in order, end to end:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Create.</strong> The driver (Docker here) spins up the test
+      instances defined under <code>platforms</code> in
+      <code>molecule.yml</code> — <code>ubuntu22</code> and
+      <code>centos9</code> in the example above, each from a pre-built image.
+      Nothing role-specific has run yet; these are just bare containers.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Converge.</strong> Molecule runs
+      <code>converge.yml</code> against every created instance, applying the
+      role under test exactly like a real playbook run — same modules, same
+      idempotency expectations, same <code>host_vars</code> overrides (e.g.
+      <code>nginx_port: 8080</code> on <code>centos9</code>).
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Verify.</strong> Molecule runs <code>verify.yml</code>,
+      which makes assertions about the <em>outcome</em> of convergence rather
+      than re-running the role — checking that the service is active and
+      enabled, and that it actually answers on the expected port.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Destroy.</strong> The test instances are torn down
+      unconditionally, success or failure, so the next run always starts
+      from a clean, known state instead of inheriting leftover state from a
+      previous test.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 ```bash
 # Full test cycle
 molecule test            # create → converge → verify → destroy
@@ -613,6 +785,20 @@ molecule verify          # only run verifier
 molecule login           # SSH into test container
 molecule destroy         # tear down
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">You're iterating on a role, making a small change and re-testing repeatedly. Running the full <code>molecule test</code> after every single change works but feels slow. What should you run instead, and why?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    <code>molecule converge</code> on its own. <code>molecule test</code>
+    always runs the full create → converge → verify → destroy cycle,
+    including tearing down and recreating the containers from scratch every
+    time. <code>molecule converge</code> re-applies the role against the
+    <em>already-running</em> test instances — no destroy, no recreate — so
+    the inner dev loop is dramatically faster. Save the full
+    <code>molecule test</code> for CI or a final check before committing.
+  </div>
+</div>
 
 ### ansible-lint
 
@@ -766,6 +952,21 @@ ansible-playbook site.yml \
     state: started
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">In the "Idempotency Guard" pattern above, the task has both <code>run_once: true</code> and <code>delegate_to: "{{ groups['db'][0] }}"</code>. If <code>delegate_to</code> were removed but <code>run_once: true</code> stayed, what would actually happen?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    The migration would still run exactly once for the whole play — but on
+    whichever host happens to be first in the current batch, which isn't
+    necessarily a database host at all, and isn't guaranteed to stay
+    consistent as the inventory changes. <code>run_once</code> only limits
+    <em>how many times</em> a task executes across the play; it says nothing
+    about <em>which</em> host it executes on. <code>delegate_to</code> is
+    what pins it to a specific, deliberate target — here, the first member of
+    the <code>db</code> group — instead of an arbitrary one.
+  </div>
+</div>
+
 ---
 
 ## Windows Support (WinRM)
@@ -774,14 +975,20 @@ Ansible manages Windows hosts via WinRM (Windows Remote Management), not SSH.
 
 ```mermaid
 sequenceDiagram
-    participant C as Control Node Linux/Mac
-    participant W as Windows Host
+    participant C as Control node (Linux/Mac)
+    participant W as Windows host
 
-    C->>W: HTTP/HTTPS to port 5985/5986
-    Note over W: WinRM listener running
-    W->>W: Authenticate via Kerberos/NTLM/Basic
-    C->>W: Send PowerShell commands
-    W-->>C: Return JSON result
+    Note over C: ansible_connection=winrm, no SSH involved at all
+    C->>W: Open HTTP connection on port 5985 (plain) or HTTPS on 5986 (encrypted)
+    Note over W: WinRM listener accepts the connection
+    W->>W: Authenticate the request via Kerberos, NTLM, CredSSP, or Basic
+    alt authentication succeeds
+        C->>W: Send PowerShell command or module payload
+        W->>W: Execute payload locally on the Windows host
+        W-->>C: Return JSON result over the same HTTP/HTTPS session
+    else authentication fails
+        W-->>C: Return 401/403, task fails before anything executes
+    end
 ```
 
 ### Setup on Windows host (run as Administrator)
@@ -857,6 +1064,22 @@ ansible-galaxy collection install ansible.windows
 ansible-galaxy collection install chocolatey.chocolatey
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">Someone tries to manage a Windows host by just pointing regular SSH-based inventory vars at it (default connection settings, port 22). Why does this fail even if the host is reachable on the network?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    Ansible talks to Windows over WinRM — HTTP on port 5985 or HTTPS on port
+    5986 — not SSH. Nothing is listening for an SSH handshake on a default
+    Windows host, and even if it were, Ansible's default connection plugin
+    doesn't know how to speak WinRM's authentication (Kerberos/NTLM/CredSSP/
+    Basic) unless <code>ansible_connection=winrm</code> and the matching
+    <code>ansible_winrm_transport</code> and <code>ansible_port</code> are
+    set explicitly in the inventory. Windows hosts need their own dedicated
+    inventory group with these vars — they can't just inherit the SSH
+    defaults used for Linux hosts.
+  </div>
+</div>
+
 ---
 
 ## Lookup Plugins
@@ -902,6 +1125,22 @@ vars:
     msg: "{{ item }}"
   loop: "{{ query('fileglob', '/etc/ssl/certs/*.crt') }}"
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q"><code>lookup('file', '~/.ssh/id_rsa.pub')</code> reads a path from the filesystem. Which filesystem — the control node's, or the managed remote host's?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    The control node's. Lookups run at playbook <em>parse time</em>, before
+    any connection to a managed host is even opened — so
+    <code>~/.ssh/id_rsa.pub</code> has to exist on the machine running
+    <code>ansible-playbook</code>, not on the target server. This is also
+    why <code>lookup('pipe', 'git rev-parse --short HEAD')</code> runs
+    <code>git</code> locally on the control node, and why a lookup can't be
+    used to read a file that only exists on a remote host — that needs the
+    <code>slurp</code> module instead, which actually executes on the
+    managed node.
+  </div>
+</div>
 
 ---
 
@@ -1079,6 +1318,21 @@ module.fail_json(msg="Something went wrong", rc=1)
 
 `exit_json` → task succeeds. `fail_json` → task fails, play stops (unless `ignore_errors: true`).
 
+<div class="quiz-card">
+  <p class="quiz-q">The module above sets <code>supports_check_mode=True</code>. Is that alone enough to make <code>ansible-playbook --check</code> a safe dry run for this module?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No. <code>supports_check_mode=True</code> only tells Ansible the module
+    is <em>capable</em> of behaving correctly in check mode — it doesn't do
+    anything by itself. The module's own code still has to check
+    <code>module.check_mode</code> and return early via <code>exit_json</code>
+    <em>before</em> calling <code>do_create()</code> or <code>do_delete()</code>,
+    exactly as this example does. Skip that guard, or put it in the wrong
+    place, and <code>--check</code> will happily make real changes on the
+    managed node while the operator believes they only previewed a diff.
+  </div>
+</div>
+
 ---
 
 ## Tags — Deep Dive
@@ -1136,6 +1390,21 @@ Tags cascade: role tags apply to all tasks in the role, play tags apply to all t
       tags: nginx            # all tasks in role also get 'nginx' tag
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">A task is tagged <code>never</code>. What happens when you run <code>ansible-playbook site.yml</code> with no <code>--tags</code> flag at all? What about <code>ansible-playbook site.yml --tags never</code>?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    With no <code>--tags</code> flag, the <code>never</code>-tagged task is
+    skipped — that's the entire point of the tag, unlike a normal task which
+    runs by default. It only runs if <code>never</code> is explicitly
+    requested with <code>--tags never</code> (or the task's other tags are
+    explicitly requested). This is the mirror image of <code>always</code>,
+    which runs unconditionally regardless of which <code>--tags</code> are
+    passed — <code>never</code> requires explicit opt-in, <code>always</code>
+    can't be opted out of via tags at all.
+  </div>
+</div>
+
 ---
 
 ## Delegation and local_action
@@ -1176,6 +1445,22 @@ Run a task on a different host than the play target. Classic use: register a bac
   delegate_to: db01.internal
   delegate_facts: true           # facts stored under hostvars['db01.internal']
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">In the Route53 example above, the task has <code>delegate_to: localhost</code> — so it runs on the control node. Inside that same task, <code>{{ inventory_hostname }}</code> is used to build the DNS record name. Whose hostname does that variable actually resolve to?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    The original play target — the web server the play is currently looping
+    over — not <code>localhost</code>. <code>delegate_to</code> changes only
+    <em>where the task executes</em>; it does not change which host's
+    variables and facts are in scope for templating inside that task. That's
+    exactly why this pattern works: you get to run the API call from the
+    control node while still referring to the web server whose DNS record
+    you're creating. (Contrast with <code>delegate_facts: true</code> below,
+    which is the opposite kind of exception — it changes where gathered
+    facts get <em>stored</em>, not where the task runs.)
+  </div>
+</div>
 
 ---
 
@@ -1348,6 +1633,23 @@ class CallbackModule(CallbackBase):
         requests.post(os.environ['ALERT_WEBHOOK'], json={'text': msg})
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q"><code>stdout_callback = yaml</code> and <code>callback_whitelist = timer,profile_tasks,mail</code> are both set in the same <code>ansible.cfg</code>. Do these conflict — is Ansible being told to use two different output formats at once?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No — they control different things. <code>stdout_callback</code> picks
+    the single plugin responsible for the main console output stream (here,
+    <code>yaml</code> instead of the default line-by-line format).
+    <code>callback_whitelist</code> enables <em>additional</em> callbacks
+    that run alongside it — <code>timer</code>, <code>profile_tasks</code>,
+    and <code>mail</code> here — which don't replace the stdout formatter,
+    they just also hook into the same events (task start, result, play end)
+    to print extra summaries or send notifications. Only one plugin can be
+    the <code>stdout_callback</code>; any number of whitelisted callbacks can
+    run in parallel with it.
+  </div>
+</div>
+
 ---
 
 ## `failed_when` and `changed_when`
@@ -1378,3 +1680,21 @@ Control when Ansible considers a task failed or changed — essential for `comma
   changed_when: false
   failed_when: nginx_procs.stdout | int < 2
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">The <code>nginx -t</code> task above sets <code>changed_when: false</code> even though it makes no changes to the system at all. Why is this line necessary — wouldn't Ansible figure that out on its own?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No — the <code>command</code> and <code>shell</code> modules have no
+    idea what the command they ran actually did. Unlike modules such as
+    <code>ansible.builtin.template</code> or <code>ansible.builtin.service</code>,
+    which compare state before and after and report <code>changed</code>
+    accurately, <code>command</code>/<code>shell</code> default to reporting
+    <code>changed: true</code> on every successful run, purely because they
+    executed something. Without <code>changed_when: false</code> here, a
+    read-only validation check like <code>nginx -t</code> would show up as a
+    "change" on every single playbook run — polluting diffs, breaking
+    idempotency reporting, and making <code>--check</code> mode output
+    misleading.
+  </div>
+</div>

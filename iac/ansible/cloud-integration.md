@@ -2,6 +2,11 @@
 
 How Ansible connects to cloud instances without managing SSH keys manually — AWS SSM, EC2 dynamic inventory, GCP OS Login and IAP tunnels.
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## The Cloud Problem
@@ -10,27 +15,52 @@ Cloud VMs are ephemeral. IPs change, instances get replaced, you may have hundre
 
 ```mermaid
 graph TD
-    subgraph "Traditional SSH (port 22 required)"
-        A[Control Node] -->|"SSH :22"| B[EC2 instance]
-        C[Security requirement] -->|blocks| B
+    classDef blocked fill:#c0392b,stroke:#922b21,color:#fff,rx:6
+    classDef control fill:#34495e,stroke:#212f3c,color:#fff,rx:6
+    classDef broker fill:#8e44ad,stroke:#6c3483,color:#fff,rx:6
+    classDef target fill:#2980b9,stroke:#1f618d,color:#fff,rx:6
+    classDef auth fill:#f39c12,stroke:#ba6018,color:#fff,rx:6
+
+    subgraph "Traditional SSH — port 22 must be reachable"
+        A["Control Node"]:::control -->|"SSH :22,<br/>direct TCP"| B["EC2 instance"]:::target
+        C["Security policy /<br/>compliance requirement"]:::blocked -.->|"often blocks<br/>inbound :22 outright"| B
     end
 
-    subgraph "AWS SSM (no port 22)"
-        D[Control Node] -->|"HTTPS to SSM API"| E[AWS Systems Manager]
-        E -->|"WebSocket tunnel"| F[SSM Agent on EC2]
-        G[IAM role] -->|"authorizes"| E
+    subgraph "AWS SSM Session Manager — no port 22, ever"
+        D["Control Node"]:::control -->|"HTTPS to SSM API,<br/>SigV4-signed"| E["AWS Systems<br/>Manager service"]:::broker
+        E -->|"WebSocket tunnel,<br/>control-node-initiated"| F["SSM Agent<br/>on EC2"]:::target
+        G["IAM role /<br/>access keys"]:::auth -->|"authorizes the<br/>caller identity"| E
     end
 
-    subgraph "GCP IAP (no VPN needed)"
-        H[Control Node] -->|"gcloud IAP tunnel"| I[Cloud IAP]
-        I -->|"authorized TCP"| J[GCE instance]
-        K[IAM binding] -->|"authorizes"| I
+    subgraph "GCP Cloud IAP — no VPN, no public IP"
+        H["Control Node"]:::control -->|"gcloud IAP tunnel,<br/>OAuth2-authenticated"| I["Cloud IAP"]:::broker
+        I -->|"authorized TCP,<br/>forwarded to :22"| J["GCE instance"]:::target
+        K["IAM binding<br/>(iap.tunnelResourceAccessor)"]:::auth -->|authorizes| I
     end
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">Port 22 is locked down by security policy on your entire EC2 fleet. Does that mean Ansible simply can't manage these instances anymore?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — it means the traditional-SSH path is out, not Ansible itself. Both AWS SSM and GCP IAP replace the direct inbound SSH connection with a control-node-initiated outbound call to a cloud API (HTTPS to the SSM service, or an OAuth2-authenticated IAP tunnel), which an IAM role or IAM binding authorizes. Neither ever needs a listener reachable on port 22 from the control node's network — the whole point of both paths is dodging that exact security requirement.</div>
+</div>
 
 ---
 
 ## AWS — Two Approaches
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="ssh" class="active state-warn">Traditional SSH</button>
+    <button data-toggle-opt="ssm" class="state-ok">SSM Session Manager</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="ssh">
+    Needs a security group rule opening port 22, an EC2 key pair (or a bastion host with its own key pair and <code>ProxyJump</code> config) distributed to every operator, and a network path — VPN, public IP, or bastion — from the control node to the instance. Use it when you already have VPN/bastion access to instances.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="ssm">
+    No port 22. No security group rule. No SSH key management. Ansible speaks to SSM via HTTPS; SSM tunnels to the agent on the instance, which needs the SSM Agent installed, an IAM instance profile with <code>AmazonSSMManagedInstanceCore</code>, and outbound HTTPS to <code>ssm.region.amazonaws.com</code>. Recommended for AWS.
+  </div>
+</div>
 
 ### Approach 1: Traditional SSH via EC2
 
@@ -93,15 +123,48 @@ sequenceDiagram
     participant SSM as AWS SSM Service
     participant A as SSM Agent (EC2)
 
-    C->>C: aws ssm start-session --target i-xxxx (or via ProxyCommand)
-    C->>SSM: HTTPS request (SigV4 auth via IAM role/keys)
-    SSM->>A: WebSocket channel via ActivationCode
+    rect rgb(44, 62, 80)
+    Note over C,A: Phase 1 — authenticate and open the channel, no inbound port ever opens
+    C->>C: aws ssm start-session --target i-xxxx, or via Ansible's ProxyCommand
+    C->>SSM: HTTPS request, SigV4 auth via IAM role or access keys
+    SSM->>A: WebSocket channel opened via ActivationCode
     A->>A: Spawn shell session
-    C->>SSM: Ansible module data (stdin)
+    end
+
+    rect rgb(52, 73, 94)
+    Note over C,A: Phase 2 — Ansible's module traffic rides the same tunnel
+    C->>SSM: Ansible module data on stdin
     SSM->>A: Forward to shell
-    A->>SSM: Module output (stdout)
+    A->>SSM: Module output on stdout
     SSM->>C: Return output
+    end
 ```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Control node initiates.</strong> <code>aws ssm start-session --target i-xxxx</code> — or, in practice, Ansible's <code>ProxyCommand</code> running that same call transparently — authenticates with SigV4 using the local IAM role or access keys. No SSH keypair is involved at all.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. SSM brokers the channel.</strong> AWS Systems Manager checks the caller's IAM permissions against the instance's registered SSM Agent and opens a WebSocket channel via an activation code. The instance is never directly reachable from the control node's network — the connection is outbound-only, from the control node to the SSM API.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. The agent spawns the session.</strong> The SSM Agent running on the EC2 instance (pre-installed on Amazon Linux 2 and Ubuntu 20.04+) spawns the actual shell process that will run Ansible's module code.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Ansible speaks through the tunnel.</strong> Module payloads travel control node → SSM → agent → shell on stdin, and output flows back the same path on stdout. From Ansible's point of view this looks like any other SSH connection — it's still the <code>ssh</code> connection plugin, just with <code>ProxyCommand</code> routing the actual bytes through SSM instead of a direct socket.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. No inbound path ever opens.</strong> At no point does a listener open on port 22 reachable from the control node's network. That's the entire security win: the connection is control-node-initiated and outbound, so there's nothing for a security group rule to expose.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 #### Prerequisites
 
@@ -187,6 +250,12 @@ ansible_user=ec2-user
 ansible_ssh_common_args='-o StrictHostKeyChecking=no -o ProxyCommand="aws ssm start-session --target %h --document-name AWS-StartSSHSession --parameters portNumber=%p"'
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">Since SSM needs no security group rule for port 22, why does the ansible.cfg <code>ProxyCommand</code> still pass <code>--parameters portNumber=%p</code> to <code>AWS-StartSSHSession</code>?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>That port number is used <em>inside</em> the already-authenticated SSM channel, to tell the SSM Agent which local port on the instance to connect the tunnel to — it's not a security-group-facing port. No inbound rule for it exists or is needed, because the connection never arrives from the public network in the first place; it's brokered entirely through the outbound HTTPS/WebSocket channel to the SSM service.</div>
+</div>
+
 ---
 
 ## AWS Dynamic Inventory
@@ -250,6 +319,12 @@ ansible role_web -i inventory_aws_ec2.yml -m ping
 ansible-galaxy collection install amazon.aws
 pip install boto3 botocore
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">The sample inventory comments out <code>hostnames: instance-id</code> in favor of <code>ip-address</code>. When would you flip that back to instance-id?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>When connecting via SSM instead of direct SSH. SSM's <code>--target</code> addresses instances by their instance ID, not network location, so <code>ansible_host</code> needs to resolve to <code>instance_id</code> (as the file's own comment notes: "for SSM, uncomment this") rather than <code>private_ip_address</code> — the SSM ProxyCommand's <code>%h</code> has to be something SSM itself can look up, and that's the instance ID, not an IP.</div>
+</div>
 
 ---
 
@@ -333,11 +408,15 @@ sequenceDiagram
     participant G as GCP IAM / OS Login
     participant VM as GCE Instance
 
-    C->>G: gcloud compute os-login ssh-keys add
-    G->>VM: Propagate authorized key (no manual ~/.ssh/authorized_keys)
-    C->>VM: SSH with OS Login username (sa_12345678@)
-    VM->>VM: PAM validates against OS Login API
-    VM->>C: Shell session
+    Note over C,G: One-time setup, done once per SSH key, not per connection
+    C->>G: gcloud compute os-login ssh-keys add --key-file ~/.ssh/id_rsa.pub
+
+    G->>VM: Propagate authorized key via OS Login API,<br/>no manual ~/.ssh/authorized_keys edits
+
+    Note over C,VM: Every connection after that
+    C->>VM: SSH with OS Login username, sa_12345678@host
+    VM->>VM: PAM module validates the login<br/>against the OS Login API in real time
+    VM->>C: Shell session granted
 ```
 
 #### Setup
@@ -394,14 +473,48 @@ sequenceDiagram
     participant FW as GCP Firewall
     participant VM as GCE Instance
 
-    C->>IAP: gcloud compute start-iap-tunnel (OAuth2 auth)
-    IAP->>C: Local port 10022 -> tunnel
-    Note over FW: Firewall rule: allow IAP source 35.235.240.0/20
+    rect rgb(44, 62, 80)
+    Note over C,IAP: Phase 1 — open the authenticated tunnel
+    C->>IAP: gcloud compute start-iap-tunnel, OAuth2 auth via gcloud credentials
+    IAP->>C: Local port 10022 opens, forwards into the tunnel
+    end
+
+    Note over FW: Firewall rule still required:<br/>allow tcp:22 from IAP source range 35.235.240.0/20 only
+
+    rect rgb(52, 73, 94)
+    Note over C,VM: Phase 2 — SSH rides inside the tunnel like any local SSH session
     C->>IAP: SSH to 127.0.0.1:10022
     IAP->>FW: Forward to instance:22
-    FW->>VM: TCP connection
-    VM->>C: SSH session via tunnel
+    FW->>VM: TCP connection, source IP inside the trusted IAP range
+    VM->>C: SSH session established via the tunnel
+    end
 ```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Establish the tunnel.</strong> <code>gcloud compute start-iap-tunnel INSTANCE_NAME 22 --local-host-port=localhost:10022 --zone=us-central1-a</code> authenticates with the caller's OAuth2 credentials (<code>gcloud auth</code>), not an SSH key — Cloud IAP itself decides whether that identity is authorized via <code>roles/iap.tunnelResourceAccessor</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. A local port opens.</strong> <code>gcloud</code> opens a local listener (<code>127.0.0.1:10022</code>) that forwards everything into the authenticated IAP channel. Nothing here is reachable from outside localhost on the control node.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. The firewall still matters.</strong> The GCE instance's own VPC firewall must explicitly allow inbound <code>tcp:22</code> from Google's IAP source range (<code>35.235.240.0/20</code>). IAP removing the need for a public IP or VPN doesn't remove the need for this one firewall rule.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. SSH rides inside the tunnel.</strong> The actual SSH handshake (key-based, or OS-Login-based) happens over <code>127.0.0.1:10022</code> exactly like a local SSH session — IAP is a TCP forwarder here, not a replacement for SSH's own authentication.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Ansible automates all of it.</strong> In production, the <code>ProxyCommand</code> runs <code>gcloud compute start-iap-tunnel ... --listen-on-stdin</code> per connection, so Ansible transparently opens and tears down the tunnel per host — no human has to run steps 1–2 manually first.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 #### Setup
 
@@ -454,6 +567,12 @@ ansible_user=sa_12345678
 ansible_ssh_common_args='-o StrictHostKeyChecking=no -o ProxyCommand="gcloud compute start-iap-tunnel %h %p --listen-on-stdin --zone=us-central1-a --quiet"'
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">Cloud IAP tunneling is described as needing "no VPN." Does that also mean no firewall rule for port 22 is needed on the GCE instance?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — a firewall rule is still required (<code>allow-ssh-iap</code>). IAP just narrows its required source range down to Google's own IAP range (<code>35.235.240.0/20</code>) instead of a VPN's CIDR or the public internet. IAP replaces the need for a VPN or a public IP to reach the instance, but the instance's own firewall still has to explicitly trust the IAP relay's source range — skip that step and the tunnel establishes fine, but the final hop to port 22 gets dropped.</div>
+</div>
+
 ---
 
 ## GCP Dynamic Inventory
@@ -499,6 +618,12 @@ pip install requests google-auth
 ansible-inventory -i inventory_gcp.yml --list
 ansible-inventory -i inventory_gcp.yml --graph
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">GCP's dynamic inventory sets <code>hostnames: name</code> instead of an IP. Why does the IAP-tunneling approach specifically need that?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>gcloud compute start-iap-tunnel %h %p</code> — the ProxyCommand in ansible.cfg — expects an instance <em>name</em>, not an IP address, since IAP resolves the target through GCP's own instance metadata. So <code>ansible_host</code> must be the instance name for the tunnel command to resolve it, unlike a direct-SSH setup where the internal IP (<code>networkInterfaces[0].networkIP</code>) works fine on its own.</div>
+</div>
 
 ---
 
@@ -567,17 +692,22 @@ ansible-inventory -i inventory_gcp.yml --graph
 
 ```mermaid
 graph TD
+    classDef traditional fill:#7f8c8d,stroke:#616a6b,color:#fff,rx:6
+    classDef bastion fill:#f39c12,stroke:#ba6018,color:#fff,rx:6
+    classDef recommended fill:#27ae60,stroke:#1e8449,color:#fff,rx:6
+    classDef dynamic fill:#2980b9,stroke:#1f618d,color:#fff,rx:6
+
     subgraph "AWS"
-        A1[EC2 with public IP] -->|"SSH :22 + key pair"| B1[Traditional]
-        A2[EC2 private subnet] -->|"SSH via Bastion"| B2[Bastion Jump]
-        A3[EC2 any subnet] -->|"SSM ProxyCommand no port 22"| B3[SSM Recommended]
-        A4[Dynamic] -->|"aws_ec2 plugin + boto3"| B4[EC2 Tags → Groups]
+        A1["EC2 with public IP"] -->|"SSH :22 +<br/>key pair"| B1["Traditional SSH"]:::traditional
+        A2["EC2, private subnet"] -->|"SSH via<br/>Bastion host"| B2["Bastion Jump"]:::bastion
+        A3["EC2, any subnet,<br/>no public IP needed"] -->|"SSM ProxyCommand,<br/>no port 22 ever"| B3["SSM<br/>Recommended"]:::recommended
+        A4["Dynamic inventory"] -->|"aws_ec2 plugin<br/>+ boto3"| B4["EC2 tags →<br/>groups"]:::dynamic
     end
 
     subgraph "GCP"
-        C1[GCE with external IP] -->|"SSH + OS Login IAM key"| D1[OS Login]
-        C2[GCE private subnet] -->|"IAP TCP Tunnel ProxyCommand"| D2[IAP Recommended]
-        C3[Dynamic] -->|"gcp_compute plugin"| D3[Labels → Groups]
+        C1["GCE with external IP"] -->|"SSH + OS Login<br/>IAM-managed key"| D1["OS Login"]:::traditional
+        C2["GCE, private subnet,<br/>no public IP needed"] -->|"IAP TCP tunnel<br/>via ProxyCommand"| D2["IAP<br/>Recommended"]:::recommended
+        C3["Dynamic inventory"] -->|"gcp_compute<br/>plugin"| D3["Labels →<br/>groups"]:::dynamic
     end
 ```
 
@@ -589,6 +719,12 @@ graph TD
 | Dynamic inventory | `amazon.aws.aws_ec2` | `google.cloud.gcp_compute` |
 | Auth method | IAM role / access keys | Service account / ADC |
 | Audit trail | CloudTrail + SSM session logs | Cloud Audit Logs + IAP logs |
+
+<div class="quiz-card">
+  <p class="quiz-q">The diagram shows "EC2 private subnet → Bastion Jump" as a valid alternative to "EC2 any subnet → SSM Recommended." What operational overhead does the SSM path remove that the Bastion path still carries?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The Bastion path requires provisioning, patching, and securing a dedicated jump host — plus its own key pair and <code>ProxyJump</code>/<code>ProxyCommand</code> config — purely to relay SSH traffic. The SSM path removes that middle host entirely: Ansible talks to the AWS SSM service directly over HTTPS, and the SSM Agent on the target does the rest, so there's no separate always-on server to keep patched and locked down.</div>
+</div>
 
 ---
 
@@ -646,6 +782,12 @@ Don't put secrets in playbooks. Pull them from cloud secret stores at runtime.
     db_password: "{{ gcp_secret.payload.data | b64decode }}"
   no_log: true
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">Every secret-fetching task above ends with <code>no_log: true</code>. What actually breaks if you forget it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Nothing breaks functionally — the secret is still fetched and usable by later tasks. But without <code>no_log: true</code>, Ansible prints the task's full result, including the decrypted secret value, to stdout and into any log output or CI artifact — silently leaking <code>db_password</code>/<code>api_key</code> into logs that are usually far less protected than the secret store it came from.</div>
+</div>
 
 ---
 

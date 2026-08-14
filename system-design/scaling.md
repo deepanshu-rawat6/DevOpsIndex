@@ -320,12 +320,10 @@ user_id=456  &rarr; hash=0xDEF... &rarr; 0xDEF % 4 = 1 &rarr; Shard 1</code></pr
       <pre><code class="language-mermaid">graph LR
     classDef shard fill:#2980b9,stroke:#1f618d,color:#fff
     classDef key fill:#e67e22,stroke:#ba6018,color:#fff
-
     S1["Shard 1 (ring pos 0)"]:::shard --> S2["Shard 2 (ring pos 90)"]:::shard
     S2 --> S3["Shard 3 (ring pos 180)"]:::shard
     S3 --> S4["Shard 4 (ring pos 270)"]:::shard
     S4 --> S1
-
     KeyA["Key A (hash pos 45)"]:::key -.->|"walk clockwise to next shard"| S2
     KeyB["Key B (hash pos 200)"]:::key -.->|"walk clockwise to next shard"| S4</code></pre>
       <strong>Pros:</strong> Adding/removing a shard only remaps ~1/N of keys

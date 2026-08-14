@@ -787,7 +787,6 @@ Standard TLS: client verifies server's certificate. mTLS: **both sides present a
     <pre><code class="language-mermaid">sequenceDiagram
     participant Client
     participant Server
-
     Client->>Server: ClientHello
     Server->>Client: Certificate (server proves its identity)
     Client->>Client: Verify server certificate chain
@@ -799,7 +798,6 @@ Standard TLS: client verifies server's certificate. mTLS: **both sides present a
     <pre><code class="language-mermaid">sequenceDiagram
     participant Client
     participant Server
-
     Client->>Server: ClientHello
     Server->>Client: Certificate
     Server->>Client: CertificateRequest (server asks for a client cert too)

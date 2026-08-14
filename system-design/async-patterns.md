@@ -294,20 +294,17 @@ Distributed transactions across microservices without 2PC. Each step has a **com
     <pre><code class="language-mermaid">graph LR
     classDef svc fill:#3498db,stroke:#2471a3,color:#fff
     classDef fail fill:#e74c3c,stroke:#c0392b,color:#fff
-
     subgraph HAPPY["Happy path — each service reacts only to the event before it"]
         Order["OrderService"]:::svc -->|"order.created"| Inv["InventoryService"]:::svc
         Inv -->|"inventory.reserved"| Pay["PaymentService"]:::svc
         Pay -->|"payment.charged"| Ship["ShippingService"]:::svc
         Ship -->|"order.shipped"| Done["Order complete"]:::svc
     end
-
     subgraph COMPENSATE["Compensation chain — triggered only by payment.failed"]
         InvC["InventoryService"]:::fail
         OrderC["OrderService"]:::fail
         Cancel["Order cancelled"]:::fail
     end
-
     Pay -.->|"payment.failed"| InvC
     InvC -.->|"inventory.released"| OrderC
     OrderC -.->|"order.cancelled"| Cancel</code></pre>
@@ -320,7 +317,6 @@ Distributed transactions across microservices without 2PC. Each step has a **com
     participant Inv as InventoryService
     participant Pay as PaymentService
     participant Ship as ShippingService
-
     rect rgb(25, 55, 45)
     Note over O,Pay: Happy path so far — each step commits before the next begins
     O->>Inv: 1. reserve(order_id)
@@ -328,7 +324,6 @@ Distributed transactions across microservices without 2PC. Each step has a **com
     O->>Pay: 2. charge(order_id)
     Pay-->>O: charge_failed
     end
-
     rect rgb(80, 30, 30)
     Note over O,Inv: On failure at step N, compensate steps 1..N-1
     O->>Inv: compensate: release(order_id)

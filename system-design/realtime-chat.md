@@ -58,7 +58,6 @@ Three real ways to get server-initiated delivery to a browser or app, each with 
       <pre><code class="language-mermaid">sequenceDiagram
     participant C as Client
     participant S as Server
-
     C->>S: GET /chat, header, Upgrade: websocket
     S-->>C: 101 Switching Protocols
     Note over C,S: connection is now a raw full-duplex socket, no more request/response framing
@@ -73,7 +72,6 @@ Three real ways to get server-initiated delivery to a browser or app, each with 
       <pre><code class="language-mermaid">sequenceDiagram
     participant C as Client
     participant S as Server
-
     C->>S: GET /chat/poll
     Note over S: server holds the request open, no response yet
     Note over S: a message arrives
@@ -87,7 +85,6 @@ Three real ways to get server-initiated delivery to a browser or app, each with 
       <pre><code class="language-mermaid">sequenceDiagram
     participant C as Client
     participant S as Server
-
     C->>S: GET /chat/stream, header, Accept: text-event-stream
     S-->>C: 200 OK, Content-Type: text-event-stream, connection stays open
     S-->>C: event, data, message 1

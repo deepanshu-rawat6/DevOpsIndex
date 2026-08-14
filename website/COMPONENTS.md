@@ -175,6 +175,21 @@ hand-apply the same v11-safe rules `fixMermaid()` would have applied: quote
 bracket/paren labels that contain special characters (`["like (this)"]`), and
 don't pass `rx:` to `classDef`.
 
+**Never leave a blank line inside a raw `<pre><code class="language-mermaid">` block — this is the single most dangerous mistake possible here.**
+A blank line is exactly how CommonMark decides an HTML block has *ended*. If one
+appears between, say, your `participant` declarations and your first message
+line (a common stylistic habit carried over from normal ` ```mermaid ` fences,
+where blank lines are harmless), remark closes the raw-HTML block right there
+— *before* your real `</code></pre>`. Everything after that point, including
+sibling `<div>`s for other tabs/panels later in the same component, gets
+swallowed as plain paragraph text and HTML-escaped rather than parsed as
+markup. The visible symptom is a "Syntax error in text" on what looks like a
+totally different, unrelated diagram further down the page, plus other tabs
+in the same component silently failing to switch (their real `<div>` never
+made it into the DOM — it's inert escaped text sitting inside the first
+panel's code block instead). Keep every line inside one of these blocks
+non-blank, always, no exceptions.
+
 **Do NOT use `<br/>` for line breaks in a node label here.** A ` ```mermaid `
 fence's content is HTML-escaped text, so a literal `<br/>` inside it survives
 as text and Mermaid renders it as a line break. But `<pre><code>` written as

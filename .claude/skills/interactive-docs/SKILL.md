@@ -70,6 +70,15 @@ into every file:
    Mermaid treats it as a statement separator, not text, and a SQL example
    like `BEGIN; UPDATE x; COMMIT;` inside an arrow message will fail to parse.
    Use commas instead.
+   **Never leave a blank line inside a raw `<pre><code class="language-mermaid">`
+   block** (the stepper/toggle/tab-panel exception case) — a blank line is
+   exactly what CommonMark uses to end an HTML block, so remark will close it
+   early, silently turning everything after that point — including *other
+   sibling panels'* real HTML — into escaped dead text. The failure shows up
+   as a "syntax error" on a diagram that looks fine, plus other tabs in the
+   same component not switching. Keep every line non-blank inside these
+   blocks, even where you'd normally leave one in a plain ` ```mermaid `
+   fence.
 6. **Never remove** existing explanatory prose or already-good existing
    Mermaid diagrams. This skill adds interactivity and upgrades diagrams; it
    does not shorten a guide or change its voice.

@@ -46,7 +46,6 @@ Every rate-limiting algorithm answers the same question — "has this client use
     B["200 requests inside a 2-second span straddling 01:00 — each window resets independently, so neither one alone looks like a violation"]:::burst
     R1 -->|"last 100 requests of window 1, sent right before 01:00"| B
     R2 -->|"first 100 requests of window 2, sent right after 01:00"| B
-
     classDef window fill:#3498db,stroke:#2471a3,color:#fff;
     classDef burst fill:#e74c3c,stroke:#c0392b,color:#fff;</code></pre>
       Implementation is just a counter with a TTL:

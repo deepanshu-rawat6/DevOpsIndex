@@ -224,7 +224,7 @@ The Produce dialog's **Partition** selector maps directly onto this: leave it on
 
 ```mermaid
 graph LR
-    R1["record<br/>key=user-42"] -->|hash(key) % partitions<br/>always the same result| P1["Partition 1"]
+    R1["record<br/>key=user-42"] -->|"hash(key) % partitions<br/>always the same result"| P1["Partition 1"]
     R2["record<br/>key=user-42"] --> P1
     R3["record<br/>key=user-42"] --> P1
     R4["record<br/>no key"] -->|round robin| P0["Partition 0"]

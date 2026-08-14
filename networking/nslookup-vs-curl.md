@@ -92,7 +92,6 @@ The blue-shaded block is the entirety of what nslookup ever does. The amber-shad
     <p><strong>curl uses the OS resolver (<code>getaddrinfo</code>)</strong> — it goes through the full chain the operating system provides to every application on the box.</p>
     <pre><code class="language-mermaid">graph TD
     classDef used fill:#27ae60,stroke:#1e8449,color:#fff
-
     A["curl api.example.com"] --> B{"/etc/hosts has a match?"}
     subgraph CHAIN["OS resolver chain - getaddrinfo()"]
         B -->|"no match"| D["Read /etc/resolv.conf nameserver"]
@@ -108,7 +107,6 @@ The blue-shaded block is the entirety of what nslookup ever does. The amber-shad
     <pre><code class="language-mermaid">graph TD
     classDef used fill:#27ae60,stroke:#1e8449,color:#fff
     classDef bypassed fill:#7f8c8d,stroke:#616a6b,color:#fff
-
     N["nslookup api.example.com"] --> H["Reads /etc/resolv.conf nameserver directly"]
     H --> I["Sends a raw DNS query - UDP port 53 - straight to upstream"]
     I --> J["IP address returned"]:::used

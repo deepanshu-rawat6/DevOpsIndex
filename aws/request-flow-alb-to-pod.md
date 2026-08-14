@@ -208,7 +208,6 @@ graph LR
     R2["Request 2"] --> P2["Pod 2"]
     R3["Request 3"] --> P3["Pod 3"]
     R4["Request 4"] -.->|cycles back| P1
-
     classDef pod fill:#4f8fcf,stroke:#274b6e,color:#fff;
     class P1,P2,P3 pod;</code></pre>
     </div>
@@ -219,7 +218,6 @@ graph LR
     P2["Pod 2: 2 in-flight"]
     P3["Pod 3: 8 in-flight"]
     NEXT["Next request"] -->|least loaded| P2
-
     classDef chosen fill:#27ae60,stroke:#1e8449,color:#fff;
     class P2 chosen;</code></pre>
     </div>
