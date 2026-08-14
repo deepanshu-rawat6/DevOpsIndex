@@ -75,6 +75,16 @@ graph TD
         NET_CHECK -->|"Connection refused"| NET_POL["NetworkPolicy blocking —<br/>kubectl get networkpolicy -n ns"]:::red
         NET_CHECK -->|"Timeouts"| UPSTREAM2["Upstream too slow —<br/>check service latency p99"]:::teal
     end
+
+    subgraph LEGEND["Legend — what each color means"]
+        LG_BLUE["Command to run next"]:::blue
+        LG_RED["Critical failure —<br/>app or policy bug"]:::red
+        LG_PURPLE["Memory pressure /<br/>OOM territory"]:::purple
+        LG_YELLOW["Scheduling or<br/>resource warning"]:::yellow
+        LG_TEAL["Downstream dependency<br/>is the real culprit"]:::teal
+        LG_DARK["Cluster infra —<br/>DNS / control plane"]:::dark
+        LG_GREEN["App-level misconfig,<br/>not infra"]:::green
+    end
 ```
 
 <div class="stepper">
@@ -153,6 +163,27 @@ kubectl get endpoints <service-name> -n <namespace>
 kubectl port-forward pod/<pod-name> 8080:8080 -n <namespace>
 curl -v localhost:8080/healthz
 ```
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="e137" class="active state-bad">137 — OOMKilled</button>
+    <button data-toggle-opt="e1" class="state-warn">1 — App error</button>
+    <button data-toggle-opt="e2" class="state-warn">2 — Shell misuse</button>
+    <button data-toggle-opt="e143" class="state-ok">143 — SIGTERM</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="e137">
+    <code>128 + 9</code>. The kernel's OOM killer sent <code>SIGKILL</code> because the container exceeded its cgroup memory limit. No graceful shutdown ran — the process was killed mid-instruction. This is the one to page on immediately.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="e1">
+    A generic application error — an unhandled exception, a panic, or a failed startup check (missing env var, bad config, failed DB migration). The process exited itself; nothing external killed it. Check <code>kubectl logs --previous</code> first.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="e2">
+    Misuse of a shell command inside the container's entrypoint or command — a typo'd flag, a missing binary, a bad script. Usually a packaging/Dockerfile bug rather than an application-logic bug.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="e143">
+    <code>128 + 15</code>. A <code>SIGTERM</code> was sent and the process was given a chance to shut down gracefully — a rolling update, a node drain, a manual <code>kubectl delete pod</code>. This is expected, routine termination, not a crash.
+  </div>
+</div>
 
 <div class="quiz-card">
   <p class="quiz-q">A container exits with code 143. Was it OOMKilled?</p>
@@ -263,6 +294,12 @@ fields @timestamp, kubernetes.pod_name, log
 | limit 100
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">You want to find every pod OOM event from the last hour across the cluster. Which CloudWatch log group do you query, and why not the application log group?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>/aws/containerinsights/&lt;cluster&gt;/performance</code>, filtering on <code>Type = "Pod" and reason = "OOMKilling"</code>. The performance log group carries the pod/node-level metrics and lifecycle events shipped by the <code>aws-node</code>/ADOT add-on — OOM kills live there, not in application log lines. The application log group (shipped separately by the Fluent Bit DaemonSet) only has what your app itself printed to stdout/stderr; a kernel-level OOM kill happens below the application, so it never appears there.</div>
+</div>
+
 ### EKS Control Plane Logs for Debugging
 
 ```bash
@@ -358,14 +395,30 @@ sequenceDiagram
     participant KUBELET as kubelet
     participant API as Kubernetes API
 
+    rect rgb(52, 73, 94)
+    Note over APP,CG: Phase 1 — growth, still recoverable
+    activate APP
     APP->>CG: Memory usage grows past limits.memory
     CG->>KERNEL: cgroup limit exceeded, invoke OOM killer
+    end
+
+    rect rgb(192, 57, 43)
+    Note over KERNEL,APP: Phase 2 — the kill, zero warning
     KERNEL->>APP: SIGKILL (signal 9) — no graceful shutdown
+    deactivate APP
     Note over APP: Process dies immediately, no SIGTERM handler runs
+    end
+
+    rect rgb(41, 128, 185)
+    Note over KUBELET,API: Phase 3 — kubelet reacts and restarts
     KUBELET->>APP: Detect container exited with code 137
     KUBELET->>API: Record lastState.reason = OOMKilled
-    KUBELET->>APP: restartPolicy Always, start a new container
+    activate KUBELET
+    KUBELET->>KUBELET: Pull image, if not already cached on the node
+    KUBELET->>APP: Start new container, restartPolicy Always
+    deactivate KUBELET
     Note over KUBELET,API: Zero capacity during image pull + startup —<br/>this is exactly the risk the Prevention<br/>section below is written to close
+    end
 ```
 
 ```
@@ -442,6 +495,12 @@ curl http://localhost:6060/debug/pprof/goroutine?debug=2 | head -100
     <span class="stepper-label"></span>
     <button class="stepper-next">Next →</button>
   </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Memory usage climbs slowly and steadily over days rather than spiking suddenly before an OOM kill. Which of the two profiling steps above points at this, and why?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The goroutine-leak check (<code>/debug/pprof/goroutine?debug=2</code>), not the heap profile on its own. Goroutines hold stack memory even while idle, so a leak — goroutines started and never cleaned up — shows up as gradual, steady growth rather than a sudden allocation spike. A one-off heap profile snapshot can miss this pattern entirely if you only look at what's dominating the heap at a single point in time instead of tracking the goroutine count trend.</div>
 </div>
 
 ### Recovery: Singleton Pod
@@ -673,14 +732,30 @@ flowchart TD
     classDef test fill:#3498db,stroke:#2471a3,color:#fff,rx:6
     classDef good fill:#27ae60,stroke:#1e8449,color:#fff,rx:6
     classDef bad fill:#e74c3c,stroke:#c0392b,color:#fff,rx:6
+    classDef verdict fill:#8e44ad,stroke:#6c3483,color:#fff,rx:6
 
-    PODPF["kubectl port-forward pod/name"]:::test --> PODRESULT{"Pod responds<br/>directly?"}
+    START(["5XX reported,<br/>layer unknown"]):::verdict --> PODPF
+
+    subgraph TEST1["Test 1 — bypass everything, hit the pod directly"]
+        PODPF["kubectl port-forward pod/name"]:::test --> PODRESULT{"Pod responds<br/>directly?"}
+    end
+
     PODRESULT -->|No| APPBUG["Problem is in the application itself —<br/>Service/Ingress/LB are not the cause"]:::bad
-    PODRESULT -->|Yes| SVCPF["kubectl port-forward svc/name"]:::test
-    SVCPF --> SVCRESULT{"Service<br/>responds?"}
+    PODRESULT -->|Yes| SVCPF
+
+    subgraph TEST2["Test 2 — bring the Service back into the path"]
+        SVCPF["kubectl port-forward svc/name"]:::test --> SVCRESULT{"Service<br/>responds?"}
+    end
+
     SVCRESULT -->|No| PROXY["kube-proxy rules or<br/>endpoint selector issue"]:::bad
     SVCRESULT -->|Yes| LBISSUE["Both layers work in isolation —<br/>problem is at Ingress or LB layer"]:::good
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">Pod port-forward responds fine, but Service port-forward hangs. Which two layers does this rule out, and which one is now implicated?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It rules out the application itself (the pod already answered directly) and the Ingress/LB layer (neither one is even in the path for a Service port-forward). What's left, and now implicated, is the layer in between: kube-proxy's iptables/IPVS rules or the Service's endpoint selector not matching the pod's labels. This is exactly why port-forward is done in two steps rather than one — each hop you add either confirms or eliminates one specific layer.</div>
+</div>
 
 ### Layer 3 — Ephemeral debug containers (K8s 1.23+)
 
@@ -791,6 +866,12 @@ ss -tlnp
 journalctl -u kubelet --tail=100
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">This debug pod sets <code>nodeName</code>, <code>hostPID: true</code>, <code>hostNetwork: true</code>, <code>privileged: true</code>, <em>and</em> mounts <code>/</code> from the host. Why do you need all of these together, instead of just execing in with elevated privileges?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Each one unlocks a different piece of what "no SSH" took away, and dropping any single one leaves a gap: <code>nodeName</code> pins the pod to the specific node you actually need to inspect (a regular pod could land anywhere). <code>hostPID</code> and <code>hostNetwork</code> share the node's process and network namespaces so tools like <code>ss</code> and process listings see the real node, not the pod's own isolated namespace. <code>privileged: true</code> grants the syscall capabilities that commands like <code>iptables</code> need. And mounting <code>/</code> as <code>host-root</code>, then <code>chroot</code>-ing into it, is what makes the node's actual binaries, config files, and <code>journalctl</code> logs accessible as if you'd SSH'd in directly. This is also the most invasive tool in the whole toolkit precisely because it grants this much — it's the last resort, not the first thing to reach for.</div>
+</div>
+
 ### Layer 6 — AWS-specific (CloudWatch, X-Ray)
 
 ```bash
@@ -881,6 +962,14 @@ flowchart TD
         AWS1["CloudWatch Logs Insights →<br/>application logs"]:::fix
         AWS2["ALB target health →<br/>is pod receiving traffic?"]:::fix
         AWS3["EKS control plane logs →<br/>auth failures, scheduling issues"]:::fix
+    end
+
+    subgraph LEGEND["Legend"]
+        LG_STATE["Pod state — the branch point"]:::state
+        LG_CMD["Command to run"]:::cmd
+        LG_CAUSE["Root cause identified"]:::cause
+        LG_FIX["Resolves or confirms healthy"]:::fix
+        LG_BAD["Confirmed broken — needs a code/config fix"]:::bad
     end
 ```
 

@@ -450,6 +450,12 @@ sum(rate(http_requests_total[1h]))
 
 **Best practice:** Design stateless services (session in Redis, not in-process memory) so horizontal scaling works cleanly. Vertical scale is the emergency lever when you can't distribute state.
 
+<div class="quiz-card">
+  <p class="quiz-q">A service keeps user sessions in each instance's in-process memory. What happens when you try to scale it horizontally behind a load balancer?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It breaks, or at best gets sticky-session hacks bolted on. Horizontal scaling assumes any instance can serve any request — but if a user's session only exists in the memory of the one instance that first handled them, a request routed to a different instance won't find it. That's exactly why the best practice is to keep session state in something shared like Redis, not in-process: it's what makes stateless horizontal scaling actually work cleanly instead of falling back to the vertical/emergency lever.</div>
+</div>
+
 ---
 
 
@@ -457,43 +463,158 @@ sum(rate(http_requests_total[1h]))
 
 ```mermaid
 flowchart LR
-    DETECT["1. Detect<br>Alert fires<br>SLO burn rate"] --> TRIAGE
-    TRIAGE["2. Triage<br>Assign severity<br>Assign IC"] --> MITIGATE
-    MITIGATE["3. Mitigate<br>Rollback · feature flag<br>load shed · redirect traffic"] --> RESOLVE
-    RESOLVE["4. Resolve<br>Confirm metrics normal<br>Communicate status"] --> POSTMORTEM
-    POSTMORTEM["5. Postmortem<br>Timeline · 5 Whys<br>Action items"]
+    classDef detect fill:#3498db,stroke:#2980b9,color:#fff,rx:8
+    classDef triage fill:#9b59b6,stroke:#8e44ad,color:#fff,rx:8
+    classDef mitigate fill:#e67e22,stroke:#d35400,color:#fff,rx:8
+    classDef resolve fill:#1abc9c,stroke:#16a085,color:#fff,rx:8
+    classDef learn fill:#2c3e50,stroke:#1a252f,color:#fff,rx:8
+
+    subgraph LIVE["Live incident — the clock is running"]
+        DETECT["1. Detect<br/>Alert fires on SLO burn rate<br/>nobody has confirmed impact yet"]:::detect --> TRIAGE
+        TRIAGE["2. Triage<br/>Assign severity SEV1-4<br/>assign an Incident Commander"]:::triage --> MITIGATE
+        MITIGATE["3. Mitigate<br/>Rollback · feature flag off<br/>load shed · redirect traffic"]:::mitigate --> RESOLVE
+        RESOLVE["4. Resolve<br/>Root cause understood<br/>fix deployed, metrics confirmed normal"]:::resolve
+    end
+
+    subgraph LOOP["Feeds back into the system"]
+        POSTMORTEM["5. Postmortem<br/>Timeline · 5 Whys<br/>owned, prioritized action items"]:::learn
+    end
+
+    RESOLVE --> POSTMORTEM
+    POSTMORTEM -.->|"hardens alerts,<br/>runbooks, tests"| DETECT
 ```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Detect.</strong> An SLO burn-rate alert fires. At this instant nobody has
+      confirmed real user impact yet — the goal here is purely minimizing MTTD, not diagnosing
+      anything.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Triage.</strong> Assign a severity (SEV1-4) and name an Incident Commander.
+      The severity call can be wrong and downgraded later — the point is to make <em>some</em>
+      call immediately so the right amount of response kicks in without delay.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Mitigate.</strong> Rollback, feature-flag off, shed load, or shift traffic —
+      whatever stops user impact fastest. Root cause is explicitly <strong>not</strong>
+      required yet; a 5-minute rollback beats a 30-minute root-cause hunt every time.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Resolve.</strong> Distinct from mitigation: this is the permanent fix, with
+      root cause understood and monitoring confirming things are actually back to normal, not
+      just quiet.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Postmortem.</strong> A written, blameless record of what happened and why —
+      its action items are what actually harden the alerts, runbooks, and tests that feed back
+      into step 1, making the next Detect faster or the next incident less likely altogether.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ### Severity Levels
 
-| SEV | Impact | Response | Examples |
-|-----|--------|----------|---------|
-| SEV1 | Complete outage, data loss risk | Immediate page, war room | Checkout down, DB unreachable |
-| SEV2 | Significant degradation | Page, respond within 15min | Error rate 10×, p99 > 5s |
-| SEV3 | Minor degradation, workaround exists | Ticket, next business day | Single region slow, non-critical feature down |
-| SEV4 | Cosmetic / no user impact | Log | Wrong log line, minor UI glitch |
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="sev1" class="active state-bad">SEV1</button>
+    <button data-toggle-opt="sev2" class="state-warn">SEV2</button>
+    <button data-toggle-opt="sev3">SEV3</button>
+    <button data-toggle-opt="sev4" class="state-ok">SEV4</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="sev1">
+    <strong>Complete outage, data loss risk.</strong> Immediate page, war room opened.
+    Examples: checkout down, database unreachable.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="sev2">
+    <strong>Significant degradation.</strong> Page, respond within 15 minutes.
+    Examples: error rate 10&times; normal, p99 latency &gt; 5s.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="sev3">
+    <strong>Minor degradation, workaround exists.</strong> Ticket, handled next business day —
+    no page. Examples: single region slow, non-critical feature down.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="sev4">
+    <strong>Cosmetic / no user impact.</strong> Log it, nothing more.
+    Examples: wrong log line, minor UI glitch.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Error rate on a non-critical internal reporting feature jumps 10&times; but every customer-facing checkout path is unaffected, and a manual workaround exists. Is this a SEV1?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. SEV1 is reserved for complete outage or data-loss risk on things like checkout or the database — a page-worthy, war-room-now situation. A degraded but non-critical feature with a workaround and no outage is a SEV3: file a ticket, handle it next business day, no immediate page. Severity should track user impact and blast radius, not just "the error rate went up a lot" in isolation.</div>
+</div>
 
 ### Incident Commander (IC) Role
 
 The IC is one person with authority to make decisions. They do NOT debug — they coordinate.
 
-```
-IC responsibilities:
-  - Declare severity, open war room (Slack/Zoom)
-  - Assign tasks: "Alice owns the DB investigation, Bob owns the rollback"
-  - Give status updates every 15 min (even if "no change")
-  - Declare mitigation / resolution
-  - Initiate postmortem
-  - NOT: debugging, writing code, pulling logs themselves
-```
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="ic-does" class="active">What the IC does</button>
+    <button data-tab="ic-not">What the IC does NOT do</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="ic-does">
+      <ul>
+        <li>Declare severity, open the war room (Slack/Zoom)</li>
+        <li>Assign tasks: "Alice owns the DB investigation, Bob owns the rollback"</li>
+        <li>Give status updates every 15 min, even if "no change"</li>
+        <li>Declare mitigation / resolution</li>
+        <li>Initiate the postmortem</li>
+      </ul>
+    </div>
+    <div class="tab-panel" data-tab-panel="ic-not">
+      <ul>
+        <li>Debugging the issue themselves</li>
+        <li>Writing code or a fix</li>
+        <li>Pulling logs or running queries themselves</li>
+      </ul>
+      That work belongs to the responders the IC assigned — the IC's own job is to keep
+      coordinating, not to become one more pair of hands in the code.
+    </div>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">During a SEV1, the Incident Commander is the strongest debugger on the team. Should they start pulling logs and writing the fix themselves once things get serious?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. The IC's role is coordination, not technical work — assigning tasks, giving status updates, declaring mitigation/resolution. If the IC starts debugging, nobody is left tracking the overall incident, assigning follow-up tasks, or giving stakeholders updates, and the response loses its coordinator exactly when it needs one most. A strong debugger should be assigned as a responder instead, with someone else holding the IC role.</div>
+</div>
 
 ### Mitigation vs Resolution
 
-- **Mitigation** — stop the bleeding. Users are no longer impacted. Root cause unknown.
-  → Rollback, feature flag off, traffic shift, increase rate limit, scale up
-- **Resolution** — permanent fix deployed, root cause understood, monitoring confirmed normal.
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="mitigation" class="active state-warn">Mitigation</button>
+    <button data-toggle-opt="resolution" class="state-ok">Resolution</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="mitigation">
+    <strong>Stop the bleeding.</strong> Users are no longer impacted, but root cause is still
+    unknown. Achieved via rollback, feature flag off, traffic shift, raising a rate limit, or
+    scaling up.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="resolution">
+    <strong>The permanent fix.</strong> Root cause is understood, the actual fix is deployed,
+    and monitoring has confirmed things are back to normal — not just quiet.
+  </div>
+</div>
 
 **Always mitigate first.** Never wait for root cause before acting. A 30-minute outage while you find root cause is worse than a 5-minute outage from rolling back immediately.
+
+<div class="quiz-card">
+  <p class="quiz-q">A rollback stops the error spike and metrics return to baseline. Is the incident resolved?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Not yet — it's mitigated. Users aren't impacted anymore, but the root cause of why the deploy broke things is still unknown at this point. Resolution specifically requires the root cause to be understood and a permanent fix deployed, with monitoring confirming normal behavior — "the bleeding stopped" and "we know why and fixed it" are two different milestones, and conflating them is how the root-cause investigation quietly never happens.</div>
+</div>
 
 ---
 
@@ -599,6 +720,12 @@ Root cause is **systemic** (missing test coverage + staging data gap), not indiv
 | Postmortem not shared | Team doesn't learn | Publish internally, link from incident channel |
 | No follow-up | Action items rot | Review at next sprint planning |
 
+<div class="quiz-card">
+  <p class="quiz-q">A postmortem's Root Cause section reads: "Human error — the on-call engineer deployed without checking the runbook." Is this an acceptable root cause?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — this is the "human error as root cause" anti-pattern. It ignores the system gap that let a single person's mistake take down production: why was there no automated check, no staging gate, no required review that would have caught this regardless of who was deploying? The better version asks why the system allowed the error to happen and turns that into an action item, rather than stopping at "someone was careless" — which also chills future incident reporting, since nobody wants to be named as the cause.</div>
+</div>
+
 ---
 
 ## On-Call Best Practices
@@ -657,83 +784,113 @@ Error budget burn rate tells you how fast you're consuming your monthly error bu
 
 ### Multi-window multi-burn-rate alert (Google SRE Book)
 
-```yaml
-# Assumes: recording rule
-# job:slo_errors:rate5m = error rate over 5m window
-# job:slo_errors:rate1h = error rate over 1h window
-# etc.
-# error_budget_threshold = 1 - slo_target (e.g. 0.001 for 99.9% SLO)
+All four rules below watch the *same* underlying signal (`payments` error rate against a 99.9% SLO) — what changes tab to tab is only the burn-rate multiplier, the pair of windows, and how urgently a human gets bothered.
 
-groups:
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="burn-critical" class="active state-bad">Critical (page, 14.4&times;)</button>
+    <button data-tab="burn-high" class="state-warn">High (page, 6&times;)</button>
+    <button data-tab="burn-medium">Medium (ticket, 3&times;)</button>
+    <button data-tab="burn-low" class="state-ok">Low (inform, 1&times;)</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="burn-critical">
+      Fires immediately: burning &gt;14.4&times; budget over <strong>both</strong> the last 1h
+      AND the last 5m — that's a 2-hour burn-down. Pages on-call right now.
+      <pre><code>groups:
   - name: slo.burn_rate
     rules:
-      # Page immediately: burning >14.4x in last 1h AND 5m (2 hour burn-down)
+      # Page immediately: burning &gt;14.4x in last 1h AND 5m (2 hour burn-down)
       - alert: ErrorBudgetBurnCritical
         expr: |
           (
-            job:slo_errors:rate1h{job="payments"} > (14.4 * 0.001)
+            job:slo_errors:rate1h{job="payments"} &gt; (14.4 * 0.001)
             and
-            job:slo_errors:rate5m{job="payments"} > (14.4 * 0.001)
+            job:slo_errors:rate5m{job="payments"} &gt; (14.4 * 0.001)
           )
         for: 2m
         labels:
           severity: critical
           slo: payments-availability
         annotations:
-          summary: "Payments burning error budget at 14.4x — exhausted in 2h"
-          runbook: https://wiki/sre/payments-runbook
-
-      # Page: 6x burn over 6h AND 30m (5 day burn-down)
+          summary: "Payments burning error budget at 14.4x, exhausted in 2h"
+          runbook: https://wiki/sre/payments-runbook</code></pre>
+    </div>
+    <div class="tab-panel" data-tab-panel="burn-high">
+      Fires when burning 6&times; budget over both the last 6h AND the last 30m — a 5-day
+      burn-down. Still pages, but with more headroom than critical.
+      <pre><code>      # Page: 6x burn over 6h AND 30m (5 day burn-down)
       - alert: ErrorBudgetBurnHigh
         expr: |
           (
-            job:slo_errors:rate6h{job="payments"} > (6 * 0.001)
+            job:slo_errors:rate6h{job="payments"} &gt; (6 * 0.001)
             and
-            job:slo_errors:rate30m{job="payments"} > (6 * 0.001)
+            job:slo_errors:rate30m{job="payments"} &gt; (6 * 0.001)
           )
         for: 15m
         labels:
           severity: page
-          slo: payments-availability
-
-      # Ticket: 3x burn over 3d AND 6h (10 day burn-down)
+          slo: payments-availability</code></pre>
+    </div>
+    <div class="tab-panel" data-tab-panel="burn-medium">
+      Fires when burning 3&times; budget over both the last 3d AND the last 6h — a 10-day
+      burn-down. Slow enough to be a ticket, not a page.
+      <pre><code>      # Ticket: 3x burn over 3d AND 6h (10 day burn-down)
       - alert: ErrorBudgetBurnMedium
         expr: |
           (
-            job:slo_errors:rate3d{job="payments"} > (3 * 0.001)
+            job:slo_errors:rate3d{job="payments"} &gt; (3 * 0.001)
             and
-            job:slo_errors:rate6h{job="payments"} > (3 * 0.001)
+            job:slo_errors:rate6h{job="payments"} &gt; (3 * 0.001)
           )
         for: 1h
         labels:
-          severity: ticket
-
-      # Inform: 1x burn over 3d (budget will run out by month end)
+          severity: ticket</code></pre>
+    </div>
+    <div class="tab-panel" data-tab-panel="burn-low">
+      Fires when burning budget at 1&times; sustained over 3d — the pace that empties the
+      whole month's budget by month end. Purely informational.
+      <pre><code>      # Inform: 1x burn over 3d (budget will run out by month end)
       - alert: ErrorBudgetBurnLow
         expr: |
-          job:slo_errors:rate3d{job="payments"} > (1 * 0.001)
+          job:slo_errors:rate3d{job="payments"} &gt; (1 * 0.001)
         for: 3h
         labels:
-          severity: info
-```
+          severity: info</code></pre>
+    </div>
+  </div>
+</div>
 
 **The two-window trick:** requiring both a short window (high sensitivity) and a long window (high specificity) eliminates most false positives. A spike that lasts 10 minutes fires the short window but not the long — no page. A real sustained degradation fires both.
 
+<div class="quiz-card">
+  <p class="quiz-q">A burst of errors spikes for 10 minutes and then fully recovers. The 5m window's burn rate crosses 14.4&times; during that burst. Does ErrorBudgetBurnCritical page?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — that alert requires the short window <strong>and</strong> the long window (1h) to both cross the threshold at the same time. A 10-minute burst pushes the 5m window over, but it's too brief to drag the 1h average over 14.4&times; too, so the "and" condition never holds and no page fires. This is exactly the two-window trick: it filters out short-lived spikes while still catching a real sustained degradation, which shows up in both windows simultaneously.</div>
+</div>
+
 ### Error budget math
 
-```
-SLO target: 99.9%
-Error budget per 30 days: 0.1% × 30 × 24 × 60 = 43.2 minutes of downtime
+| | SLO target | Error budget (30 days) |
+|---|---|---|
+| | 99.9% | 0.1% × 30 × 24 × 60 = **43.2 minutes** of downtime |
 
-Burn rate 1:   consuming budget at exact pace — 43.2 min downtime/month
-Burn rate 14.4: consuming 14.4× budget — 43.2 ÷ 14.4 = 3 hours to exhaust
-Burn rate 6:   consuming 6× budget    — 43.2 ÷ 6   = 7.2 hours to exhaust
+| Burn rate | Consuming budget at… | Time to exhaust the month's budget |
+|---|---|---|
+| 1&times; | exact sustainable pace | 43.2 min downtime/month (the budget lasts the full month) |
+| 6&times; | 6&times; the sustainable pace | 43.2 ÷ 6 = **7.2 hours** |
+| 14.4&times; | 14.4&times; the sustainable pace | 43.2 ÷ 14.4 = **3 hours** |
 
-When to page vs ticket:
-  > 2% budget consumed in 1 hour → page (critical)
-  > 5% budget consumed in 6 hours → page (high)
-  > 10% budget consumed in 3 days → ticket
-```
+<div class="quiz-card">
+  <p class="quiz-q">Which is more urgent: a burn rate of 6, or a burn rate of 14.4?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>14.4 is far more urgent — a higher burn-rate number means the budget is being consumed <em>faster</em>, not more slowly. At 6x the whole month's budget is gone in 7.2 hours; at 14.4x it's gone in about 3 hours. That's exactly why 14.4x maps to the "page immediately" critical rule and 6x maps to the slightly less urgent "high" rule — the multiplier is a speed, and bigger means less runway before the budget hits zero.</div>
+</div>
+
+**When to page vs ticket:**
+- \> 2% of budget consumed in 1 hour → page (critical)
+- \> 5% of budget consumed in 6 hours → page (high)
+- \> 10% of budget consumed in 3 days → ticket
 
 ---
 
@@ -773,6 +930,12 @@ Every on-call engineer should run this mentally (or literally) in the first 5 mi
 5:00 — Declare severity and bring in help if needed.
        Don't be a hero. A second pair of eyes is never wrong.
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">The instant a page fires, an on-call engineer immediately starts running commands to try to fix the problem. According to the 5-minute triage script, what should have happened at 0:00 instead?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Acknowledge the alert and set a 5-minute timer to understand first — not start fixing immediately. The whole script is built around spending the first five minutes gathering facts (user impact, rate of change, what changed recently, blast radius) before acting, so that whatever action gets taken at the 4:00 mark is actually the right one instead of a guess made under panic.</div>
+</div>
 
 ### Severity levels and response expectations
 
@@ -842,6 +1005,12 @@ Is it:
 
 → Yes to 3+: it's toil. Track it.
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A task is manual, repetitive, and automatable — but it's proactive (scheduled by the team, not triggered by an external event) and it does leave the system slightly better each time. Does it clear the "3+" bar for toil?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Yes — it still hits 3 of the 5 traits (manual, repetitive, automatable) even though it misses "reactive" and "no lasting value." The checklist only requires 3 or more yeses, not all five, so a task can fail a couple of the traits and still count as toil worth tracking and eventually automating away.</div>
+</div>
 
 ### Toil log — track it before eliminating it
 

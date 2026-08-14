@@ -49,6 +49,12 @@ terraform workspace list
 
 **Prevention:** Run `terraform plan` in CI on every PR and require approval before `apply`. Use `lifecycle { prevent_destroy = true }` on stateful resources. Add `terraform validate` and `tflint` as required CI checks to catch config errors before they reach `apply`.
 
+<div class="quiz-card">
+  <p class="quiz-q"><code>terraform apply</code> fails with an "already exists" error. Before you reach for <code>terraform import</code>, what does the diagnosis flow say you must confirm first — and what's the alternative if you decide you don't want Terraform managing that resource at all?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Confirm the resource isn't already tracked in a <em>different</em> workspace's state (<code>terraform workspace list</code>) — importing it into the current state while another workspace still owns it doesn't fix the conflict, it just creates a second state file claiming the same real-world resource. If you decide not to manage the resource with Terraform at all, don't import it — reference it read-only via a <code>data</code> source instead of a <code>resource</code> block.</div>
+</div>
+
 ---
 
 ## 2. terraform plan Shows Unexpected Destroy
@@ -139,11 +145,14 @@ flowchart TD
     classDef danger fill:#c0392b,stroke:#7b241c,color:#fff
 
     HANG["apply hangs on:<br/>Acquiring state lock..."]:::err --> SCAN["aws dynamodb scan<br/>terraform-state-lock table"]:::verify
-    SCAN --> ACTIVE{"Is another apply<br/>genuinely still running?"}:::decision
-    ACTIVE -->|Yes| WAIT["Wait for it to finish —<br/>do NOT force-unlock"]:::fix
-    ACTIVE -->|No| GETID["Read the LockID item's<br/>value to get LOCK_ID"]:::verify
-    GETID --> UNLOCK["terraform force-unlock LOCK_ID"]:::danger
-    UNLOCK --> RERUN["re-run terraform apply"]:::fix
+
+    subgraph DECIDE["Decide before you touch the lock, then unlock only if truly dead"]
+        SCAN --> ACTIVE{"Is another apply<br/>genuinely still running?"}:::decision
+        ACTIVE -->|Yes| WAIT["Wait for it to finish —<br/>do NOT force-unlock"]:::fix
+        ACTIVE -->|No| GETID["Read the LockID item's<br/>value to get LOCK_ID"]:::verify
+        GETID --> UNLOCK["terraform force-unlock LOCK_ID"]:::danger
+        UNLOCK --> RERUN["re-run terraform apply,<br/>then sanity-check the plan"]:::fix
+    end
 
     WAIT -.->|"if it's actually dead —<br/>crashed CI job, killed terminal"| GETID
 ```
@@ -212,9 +221,12 @@ flowchart TD
     REFRESH --> DRIFT{"Does the refreshed<br/>state now differ<br/>from code?"}:::decision
     DRIFT -->|No| PROVIDER["No real drift —<br/>check for a provider<br/>version schema change instead"]:::verify
 
-    DRIFT -->|Yes| ACCEPT{"Should the manual<br/>change stay, or should<br/>code win?"}:::decision
-    ACCEPT -->|"Keep the change"| IMPORT["terraform import —<br/>bring the updated resource's<br/>attributes into state"]:::fix
-    ACCEPT -->|"Code is authoritative"| REVERT["terraform apply —<br/>reverts infra back to code"]:::fix
+    subgraph RESOLVE["Someone (or something) wins — decide which"]
+        DRIFT -->|Yes| ACCEPT{"Should the manual<br/>change stay, or should<br/>code win?"}:::decision
+        ACCEPT -->|"Keep the change"| IMPORT["terraform import —<br/>bring the updated resource's<br/>attributes into state"]:::fix
+        ACCEPT -->|"Code is authoritative"| REVERT["terraform apply —<br/>reverts infra back to code"]:::fix
+    end
+
     REVERT --> CONFIG["enable AWS Config<br/>drift-detection rule"]:::fix
 ```
 
@@ -259,13 +271,18 @@ flowchart TD
     classDef verify fill:#3498db,stroke:#2471a3,color:#fff
 
     INIT["terraform init fails:<br/>version constraint error"]:::err --> ROOT["Check root module's<br/>required_providers constraint"]:::verify
-    ROOT --> CHILD["Check every child module's<br/>own version constraint"]:::verify
-    CHILD --> OVERLAP{"Do root and child<br/>constraints overlap<br/>at all?"}:::decision
 
-    OVERLAP -->|"No — impossible range"| ALIGN["Align the version ranges<br/>in both modules by hand"]:::fix
-    OVERLAP -->|"Yes, but different envs<br/>resolved different versions"| LOCK["terraform providers lock<br/>-platform=linux_amd64 -platform=darwin_arm64"]:::fix
-    LOCK --> COMMIT["commit .terraform.lock.hcl<br/>to version control"]:::fix
-    COMMIT --> SAME["Every environment now<br/>installs the exact same<br/>provider build"]:::verify
+    subgraph DIAGNOSE["Find where the ranges disagree"]
+        ROOT --> CHILD["Check every child module's<br/>own version constraint"]:::verify
+        CHILD --> OVERLAP{"Do root and child<br/>constraints overlap<br/>at all?"}:::decision
+    end
+
+    subgraph RESOLVE["Align, then lock it down for good"]
+        OVERLAP -->|"No — impossible range"| ALIGN["Align the version ranges<br/>in both modules by hand"]:::fix
+        OVERLAP -->|"Yes, but different envs<br/>resolved different versions"| LOCK["terraform providers lock<br/>-platform=linux_amd64 -platform=darwin_arm64"]:::fix
+        LOCK --> COMMIT["commit .terraform.lock.hcl<br/>to version control"]:::fix
+        COMMIT --> SAME["Every environment now<br/>installs the exact same<br/>provider build"]:::verify
+    end
 ```
 
 <div class="tab-group">
@@ -332,13 +349,18 @@ flowchart TD
     classDef danger fill:#c0392b,stroke:#7b241c,color:#fff
 
     LEAK["Secret visible in<br/>plan output or state file"]:::err --> ISSENS{"Is the variable<br/>marked sensitive = true?"}:::decision
-    ISSENS -->|No| MARK["Add sensitive = true<br/>to the variable block"]:::fix
-    MARK --> STILLSTATE["Still gets written to state —<br/>never commit .tfvars with<br/>the literal secret in it"]:::danger
 
-    ISSENS -->|Yes| INTFVARS{"Is the raw secret value<br/>sitting in a .tfvars file?"}:::decision
-    INTFVARS -->|Yes| MOVE["Move it out of tfvars —<br/>into Secrets Manager or Vault"]:::fix
-    INTFVARS -->|No| DATASRC["Already pulling it correctly —<br/>use a data source from<br/>Secrets Manager"]:::fix
-    DATASRC --> VAULT["or the Vault provider<br/>for short-lived dynamic secrets"]:::fix
+    subgraph FLAGPATH["sensitive = true is necessary, not sufficient"]
+        ISSENS -->|No| MARK["Add sensitive = true<br/>to the variable block"]:::fix
+        MARK --> STILLSTATE["Still gets written to state —<br/>never commit .tfvars with<br/>the literal secret in it"]:::danger
+    end
+
+    subgraph SOURCEPATH["Where does the plaintext live at all?"]
+        ISSENS -->|Yes| INTFVARS{"Is the raw secret value<br/>sitting in a .tfvars file?"}:::decision
+        INTFVARS -->|Yes| MOVE["Move it out of tfvars —<br/>into Secrets Manager or Vault"]:::fix
+        INTFVARS -->|No| DATASRC["Already pulling it correctly —<br/>use a data source from<br/>Secrets Manager"]:::fix
+        DATASRC --> VAULT["or the Vault provider<br/>for short-lived dynamic secrets"]:::fix
+    end
 ```
 
 <div class="tab-group">
@@ -523,14 +545,19 @@ flowchart TD
     classDef verify fill:#3498db,stroke:#2471a3,color:#fff
 
     STUCK["Stack in ROLLBACK_COMPLETE —<br/>updates rejected outright"]:::err --> EVENTS["describe-stack-events —<br/>filter on CREATE_FAILED"]:::verify
-    EVENTS --> ROOTCAUSE["Identify the exact<br/>resource + reason that<br/>triggered the rollback"]:::verify
-    ROOTCAUSE --> FIXTPL["Fix the template"]:::fix
-    FIXTPL --> DELETE["aws cloudformation<br/>delete-stack"]:::fix
-    DELETE --> GONE{"Did the stack<br/>fully delete?"}:::decision
 
-    GONE -->|Yes| REDEPLOY["Redeploy the fixed template<br/>as a brand-new stack"]:::fix
-    GONE -->|"No — stuck again"| RETAINED["Check for retained resources<br/>or exports still referenced<br/>by another stack"]:::verify
-    RETAINED --> DELETE
+    subgraph DIAGNOSE["Find and fix the original failure"]
+        EVENTS --> ROOTCAUSE["Identify the exact<br/>resource + reason that<br/>triggered the rollback"]:::verify
+        ROOTCAUSE --> FIXTPL["Fix the template"]:::fix
+    end
+
+    subgraph DELETECYCLE["Delete → confirm → redeploy"]
+        FIXTPL --> DELETE["aws cloudformation<br/>delete-stack"]:::fix
+        DELETE --> GONE{"Did the stack<br/>fully delete?"}:::decision
+        GONE -->|"No — stuck again"| RETAINED["Check for retained resources<br/>or exports still referenced<br/>by another stack"]:::verify
+        RETAINED --> DELETE
+        GONE -->|Yes| REDEPLOY["Redeploy the fixed template<br/>as a brand-new stack"]:::fix
+    end
 
     REDEPLOY --> CHANGESETS["Going forward: use ChangeSets<br/>to preview every update first"]:::fix
 ```

@@ -56,11 +56,25 @@ flowchart TD
     classDef blue fill:#3498db,stroke:#2980b9,color:#fff,rx:8
     classDef orange fill:#e67e22,stroke:#d35400,color:#fff,rx:8
     classDef red fill:#e74c3c,stroke:#c0392b,color:#fff,rx:8
+    classDef green fill:#2ecc71,stroke:#27ae60,color:#fff,rx:8
 
-    T0["Incident triggered"]:::blue --> L1["Level 1: Primary on-call<br>(Schedule: primary-rotation)"]:::blue
-    L1 -->|"no ack in 15 min"| L2["Level 2: Secondary on-call<br>(Schedule: secondary-rotation)"]:::orange
-    L2 -->|"no ack in 15 min"| L3["Level 3: Team Lead<br>(direct user)"]:::orange
-    L3 -->|"no ack in 30 min"| L4["Level 4: Engineering Manager<br>(direct user)"]:::red
+    T0["Incident triggered"]:::blue --> L1
+
+    subgraph CHAIN["Escalation chain — repeats up to num_loops times if L4 never acks"]
+        L1["Level 1: Primary on-call<br>Schedule: primary-rotation<br>Push → SMS → Call"]:::blue
+        L2["Level 2: Secondary on-call<br>Schedule: secondary-rotation<br>Push → SMS → Call"]:::orange
+        L3["Level 3: Team Lead<br>Direct user<br>Call only — skips push/SMS"]:::orange
+        L4["Level 4: Engineering Manager<br>Direct user<br>Call, repeats every 30 min"]:::red
+    end
+
+    L1 -->|"no ack in 15 min"| L2
+    L2 -->|"no ack in 15 min"| L3
+    L3 -->|"no ack in 30 min"| L4
+
+    L1 -.->|"ack"| DONE["Chain stops here —<br>whoever acked owns the incident"]:::green
+    L2 -.->|"ack"| DONE
+    L3 -.->|"ack"| DONE
+    L4 -.->|"ack"| DONE
 ```
 
 | Level | Target | Timeout before escalating | Notification channels |
@@ -69,6 +83,31 @@ flowchart TD
 | 2 | Secondary on-call (schedule) | 15 min | Push → SMS → phone call |
 | 3 | Team lead (named user) | 30 min | Phone call (skip push/SMS — direct escalation) |
 | 4 | Engineering manager (named user) | — (final level, repeats every 30 min until ack) | Phone call |
+
+The walkthrough below traces the same chain as a sequence of events instead of a static diagram — useful for seeing exactly when the clock resets and when it doesn't:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Page.</strong> An incident triggers on the <code>payments-api</code> service. Escalation Policy Level 1 fires: the primary on-call — whoever the <code>primary-rotation</code> schedule says is up right now — gets a push notification, then SMS, then a phone call if those go unanswered.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. No ack.</strong> 15 minutes pass with no acknowledgment from Level 1 — no <code>/pd ack</code>, no tap on the mobile push, nothing. The policy doesn't wait any longer than its configured timeout; there's no partial credit for "probably saw it."
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Escalate.</strong> The policy automatically moves to Level 2: the secondary on-call, via the same push → SMS → call sequence, with a fresh 15-minute timeout that starts from zero — Level 1's elapsed time doesn't carry over.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Next level.</strong> If Level 2 also times out, escalation jumps to Level 3 — a named user (the team lead), skipping push/SMS entirely and going straight to a phone call, with a longer 30-minute timeout. If that times out too, Level 4 (the engineering manager) is paged and repeats every 30 minutes until someone finally acks.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 PagerDuty escalation policy as Terraform (common IaC pattern for reproducible on-call config):
 
@@ -111,6 +150,12 @@ resource "pagerduty_escalation_policy" "payments_api" {
 }
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">The primary on-call acknowledges the page 2 minutes after it fires. Does the escalation policy still page the secondary on-call at the 15-minute mark?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Escalation only fires on a timeout with <em>no</em> acknowledgment — an ack at any point halts the chain right there, at whatever level acknowledged. The 15-minute timer isn't a countdown to a page that happens regardless; it's a countdown to escalation that an ack cancels entirely. This is a common misreading of escalation policies: people assume the chain is time-based and will page everyone eventually, when in fact it only advances past a level that never responds.</div>
+</div>
+
 ---
 
 ## 3. Event Orchestration — Routing, Dedup, Suppression
@@ -122,12 +167,20 @@ flowchart LR
     classDef blue fill:#3498db,stroke:#2980b9,color:#fff,rx:8
     classDef red fill:#e74c3c,stroke:#c0392b,color:#fff,rx:8
     classDef green fill:#2ecc71,stroke:#27ae60,color:#fff,rx:8
+    classDef purple fill:#9b59b6,stroke:#8e44ad,color:#fff,rx:8
 
-    IN["Event In"]:::blue --> R1{"environment == 'staging'?"}
-    R1 -->|yes| SUP["Suppress<br>(no incident created)"]:::red
-    R1 -->|no| R2{"fingerprint matches open incident?"}
-    R2 -->|yes| DEDUPE["Dedupe into existing incident"]:::green
-    R2 -->|no| R3{"service tag?"}
+    IN["Event In"]:::blue --> R1
+
+    subgraph ORCH["Global Orchestration — rules evaluated top-down, first match wins"]
+        R1{"Rule 1: environment == 'staging'?"}:::purple
+        R2{"Rule 2: fingerprint matches<br>an open incident?"}:::purple
+        R3{"Rule 3: service tag?"}:::purple
+    end
+
+    R1 -->|yes| SUP["Suppress<br>no incident created —<br>rules 2 and 3 never evaluated"]:::red
+    R1 -->|no| R2
+    R2 -->|yes| DEDUPE["Dedupe into existing incident<br>rule 3 never evaluated"]:::green
+    R2 -->|no| R3
     R3 -->|"tag=payments"| SVC1["Route to Payments Service"]:::blue
     R3 -->|"tag=checkout"| SVC2["Route to Checkout Service"]:::blue
 ```
@@ -181,6 +234,12 @@ actions:
 ```
 
 **Auto-resolve flapping noise** (a common orchestration pattern not always obvious): route low-confidence alerts through a time-window rule that only pages if the condition persists, rather than relying purely on the source system's `for:` duration.
+
+<div class="quiz-card">
+  <p class="quiz-q">An event comes from the staging environment, and its fingerprint also matches an already-open incident. In the rule flow above, which rule handles it — suppression or dedup?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Suppression. Rules run top-down and the first match wins — Rule 1 (the staging check) is evaluated before Rule 2 (the fingerprint check), so the event is suppressed and dropped before dedup logic ever runs. Rule order isn't just documentation convenience here; it determines outcome. Putting the fingerprint check first would have produced a completely different result for the same event.</div>
+</div>
 
 ---
 
@@ -240,6 +299,26 @@ receivers:
         send_resolved: true
 ```
 
+```mermaid
+flowchart TD
+    classDef crit fill:#e74c3c,stroke:#c0392b,color:#fff,rx:8
+    classDef warn fill:#f39c12,stroke:#d68910,color:#000,rx:8
+    classDef info fill:#3498db,stroke:#2980b9,color:#fff,rx:8
+    classDef svc fill:#9b59b6,stroke:#8e44ad,color:#fff,rx:8
+
+    ALERT["Prometheus alert fires"] --> ROUTE{"severity label?"}
+
+    subgraph SEV["Alertmanager route tree — first matching route wins, continue: false stops fallthrough"]
+        ROUTE -->|"critical"| RC["pagerduty-critical<br>group_wait: 10s<br>repeat_interval: 1h"]:::crit
+        ROUTE -->|"warning"| RW["pagerduty-warning<br>repeat_interval: 4h"]:::warn
+        ROUTE -->|"info"| RI["slack-info<br>never pages"]:::info
+    end
+
+    RC --> SVC1["PagerDuty Service:<br>PD_INTEGRATION_KEY_CRITICAL<br>own escalation policy — 15 min timeouts"]:::svc
+    RW --> SVC2["PagerDuty Service:<br>PD_INTEGRATION_KEY_WARNING<br>own, lighter escalation policy"]:::svc
+    RI --> SLACKCH["#alerts-info channel<br>no paging at all"]:::info
+```
+
 **Why separate PD integration keys per severity, not one key with a severity field:** each PagerDuty Service maps to its own escalation policy. Routing `critical` and `warning` to different Services lets critical alerts hit the aggressive escalation policy (15-min timeouts, pages secondary/lead) while warnings sit on a lighter policy (Slack + delayed page, no 2am wakeups for non-urgent issues). One shared Service with just a severity annotation can't express that differentiated escalation behavior.
 
 ```bash
@@ -249,6 +328,12 @@ amtool check-config alertmanager.yml
 # Test a specific route resolves to the expected receiver without firing a real alert
 amtool config routes test --config.file=alertmanager.yml severity=critical cluster=prod
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">Why can't a single PagerDuty Service with one integration key, tagged by a severity annotation, replicate the differentiated escalation behavior of two separate Services?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Because escalation policy is configured per Service, not per alert or per annotation. A single shared Service has exactly one escalation policy — there's nowhere to attach "15-min aggressive timeouts for critical" and "lighter, delayed policy for warning" simultaneously. Splitting critical and warning into separate PagerDuty Services (and therefore separate integration keys) is what lets each severity carry its own escalation policy at all.</div>
+</div>
 
 ---
 
@@ -266,6 +351,21 @@ amtool config routes test --config.file=alertmanager.yml severity=critical clust
 | Ecosystem | 700+ integrations, large community, mature Terraform provider | ~200+ integrations, smaller community, solid Terraform provider (owned by Atlassian, tight Jira Service Management tie-in) |
 | Strongest fit | Org already invested in the PagerDuty ecosystem, dedicated incident command tooling (PD Incident Response product) | Org already on Atlassian stack (Jira, Confluence, Statuspage) — tighter native integration |
 
+The table above is the full feature-by-feature comparison — worth scanning row by row when you're evaluating a migration. For the simpler "which one do we default to" question, it usually comes down to which ecosystem you're already in:
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="pd" class="active">PagerDuty</button>
+    <button data-toggle-opt="og">Opsgenie</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="pd">
+    <strong>Pick PagerDuty when...</strong> the org is already invested in its ecosystem — 700+ integrations is hard to beat for a heterogeneous toolchain, and the dedicated PagerDuty Incident Response product (auto incident channels, stakeholder communications, retrospective tooling) is a first-class product rather than a bolt-on. Its Terraform provider is the most mature of the two, which matters if escalation policies and schedules are managed as code across many services.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="og">
+    <strong>Pick Opsgenie when...</strong> the org already lives in the Atlassian stack — Jira Service Management, Confluence, and Atlassian Statuspage. Opsgenie's Statuspage integration is tighter because it's the same parent company, and incidents opened in Opsgenie can tie directly into existing Jira tickets without a separate integration layer. The ~200+ integration count is smaller than PagerDuty's, but that usually doesn't matter if the rest of the toolchain is already Atlassian-native.
+  </div>
+</div>
+
 ### Rotation types (both platforms support these; naming differs slightly)
 
 | Rotation type | Pattern | Best for |
@@ -275,6 +375,12 @@ amtool config routes test --config.file=alertmanager.yml severity=critical clust
 | Weekly rotation | New person every 7 days | Most common default — balances context-retention vs burnout |
 | Follow-the-sun | Region-based schedule layers so "on-call" always maps to someone in daytime hours | Global teams (US/EU/APAC) avoiding 3am pages entirely |
 | Custom/override | Manual overrides layered on top of a base rotation | Holidays, planned leave, temporary swaps |
+
+<div class="quiz-card">
+  <p class="quiz-q">An org already runs Jira Service Management, Confluence, and Atlassian Statuspage for everything else. Based on ecosystem fit alone, which paging tool has the edge?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Opsgenie — it's the same parent company as Statuspage and has a tight native tie-in to Jira Service Management, so incidents and status-page updates plug into tooling the org already has rather than requiring a separate integration layer. PagerDuty's larger integration count (700+ vs ~200+) doesn't outweigh that when the rest of the stack is already Atlassian-native.</div>
+</div>
 
 ---
 
@@ -302,6 +408,12 @@ sum(increase(alertmanager_notifications_total{integration="pagerduty"}[7d]))
 
 PagerDuty's own Analytics tooling reports MTTA/MTTR natively per-service — pull that first before building custom dashboards; only build a custom exporter if you need cross-tool correlation (e.g., joining PD data with deploy events).
 
+<div class="quiz-card">
+  <p class="quiz-q">MTTA is rising while MTTR stays flat and low. Is that an alert-fatigue problem or a runbook/tooling problem?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>An alert-fatigue (or escalation-policy) problem, not a runbook gap. Rising MTTA means it's taking longer for someone to acknowledge a page in the first place — that points to people ignoring pages (fatigue) or a misconfigured escalation policy, not to a lack of remediation tooling. If MTTR were the one climbing while MTTA stayed low, that would instead point at a runbook/tooling gap — people ack quickly but the fix itself takes too long.</div>
+</div>
+
 ---
 
 ## 7. On-Call Schedule Design Patterns
@@ -311,11 +423,17 @@ flowchart LR
     classDef blue fill:#3498db,stroke:#2980b9,color:#fff,rx:8
     classDef orange fill:#e67e22,stroke:#d35400,color:#fff,rx:8
     classDef purple fill:#9b59b6,stroke:#8e44ad,color:#fff,rx:8
+    classDef green fill:#2ecc71,stroke:#27ae60,color:#fff,rx:8
+    classDef red fill:#e74c3c,stroke:#c0392b,color:#fff,rx:8
 
-    subgraph FollowSun["Follow-the-Sun (24h coverage, no night pages)"]
-        US["US Team<br>09:00-17:00 PT"]:::blue --> EU["EU Team<br>09:00-17:00 CET"]:::orange
-        EU --> APAC["APAC Team<br>09:00-17:00 SGT"]:::purple
-        APAC --> US
+    subgraph FollowSun["Follow-the-Sun — 24h coverage, zero night pages, needs 3 timezone-distributed teams"]
+        US["US Team<br>09:00-17:00 PT<br>on-call"]:::blue -->|"handoff 17:00 PT<br>= 02:00 CET"| EU["EU Team<br>09:00-17:00 CET<br>on-call"]:::orange
+        EU -->|"handoff 17:00 CET<br>= 00:00 SGT"| APAC["APAC Team<br>09:00-17:00 SGT<br>on-call"]:::purple
+        APAC -->|"handoff 17:00 SGT<br>= 09:00 PT"| US
+    end
+
+    subgraph SingleRegion["Single-region alternative — one team, no timezone coverage needed"]
+        PRIMARY["Primary on-call<br>this week"]:::green -->|"misses a page"| SECONDARY["Secondary on-call<br>backup/escalation target"]:::red
     end
 ```
 
@@ -333,6 +451,12 @@ flowchart LR
 - Recent deploys in the last 24h (correlate with any anomalies)
 - Known flaky alerts currently being tuned
 
+<div class="quiz-card">
+  <p class="quiz-q">Which trades better context retention for higher end-of-week fatigue risk — weekly rotation or daily rotation?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Weekly rotation. A full week per person means you still remember what broke Monday by Friday, which is good for context — but that same person is absorbing every page all week, which is the tradeoff against burnout. Daily rotation flips it: lower fatigue per shift, but context continuity gets worse, so handoff notes become critical to avoid re-learning the same incident from scratch every 24 hours.</div>
+</div>
+
 ---
 
 ## 8. Incident Command Integration (ChatOps)
@@ -344,16 +468,27 @@ sequenceDiagram
     participant SP as Status Page
     participant OC as On-call Engineer
 
-    PD->>PD: Incident triggered (critical)
-    PD->>Slack: Auto-create #incident-2024-payments-outage channel
-    PD->>OC: Page (push/SMS/call)
-    OC->>Slack: Joins channel, posts initial assessment
-    OC->>PD: /pd ack (Slack slash command) — acknowledges incident
-    OC->>SP: Update status page component to "Degraded"
-    Note over OC,Slack: Responders coordinate in-channel, PD bot posts timeline updates
-    OC->>PD: /pd resolve
-    PD->>Slack: Posts resolution + auto-archives channel after cooldown
-    PD->>SP: Status page auto-reverts to "Operational" (if integrated) or manual update
+    rect rgba(231, 76, 60, 0.15)
+        Note over PD,OC: Phase 1 — detect and page
+        PD->>PD: Incident triggered (critical)
+        PD->>Slack: Auto-create #incident-2024-payments-outage channel
+        PD->>OC: Page (push/SMS/call)
+    end
+
+    rect rgba(243, 156, 18, 0.15)
+        Note over OC,SP: Phase 2 — coordinate and communicate
+        OC->>Slack: Joins channel, posts initial assessment
+        OC->>PD: /pd ack (Slack slash command) — acknowledges incident
+        OC->>SP: Update status page component to "Degraded"
+        Note over OC,Slack: Responders coordinate in-channel, PD bot posts timeline updates
+    end
+
+    rect rgba(46, 204, 113, 0.15)
+        Note over OC,SP: Phase 3 — resolve and wrap up
+        OC->>PD: /pd resolve
+        PD->>Slack: Posts resolution + auto-archives channel after cooldown
+        PD->>SP: Status page auto-reverts to "Operational" (if integrated) or manual update
+    end
 ```
 
 **Key integration points:**
@@ -388,6 +523,12 @@ def handle_alert():
     return "", 200
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">Why might fully automating the status-page revert (auto-flip to "Operational" the instant PagerDuty marks the incident resolved) be riskier than doing that step manually?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Because "resolved in PagerDuty" and "actually stable in production" aren't guaranteed to be the same moment — an engineer might resolve the incident the instant the immediate symptom clears, before confirming the fix is holding. A premature "Operational" announcement to customers is worse than a slightly delayed one, so manual is the safer default for anything customer-facing, even though full automation is technically straightforward to wire up.</div>
+</div>
+
 ---
 
 ## 9. Post-Incident Review Automation
@@ -399,11 +540,22 @@ flowchart LR
     classDef blue fill:#3498db,stroke:#2980b9,color:#fff,rx:8
     classDef orange fill:#e67e22,stroke:#d35400,color:#fff,rx:8
     classDef purple fill:#9b59b6,stroke:#8e44ad,color:#fff,rx:8
+    classDef green fill:#2ecc71,stroke:#27ae60,color:#fff,rx:8
 
-    PD["PagerDuty timeline<br>trigger/ack/escalate/resolve events"]:::blue --> AGG["Timeline aggregator"]:::purple
-    SLACK["Slack channel history<br>#incident-* messages + timestamps"]:::orange --> AGG
-    DEPLOY["Deploy events<br>(ArgoCD/GHA/CD system webhooks)"]:::blue --> AGG
-    AGG --> DOC["Draft postmortem doc<br>(Confluence/Notion) — pre-filled timeline, human fills 'why' + action items"]:::purple
+    subgraph AUTO["Automated — mechanical, safe to script"]
+        PD["PagerDuty timeline<br>trigger/ack/escalate/resolve events"]:::blue --> AGG["Timeline aggregator"]:::purple
+        SLACK["Slack channel history<br>#incident-* messages + timestamps"]:::orange --> AGG
+        DEPLOY["Deploy events<br>ArgoCD/GHA/CD system webhooks"]:::blue --> AGG
+        AGG --> DOC["Draft postmortem doc<br>Confluence/Notion — pre-filled timeline"]:::purple
+    end
+
+    subgraph HUMAN["Human — requires judgment, stays manual"]
+        WHY["Root cause narrative<br>'5 Whys' / contributing factors"]:::green
+        ACTIONS["Action items<br>prioritization + ownership"]:::green
+    end
+
+    DOC --> WHY
+    DOC --> ACTIONS
 ```
 
 **Data sources to pull automatically:**
@@ -444,3 +596,9 @@ def build_timeline(incident_id, slack_channel_id):
 | Draft doc creation with pre-filled timeline | "5 Whys" / contributing factors discussion |
 | MTTA/MTTR/impact-duration calculation | Action item prioritization and ownership |
 | Linking related past incidents (same alertname/service) | Blameless framing and psychological safety of the review meeting itself |
+
+<div class="quiz-card">
+  <p class="quiz-q">Should the root-cause narrative be pulled into the postmortem doc automatically, the same way the incident timeline is?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Timeline collection (PagerDuty log entries, Slack messages, deploy events) is mechanical — merge and sort by timestamp, no judgment required — so it's safe and valuable to automate. The "why" behind the incident (5 Whys, contributing factors) requires human analysis of context an aggregator can't infer from timestamps alone, so it stays manual even though the raw data feeding into that discussion is auto-collected.</div>
+</div>

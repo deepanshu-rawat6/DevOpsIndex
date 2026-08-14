@@ -525,15 +525,19 @@ flowchart TD
     classDef fix fill:#27ae60,stroke:#1e8449,color:#fff
     classDef verify fill:#3498db,stroke:#2471a3,color:#fff
 
-    A[UPDATE_ROLLBACK_FAILED]:::err --> B[Open Events tab<br/>find the failed resource]:::verify
+    A[UPDATE_ROLLBACK_FAILED<br/>stack stuck, won't update or roll back]:::err --> B[Open Events tab:<br/>find the resource that failed rollback]:::verify
     B --> C{Resource manually<br/>modified outside CloudFormation?}:::decision
-    C -- Yes --> D[Delete or restore<br/>the resource manually]:::fix
-    D --> E[Continue rollback<br/>via console or CLI]:::fix
-    C -- No --> F{Resource already<br/>deleted?}:::decision
-    F -- Yes --> G[Skip the resource via<br/>--resources-to-skip]:::fix
-    F -- No --> H{Dependency<br/>conflict between resources?}:::decision
-    H -- Yes --> H1[Resolve the dependency,<br/>then continue rollback]:::fix
-    H -- No --> I[Contact AWS Support<br/>or import the resource]:::verify
+
+    subgraph RECONCILE["Reconciling drift before the rollback can proceed"]
+        C -- Yes --> D[Delete or restore<br/>the resource by hand]:::fix
+        D --> E[Continue rollback<br/>via console or CLI]:::fix
+        C -- No --> F{Resource already<br/>deleted outside CloudFormation?}:::decision
+        F -- Yes --> G[Skip the resource via<br/>--resources-to-skip]:::fix
+        F -- No --> H{Dependency conflict<br/>between two resources?}:::decision
+        H -- Yes --> H1[Resolve the dependency,<br/>then continue rollback]:::fix
+    end
+
+    H -- No --> I[Contact AWS Support<br/>or import the resource instead]:::verify
 ```
 
 **Commands**
@@ -769,18 +773,32 @@ kubectl describe node ip-10-0-x-x.ec2.internal
 
 ```mermaid
 flowchart TD
-    A[Unexpected high bill] --> B[Cost Explorer:<br/>group by Service]
-    B --> C{Top service?}
-    C -- EC2/VPC --> D{NAT GW data<br/>transfer high?}
-    D -- Yes --> D1[Add VPC endpoints<br/>for S3/DynamoDB]
-    D -- No --> D2{Inter-AZ<br/>transfer?}
-    D2 -- Yes --> D3[Co-locate services<br/>same AZ or use AZ-aware LB]
-    C -- EC2 --> E{Orphaned EBS<br/>volumes?}
-    E -- Yes --> E1[Delete unattached<br/>EBS volumes]
-    C -- Any --> F{Forgotten resources?<br/>NAT GW, EIP, snapshots}
-    F -- Yes --> F1[Delete idle resources]
-    F -- No --> G[Enable Cost Anomaly<br/>Detection alerts]
-    G --> H[Set budget alert<br/>aws budgets]
+    classDef err fill:#e74c3c,stroke:#c0392b,color:#fff
+    classDef decision fill:#f39c12,stroke:#ba6018,color:#fff
+    classDef fix fill:#27ae60,stroke:#1e8449,color:#fff
+    classDef verify fill:#3498db,stroke:#2471a3,color:#fff
+
+    A[Unexpected high bill<br/>this month's spend jumped]:::err --> B[Cost Explorer:<br/>group by Service, last 30 days]:::verify
+    B --> C{Which service is the<br/>top cost driver?}:::decision
+
+    subgraph NETCOST["Network transfer costs — easy to miss, hard to see coming"]
+        C -- EC2/VPC --> D{NAT Gateway<br/>data transfer unusually high?}:::decision
+        D -- Yes --> D1[Add VPC endpoints<br/>for S3/DynamoDB traffic]:::fix
+        D -- No --> D2{Cross-AZ<br/>transfer high?}:::decision
+        D2 -- Yes --> D3[Co-locate services in one AZ,<br/>or use an AZ-aware load balancer]:::fix
+    end
+
+    subgraph IDLE["Idle / orphaned resources — still billing, doing nothing"]
+        C -- EC2/EBS --> E{Orphaned EBS volumes<br/>attached to nothing?}:::decision
+        E -- Yes --> E1[Delete unattached<br/>EBS volumes]:::fix
+        C -- Any service --> F{Forgotten resources?<br/>idle NAT GW, unused EIP, old snapshots}:::decision
+        F -- Yes --> F1[Delete the idle<br/>resources]:::fix
+    end
+
+    D2 -- No --> G
+    E -- No --> G
+    F -- No --> G[Enable Cost Anomaly<br/>Detection, $50 absolute threshold]:::fix
+    G --> H[Set AWS Budgets alerts<br/>at 50% / 80% / 100% of forecast]:::verify
 ```
 
 **Commands**
@@ -829,6 +847,33 @@ aws budgets create-budget \
 ```
 
 **Prevention:** Set AWS Budgets alerts at 50%, 80%, and 100% of monthly forecast from day one. Enable Cost Anomaly Detection with a `$50 absolute threshold` — it alerts within hours of a runaway resource. Tag every resource with `team`, `env`, `service` tags enforced by an AWS Config rule. Review Cost Explorer weekly during growth phases.
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="nat" class="active state-warn">NAT Gateway data transfer</button>
+    <button data-toggle-opt="az" class="state-warn">Cross-AZ transfer</button>
+    <button data-toggle-opt="ebs" class="state-bad">Orphaned EBS volumes</button>
+    <button data-toggle-opt="idle" class="state-bad">Forgotten idle resources</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="nat">
+    Traffic to S3 or DynamoDB is routed through a NAT Gateway instead of a VPC endpoint, so every byte gets billed at NAT's per-GB processing rate on top of the Gateway's hourly cost. Fix: add a VPC endpoint for S3/DynamoDB traffic — it's free for gateway endpoints and removes the NAT hop entirely for that traffic.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="az">
+    Chatty services that call each other across Availability Zones pay AWS's inter-AZ data transfer rate on every request-response pair, even though the traffic never leaves the region. Fix: co-locate the noisy services in the same AZ, or route through an AZ-aware load balancer that prefers same-AZ targets.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="ebs">
+    An EBS volume keeps billing for its provisioned size and IOPS whether or not any instance is attached to it — a terminated instance doesn't automatically take its volumes with it unless <code>DeleteOnTermination</code> was set. Fix: find volumes in <code>available</code> state (no attachment) and delete the ones nobody's using.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="idle">
+    NAT Gateways, unassociated Elastic IPs, and old EBS snapshots all keep billing quietly with no traffic and no alert to notice them — an EIP not attached to a running instance is billed specifically because it's sitting idle. Fix: sweep for and delete resources with no active association on a schedule, don't wait for someone to notice the line item.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">The prevention advice lists both AWS Budgets alerts (at 50/80/100% of monthly forecast) and Cost Anomaly Detection (at a $50 absolute threshold). Why isn't the Budgets alert alone enough to catch a runaway resource quickly?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Budgets alerts are tied to a percentage of the monthly forecast, so on a large enough budget a sudden spike from one forgotten resource can stay under the next percentage threshold for weeks while it quietly compounds. Cost Anomaly Detection isn't scaled to the overall budget at all — with a flat $50 absolute threshold it flags an unusual spend as soon as it appears, typically within hours, regardless of how small a fraction of the total budget it represents. One catches sustained overall drift over the course of a month; the other catches a sudden anomaly early enough to kill it before it compounds into next month's bill.</div>
+</div>
 
 ---
 

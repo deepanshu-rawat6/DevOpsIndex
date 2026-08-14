@@ -823,6 +823,12 @@ kubectl get limitrange -n <ns> -o yaml
 
 **Prevention:** Set LimitRange defaults in every namespace so pods without resource specs still get sane defaults. Alert on `kube_resourcequota{type="used"} / kube_resourcequota{type="hard"} > 0.80` to catch quota exhaustion before it blocks deployments. Document quota allocations per team in runbooks.
 
+<div class="quiz-card">
+  <p class="quiz-q">A single pod with a tiny <code>requests.cpu: 50m</code> fails to create with "exceeded quota" — but a LimitRange in the same namespace has generous per-container maximums that this pod is nowhere near. What's actually blocking it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>ResourceQuota, not LimitRange — the error message "exceeded quota" is the tell. ResourceQuota caps <strong>total</strong> consumption across the whole namespace, so even a tiny individual request gets rejected if the namespace as a whole is already at its <code>requests.cpu</code> hard cap; the pod's own size is irrelevant once the aggregate is full. LimitRange operates per-pod (min/max per container, defaults when unset) and would instead produce a "must specify limits" style error, not a quota-exceeded one. <code>kubectl describe quota -n &lt;ns&gt;</code> — not <code>describe limitrange</code> — is the next command here.</div>
+</div>
+
 ---
 
 ## Quick Reference: All Pod States
@@ -1046,19 +1052,28 @@ kubectl debug -it <pod-a> --image=nicolaka/netshoot --target=<container>
 
 ```mermaid
 flowchart TD
-    A[kubectl get svc — svc exists] --> B[kubectl get endpoints my-svc]
-    B --> C{Endpoints empty?}
-    C -- Yes --> D[Compare svc selector<br/>vs pod labels]
-    D --> E{Labels match?}
-    E -- No --> F[Fix labels or selector]
-    E -- Yes --> G[Check pod Ready?]
-    G --> H{Pod Ready=True?}
-    H -- No --> I[Fix readiness probe]
-    H -- Yes --> J[Check targetPort vs<br/>containerPort]
-    J --> K{Ports match?}
-    K -- No --> L[Fix targetPort in svc]
-    K -- Yes --> M[Check pod namespace<br/>matches svc namespace]
-    C -- No --> N[Check kube-proxy /<br/>iptables rules]
+    classDef start fill:#3498db,stroke:#2471a3,color:#fff
+    classDef check fill:#f39c12,stroke:#ba6018,color:#fff
+    classDef fix fill:#27ae60,stroke:#1e8449,color:#fff
+    classDef trap fill:#e74c3c,stroke:#c0392b,color:#fff
+
+    A["Service has a ClusterIP,<br/>but requests fail"]:::start --> B["kubectl get endpoints my-svc"]:::check
+    B --> C{"ENDPOINTS<br/>column empty?"}:::check
+
+    subgraph EmptyBranch["Endpoints empty — selector/readiness problem"]
+        C -- Yes --> D["Compare svc selector<br/>vs pod labels"]:::check
+        D --> E{"Labels<br/>match?"}:::check
+        E -- No --> F["Fix labels or selector"]:::fix
+        E -- Yes --> G["Check pod Ready condition"]:::check
+        G --> H{"Pod Ready=True?"}:::check
+        H -- No --> I["Fix readiness probe<br/>or app startup"]:::fix
+        H -- Yes --> J["Check targetPort vs<br/>containerPort"]:::check
+        J --> K{"Ports match?"}:::check
+        K -- No --> L["Fix targetPort in svc"]:::fix
+        K -- Yes --> M["Check pod namespace<br/>matches svc namespace"]:::trap
+    end
+
+    C -- No --> N["Endpoints exist —<br/>check kube-proxy/iptables rules<br/>on the node instead"]:::trap
 ```
 
 **Commands:**
@@ -1103,17 +1118,28 @@ my-svc    <none>            5m   ← problem: no backends
 
 ```mermaid
 flowchart TD
-    A[kubectl get hpa —<br/>metrics unknown] --> B[metrics-server running?]
-    B --> C{kubectl top pods<br/>works?}
-    C -- No --> D[Install / fix<br/>metrics-server]
-    C -- Yes --> E[Pod has resource<br/>requests set?]
-    E --> F{requests.cpu set?}
-    F -- No --> G[Add resource requests<br/>to pod spec]
-    F -- Yes --> H[Custom metrics path?]
-    H --> I[prometheus-adapter<br/>running?]
-    I --> J[Check HPA<br/>externalMetrics config]
-    J --> K[Check RBAC for<br/>metrics API]
-    K --> L[kubectl get apiservices<br/>v1beta1.metrics.k8s.io]
+    classDef start fill:#3498db,stroke:#2471a3,color:#fff
+    classDef check fill:#f39c12,stroke:#ba6018,color:#fff
+    classDef fix fill:#27ae60,stroke:#1e8449,color:#fff
+    classDef trap fill:#e74c3c,stroke:#c0392b,color:#fff
+
+    A["kubectl get hpa shows<br/>&lt;unknown&gt; for TARGETS"]:::start --> B["Is metrics-server<br/>even running?"]:::check
+    B --> C{"kubectl top pods<br/>works?"}:::check
+    C -- No --> D["Install / fix<br/>metrics-server"]:::fix
+
+    subgraph ReqBranch["metrics-server is fine — check the pod spec"]
+        C -- Yes --> E["Does the pod have<br/>resources.requests set?"]:::check
+        E --> F{"requests.cpu<br/>present?"}:::check
+        F -- No --> G["Add resource requests —<br/>HPA can't compute % of nothing"]:::trap
+    end
+
+    subgraph CustomBranch["Custom/external metrics path (KEDA, prometheus-adapter)"]
+        F -- Yes --> H["Scaling on a custom<br/>or external metric?"]:::check
+        H --> I["prometheus-adapter /<br/>KEDA pod running?"]:::check
+        I --> J["Check HPA's<br/>externalMetrics config"]:::check
+        J --> K["Check RBAC for the<br/>custom metrics API"]:::check
+        K --> L["kubectl get apiservices |<br/>grep metrics.k8s.io"]:::fix
+    end
 ```
 
 **Commands:**
@@ -1152,6 +1178,12 @@ web    Deployment/web    <unknown>/50%   2        10       2
 
 **Prevention:** Always set `resources.requests.cpu` — HPA silently shows `<unknown>` without it. Install metrics-server as part of cluster bootstrap (not optional). For production: use KEDA with external metrics (queue depth, RPS) instead of CPU-only HPA — CPU is a lagging indicator of load.
 
+<div class="quiz-card">
+  <p class="quiz-q">A pod has no <code>resources.requests.cpu</code> set, but metrics-server is installed and healthy, and <code>kubectl top pods</code> works fine. Will the HPA scale correctly?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — <code>kubectl top pods</code> working proves metrics-server itself is fine, but that's a different signal from whether the HPA can compute a percentage. A CPU-target HPA needs <code>requests.cpu</code> as the denominator for "current usage as % of request"; with no request set, there's nothing to divide by, and the HPA shows <code>&lt;unknown&gt;</code> for TARGETS and never scales — even though every other part of the metrics pipeline is completely healthy. This is why the prevention rule is to always set <code>requests.cpu</code>, not just "install metrics-server."</div>
+</div>
+
 ---
 
 ## Deployment Stuck in Rollout
@@ -1160,17 +1192,29 @@ web    Deployment/web    <unknown>/50%   2        10       2
 
 ```mermaid
 flowchart TD
-    A[kubectl rollout status hangs] --> B[New pods state?]
-    B --> C{Pending or<br/>CrashLoop?}
-    C -- Pending --> D[Check new pod events<br/>— scheduling issue]
-    C -- CrashLoop --> E[kubectl logs new-pod<br/>— app crash]
-    B --> F[Old pods state?]
-    F --> G{Stuck Terminating?}
-    G -- Yes --> H[Check preStop hook<br/>/ finalizers]
-    H --> I[kubectl patch to<br/>remove finalizer]
-    G -- No --> J[Check maxUnavailable<br/>/ maxSurge settings]
-    J --> K[Check PodDisruptionBudget<br/>blocking drain]
-    K --> L[kubectl get pdb]
+    classDef start fill:#3498db,stroke:#2471a3,color:#fff
+    classDef newp fill:#e67e22,stroke:#ba6018,color:#fff
+    classDef oldp fill:#8e44ad,stroke:#6c3483,color:#fff
+    classDef fix fill:#27ae60,stroke:#1e8449,color:#fff
+    classDef trap fill:#e74c3c,stroke:#c0392b,color:#fff
+
+    A["kubectl rollout status hangs —<br/>new ReplicaSet never reaches desired count"]:::start --> B["Check new pods"]:::newp
+    A --> F["Check old pods"]:::oldp
+
+    subgraph NewBranch["New ReplicaSet not coming up"]
+        B --> C{"Pending or<br/>CrashLoopBackOff?"}:::newp
+        C -- Pending --> D["Check new pod events —<br/>scheduling issue (see Pending scenario)"]:::newp
+        C -- CrashLoop --> E["kubectl logs new-pod —<br/>bad image/config (see CrashLoop runbook)"]:::newp
+    end
+
+    subgraph OldBranch["Old ReplicaSet not scaling down"]
+        F --> G{"Old pods stuck<br/>Terminating?"}:::oldp
+        G -- Yes --> H["Check preStop hook /<br/>finalizers"]:::oldp
+        H --> I["kubectl patch to<br/>remove finalizer"]:::fix
+        G -- No --> J["Check maxUnavailable /<br/>maxSurge settings"]:::oldp
+        J --> K["Check PodDisruptionBudget<br/>blocking the drain"]:::trap
+        K --> L["kubectl get pdb —<br/>minAvailable too strict?"]:::fix
+    end
 ```
 
 **Commands:**
@@ -1207,6 +1251,35 @@ kubectl rollout undo deployment/<name>
 
 **Prevention:** Set a `progressDeadlineSeconds` (default 600s) — rollout auto-fails if new pods don't become Ready within that window, making CI pipelines fail fast. Always set a PDB with `minAvailable: 1` so rollouts can't kill all replicas. Add a readiness probe that fails until the app is truly ready (not just started).
 
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Split the investigation in two.</strong> A stuck rollout is always one of two independent problems — the <em>new</em> ReplicaSet not coming up, or the <em>old</em> ReplicaSet not scaling down. <code>kubectl get pods -l app=&lt;name&gt; --sort-by=.metadata.creationTimestamp</code> shows you both generations side by side so you know which half is actually stuck.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. If it's the new pods:</strong> treat it exactly like a fresh Pending or CrashLoopBackOff investigation — <code>kubectl describe pod</code> for scheduling events, or <code>kubectl logs</code> for a crash. Nothing about this being mid-rollout changes that diagnosis; the rollout is just the trigger that surfaced it.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. If it's the old pods:</strong> the two suspects are a hung <code>preStop</code>/stuck finalizer, or the rollout's own <code>maxUnavailable</code>/<code>maxSurge</code> budget colliding with a <code>PodDisruptionBudget</code>. <code>kubectl get pdb</code> is the fastest way to rule the PDB in or out — a <code>minAvailable</code> set too high for the current replica count silently blocks every eviction.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Decide: fix forward, or roll back.</strong> If root cause isn't obvious in a couple of minutes, <code>kubectl rollout undo deployment/&lt;name&gt;</code> restores service immediately — <code>progressDeadlineSeconds</code> exists precisely so this decision gets forced automatically in CI instead of a human staring at a hung rollout indefinitely.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A Deployment rollout hangs because the old ReplicaSet's pods won't terminate. <code>describe pod</code> shows no finalizers and no hanging preStop hook. What's the next thing to check, and why does the default rollout config make this easy to miss?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Check the PodDisruptionBudget with <code>kubectl get pdb</code> — a <code>minAvailable</code> set too high for the current replica count will block the rollout's own eviction of old pods just as effectively as a stuck finalizer would, but with none of the obvious signals (no hung hook, no lingering finalizer in <code>describe pod</code>). It's easy to miss because nothing about the Deployment spec itself looks wrong; the PDB is a separate object that silently vetoes the eviction. This is exactly why the prevention rule pairs <code>progressDeadlineSeconds</code> with a sane PDB — the deadline at least forces the rollout to fail loudly instead of hanging forever.</div>
+</div>
+
 ---
 
 ## Webhook Admission Failures
@@ -1215,16 +1288,24 @@ kubectl rollout undo deployment/<name>
 
 ```mermaid
 flowchart TD
-    A[kubectl apply fails —<br/>webhook error] --> B[API server calls<br/>MutatingWebhook]
-    B --> C[API server calls<br/>ValidatingWebhook]
-    C --> D{Webhook pod<br/>Running?}
-    D -- No --> E[Fix webhook<br/>deployment]
-    D -- Yes --> F{Cert valid?<br/>caBundle correct?}
-    F -- No --> G[Renew cert /<br/>update caBundle]
-    F -- Yes --> H{failurePolicy<br/>= Fail?}
-    H -- Yes --> I[Webhook timeout<br/>or crash --> blocks]
-    H -- Ignore --> J[Webhook skipped<br/>on failure]
-    I --> K[Check webhook<br/>service + port]
+    classDef start fill:#3498db,stroke:#2471a3,color:#fff
+    classDef check fill:#f39c12,stroke:#ba6018,color:#fff
+    classDef fix fill:#27ae60,stroke:#1e8449,color:#fff
+    classDef trap fill:#e74c3c,stroke:#c0392b,color:#fff
+
+    A["kubectl apply fails —<br/>admission webhook error"]:::start --> B["API server calls<br/>MutatingWebhook chain"]:::check
+    B --> C["API server calls<br/>ValidatingWebhook chain"]:::check
+    C --> D{"Webhook pod<br/>Running?"}:::check
+    D -- No --> E["Fix webhook<br/>deployment"]:::fix
+    D -- Yes --> F{"Cert valid?<br/>caBundle correct?"}:::check
+    F -- No --> G["Renew cert /<br/>update caBundle"]:::fix
+
+    subgraph PolicyBranch["failurePolicy decides the blast radius"]
+        F -- Yes --> H{"failurePolicy<br/>Fail or Ignore?"}:::check
+        H -- Fail --> I["Webhook timeout or crash<br/>BLOCKS every matching apply<br/>cluster-wide, including the fix"]:::trap
+        H -- Ignore --> J["Webhook silently skipped —<br/>request admitted unchecked"]:::check
+        I --> K["Check webhook<br/>Service + port + endpoints"]:::fix
+    end
 ```
 
 **Commands:**
@@ -1256,6 +1337,25 @@ kubectl exec -it <debug-pod> -- curl -k https://<webhook-svc>.<ns>.svc/validate
 
 **Prevention:** Set `failurePolicy: Ignore` on all non-critical webhooks (security webhooks can be `Fail`). Add `namespaceSelector` to exclude `kube-system` from webhook scope — prevents the webhook from blocking its own recovery. Use cert-manager to auto-rotate webhook TLS certs. Run webhook pods with PDB and 2+ replicas.
 
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="fail" class="active state-bad">failurePolicy: Fail</button>
+    <button data-toggle-opt="ignore" class="state-ok">failurePolicy: Ignore</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="fail">
+    A webhook that's down, slow, or cert-expired now blocks <strong>every</strong> matching <code>apply</code> cluster-wide — including, potentially, the fix to the webhook deployment itself if it isn't excluded via <code>namespaceSelector</code>. Correct for security-critical admission control where "fail open" is unacceptable, but it turns a webhook outage into a cluster-wide outage.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="ignore">
+    A webhook that's down is silently skipped — requests get admitted unchecked rather than rejected. Safe default for most non-critical mutating/validating webhooks (defaulting, sidecar injection, label enforcement): an outage degrades a feature instead of blocking every deploy in the cluster.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A validating webhook has <code>failurePolicy: Fail</code> and no <code>namespaceSelector</code> exclusions. Its own pod crashes. What happens next, and why can this become unrecoverable without a workaround?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Every matching <code>apply</code> across the whole cluster starts failing — including any <code>kubectl apply</code> aimed at fixing or restarting the webhook's own Deployment, if that Deployment lives in a namespace the webhook itself scopes over. Without a <code>namespaceSelector</code> excluding at least <code>kube-system</code> (or wherever the webhook runs), you can end up needing to bypass the webhook config entirely (delete/patch the <code>ValidatingWebhookConfiguration</code> via the API, since normal applies are blocked) just to redeploy the thing that's supposed to fix itself. That's exactly the scenario the prevention advice heads off with <code>namespaceSelector</code> exclusions and PDB + 2+ replicas for the webhook pods.</div>
+</div>
+
 ---
 
 ## Node Disk Pressure Evicting Pods
@@ -1264,16 +1364,28 @@ kubectl exec -it <debug-pod> -- curl -k https://<webhook-svc>.<ns>.svc/validate
 
 ```mermaid
 flowchart TD
-    A[kubectl get pods —<br/>status Evicted] --> B[kubectl describe node<br/>DiskPressure=True?]
-    B --> C{Which threshold?}
-    C -- nodefs --> D[df -h on node<br/>/ var/lib/kubelet]
-    C -- imagefs --> E[du on<br/>/var/lib/containerd]
-    D --> F{Logs filling disk?}
-    F -- Yes --> G[Fix log rotation /<br/>reduce log verbosity]
-    F -- No --> H{Large image layers?}
-    H -- Yes --> I[crictl rmi unused<br/>images]
-    H -- No --> J[Expand disk /<br/>add node storage]
-    E --> I
+    classDef start fill:#3498db,stroke:#2471a3,color:#fff
+    classDef nodefs fill:#e67e22,stroke:#ba6018,color:#fff
+    classDef imagefs fill:#8e44ad,stroke:#6c3483,color:#fff
+    classDef fix fill:#27ae60,stroke:#1e8449,color:#fff
+
+    A["Pods evicted with reason: Evicted —<br/>node shows DiskPressure=True"]:::start --> B["kubectl describe node —<br/>which filesystem tripped it?"]:::start
+    B --> C{"nodefs or<br/>imagefs threshold?"}:::start
+
+    subgraph NodefsBranch["nodefs — kubelet's own working directory"]
+        C -- nodefs --> D["df -h /var/lib/kubelet<br/>on the node"]:::nodefs
+        D --> F{"Logs filling<br/>the disk?"}:::nodefs
+        F -- Yes --> G["Fix log rotation /<br/>reduce log verbosity"]:::fix
+        F -- No --> H{"emptyDir volumes<br/>growing unbounded?"}:::nodefs
+        H -- Yes --> H2["Add sizeLimit to<br/>emptyDir specs"]:::fix
+    end
+
+    subgraph ImagefsBranch["imagefs — container image/layer storage"]
+        C -- imagefs --> E["du -sh /var/lib/containerd<br/>on the node"]:::imagefs
+        E --> I["crictl rmi --prune —<br/>remove unused image layers"]:::fix
+    end
+
+    H -- No --> J["Neither — disk is just<br/>too small: expand or add<br/>a larger node group"]:::fix
 ```
 
 **Commands:**
@@ -1311,6 +1423,19 @@ Conditions:
 
 **Prevention:** Set kubelet `--container-log-max-size=50Mi --container-log-max-files=3`. Configure image GC thresholds (`imageGCHighThresholdPercent: 80`). Alert on `node_filesystem_avail_bytes / node_filesystem_size_bytes < 0.15`. Add `sizeLimit` to all emptyDir volumes. Use instance types with ≥ 100Gi root volumes for nodes.
 
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="nodefs" class="active state-warn">nodefs pressure</button>
+    <button data-toggle-opt="imagefs" class="state-warn">imagefs pressure</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="nodefs">
+    The filesystem backing <code>/var/lib/kubelet</code> — container logs, emptyDir volumes, and general kubelet scratch space live here. Usually caused by unbounded log growth or an emptyDir volume with no <code>sizeLimit</code>. <code>crictl rmi</code> won't help this one; it's not an image problem.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="imagefs">
+    The filesystem backing <code>/var/lib/containerd</code> (or Docker's equivalent) — pulled image layers accumulate here across every deploy. Usually caused by image GC thresholds set too high or too infrequent, or simply too many distinct image versions retained. <code>crictl rmi --prune</code> is the direct fix; log rotation won't touch it.
+  </div>
+</div>
+
 ---
 
 ## etcd Slow / API Server Timeout
@@ -1319,17 +1444,28 @@ Conditions:
 
 ```mermaid
 flowchart TD
-    A[kubectl commands slow<br/>or timeout] --> B[kubectl get --raw /healthz]
-    B --> C{API server<br/>healthy?}
-    C -- No --> D[Check API server pod<br/>logs + restarts]
-    C -- Yes --> E[Check etcd metrics<br/>wal_fsync_duration]
-    E --> F{fsync > 10ms?}
-    F -- Yes --> G[etcd disk I/O issue<br/>— check IOPS]
-    G --> H[Move etcd to<br/>faster SSD / gp3]
-    F -- No --> I[etcd DB size large?<br/>etcdctl endpoint status]
-    I --> J{DB > 4GB?}
-    J -- Yes --> K[etcdctl compact +<br/>etcdctl defrag]
-    J -- No --> L[Check etcd member<br/>health — split brain?]
+    classDef start fill:#3498db,stroke:#2471a3,color:#fff
+    classDef api fill:#f39c12,stroke:#ba6018,color:#fff
+    classDef disk fill:#e74c3c,stroke:#c0392b,color:#fff
+    classDef size fill:#8e44ad,stroke:#6c3483,color:#fff
+    classDef quorum fill:#7f8c8d,stroke:#616a6b,color:#fff
+    classDef fix fill:#27ae60,stroke:#1e8449,color:#fff
+
+    A["kubectl commands hang or timeout —<br/>cluster feels frozen"]:::start --> B["kubectl get --raw /healthz"]:::api
+    B --> C{"API server<br/>itself healthy?"}:::api
+    C -- No --> D["Check API server pod<br/>logs + restart count first —<br/>etcd may be innocent"]:::fix
+
+    subgraph EtcdBranch["API server is healthy — the slowness is etcd itself"]
+        C -- Yes --> E["Check etcd_disk_wal_fsync_duration<br/>(the write-ahead-log commit latency)"]:::disk
+        E --> F{"p99 fsync<br/>&gt; 10ms?"}:::disk
+        F -- Yes --> G["Disk I/O issue —<br/>check provisioned IOPS"]:::disk
+        G --> H["Move etcd to<br/>faster SSD (io2 / local NVMe)"]:::fix
+
+        F -- No --> I["etcdctl endpoint status —<br/>check DB size"]:::size
+        I --> J{"DB size approaching<br/>the 2GB default quota?"}:::size
+        J -- Yes --> K["etcdctl compact + etcdctl defrag<br/>(during a low-traffic window)"]:::fix
+        J -- No --> L["Check etcd member health —<br/>lost quorum / split brain?"]:::quorum
+    end
 ```
 
 **Commands:**
@@ -1364,6 +1500,35 @@ etcdctl defrag --endpoints=https://127.0.0.1:2379
 
 **Prevention:** Provision etcd on dedicated fast SSDs (io2 or local NVMe). Alert on `etcd_disk_wal_fsync_duration_seconds_bucket{quantile="0.99"} > 0.01` (10ms p99). Set up automated daily compaction and defrag as a CronJob. Monitor `etcd_mvcc_db_total_size_in_bytes` — alert at 1.5GB (before hitting 2GB default quota). Run etcd on at least 3 nodes for quorum.
 
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Rule the API server itself in or out first.</strong> <code>kubectl get --raw /healthz</code> — if the API server is unhealthy on its own (crashlooping, restarting), fix that before touching etcd at all. Don't assume etcd is guilty just because <code>kubectl</code> is slow; the API server is a separate hop that can be the actual bottleneck.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Check disk I/O latency before anything else in etcd.</strong> <code>wal_fsync_duration</code> p99 above 10ms is disk-bound slowness — etcd fsyncs every write to disk before acknowledging it, so a slow disk directly becomes cluster-wide write latency. This is the single most common root cause and the fastest to confirm.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. If disk I/O is fine, check DB size against the quota.</strong> <code>etcdctl endpoint status --write-out=table</code> shows current size against the default 2GB <code>--quota-backend-bytes</code>. Compaction removes old revisions; defrag reclaims the freed space on disk — you typically need both, and defrag should run in a low-traffic window since it briefly blocks that member.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. If neither disk nor size explains it, suspect quorum.</strong> A lost or flaky member forces the remaining members to spend time on leader elections and consensus retries instead of serving requests — check member health directly rather than continuing to stare at fsync and size metrics that are both already fine.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Why does this runbook recommend alerting on etcd DB size at 1.5GB rather than waiting until it actually approaches the 2GB default quota?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Once the DB hits the <code>--quota-backend-bytes</code> limit (2GB by default), etcd doesn't just slow down — it stops accepting writes entirely, and the cluster goes read-only until someone compacts and defrags it, which is a much worse incident than a proactive fix. Alerting at 1.5GB leaves headroom to schedule compaction and defrag during a low-traffic window on your own terms, instead of doing emergency surgery on a cluster that's already refusing writes. This is the same "catch it before it's an outage, not after" logic as alerting on disk usage at 15% free rather than 0%.</div>
+</div>
+
 ---
 
 ## RBAC 403 — Pod Can't Call Kubernetes API
@@ -1372,16 +1537,24 @@ etcdctl defrag --endpoints=https://127.0.0.1:2379
 
 ```mermaid
 flowchart TD
-    A[403 in app logs —<br/>k8s API call] --> B[kubectl describe pod<br/>— which SA?]
-    B --> C{Non-default SA<br/>attached?}
-    C -- No --> D[Create dedicated SA<br/>+ bind role]
-    C -- Yes --> E[kubectl get role /<br/>clusterrole exists?]
-    E --> F{Role has<br/>needed verbs?}
-    F -- No --> G[Add missing rules<br/>to Role]
-    F -- Yes --> H[RoleBinding links<br/>SA to Role?]
-    H --> I{Binding exists<br/>in right namespace?}
-    I -- No --> J[Create RoleBinding /<br/>ClusterRoleBinding]
-    I -- Yes --> K[kubectl auth can-i<br/>to verify]
+    classDef start fill:#3498db,stroke:#2471a3,color:#fff
+    classDef check fill:#f39c12,stroke:#ba6018,color:#fff
+    classDef fix fill:#27ae60,stroke:#1e8449,color:#fff
+    classDef verify fill:#8e44ad,stroke:#6c3483,color:#fff
+
+    A["403 Forbidden in app logs —<br/>a Kubernetes API call was denied"]:::start --> B["kubectl describe pod —<br/>which ServiceAccount is attached?"]:::check
+    B --> C{"Non-default SA<br/>attached?"}:::check
+    C -- No --> D["Create a dedicated SA<br/>and bind a scoped Role to it —<br/>never widen the default SA"]:::fix
+
+    subgraph RoleBranch["Dedicated SA exists — check the Role chain"]
+        C -- Yes --> E["Does the Role/ClusterRole<br/>it's bound to even exist?"]:::check
+        E --> F{"Role has the<br/>needed verbs/resources?"}:::check
+        F -- No --> G["Add missing rules<br/>to the Role"]:::fix
+        F -- Yes --> H{"RoleBinding links<br/>SA to Role?"}:::check
+        H --> I{"Binding exists in<br/>the pod's own namespace?"}:::check
+        I -- No --> J["Create RoleBinding /<br/>ClusterRoleBinding in the right ns"]:::fix
+        I -- Yes --> K["kubectl auth can-i --as=...<br/>to verify the fix actually took"]:::verify
+    end
 ```
 
 **Commands:**

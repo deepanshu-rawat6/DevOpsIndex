@@ -602,6 +602,19 @@ aws autoscaling put-warm-pool \
 - `ReuseOnScaleIn: true` — when the ASG scales in, instances go back to the warm pool instead of being terminated, so the next scale-out reuses an already-bootstrapped instance instead of a fresh cold one.
 - `max-group-prepared-capacity` — caps how many warm+live instances exist combined, so you don't over-provision cost.
 
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="stopped" class="active state-ok">Pool state: Stopped</button>
+    <button data-toggle-opt="running" class="state-warn">Pool state: Running</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="stopped">
+    <strong>Cost:</strong> cheapest option — only EBS storage is billed while an instance sits parked in the pool, zero compute charge. <strong>Speed:</strong> slightly slower to attach than <code>Running</code> since it pays an OS-resume + health-check step, but still dramatically faster than a cold launch (no AMI boot, no user-data re-run). <strong>Default choice</strong> unless the spike is so sudden that even that resume time is too slow.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="running">
+    <strong>Cost:</strong> full compute cost paid continuously for every idle warm instance — the most expensive of the two options by design. <strong>Speed:</strong> instant attach, no resume step at all. <strong>Use only</strong> when the extra spend is justified by a spike fast enough that <code>Stopped</code>'s resume window would still be too slow.
+  </div>
+</div>
+
 **When to combine predictive scaling + warm pools:** predictive scaling tells you *when* the spike is coming; warm pools remove the boot-time tax so the capacity is actually ready by the time the spike arrives, instead of still being in `Pending`/user-data execution when traffic hits.
 
 ### 4.3 Unpredictable / bursty load — dynamic (reactive) scaling done right
@@ -610,12 +623,35 @@ For traffic with no discernible pattern (flash sale referral spikes, viral conte
 
 ```mermaid
 flowchart TD
-    A["Unpredictable spike"] --> B["Target Tracking Policy<br/>(preferred default)"]
-    B --> C["ASG runs its own internal<br/>PID-like controller to hold<br/>metric at target continuously"]
-    A --> D["Step Scaling<br/>(for well-understood tiers)"]
-    D --> E["Explicit breakpoints:<br/>+2 if CPU 50-70%<br/>+5 if CPU >70%"]
-    A --> F["Combine with:<br/>Warm Pool for launch speed"]
-    A --> G["SQS queue depth /<br/>ALB RequestCountPerTarget<br/>as the scaling metric<br/>instead of CPU"]
+    classDef spike fill:#e74c3c,stroke:#c0392b,color:#fff
+    classDef targettrack fill:#27ae60,stroke:#1e8449,color:#fff
+    classDef stepscale fill:#3498db,stroke:#2471a3,color:#fff
+    classDef lever fill:#8e44ad,stroke:#6c3483,color:#fff
+    classDef caution fill:#e67e22,stroke:#ba6018,color:#fff
+
+    A["Unpredictable spike<br/>(no forecastable pattern)"]:::spike
+
+    subgraph REACTIVE["Two reactive policy types — pick per workload shape"]
+        direction TB
+        B["Target Tracking Policy<br/>(preferred default, self-tuning)"]:::targettrack
+        C["ASG runs its own internal<br/>PID-like controller to hold<br/>metric at target continuously"]:::targettrack
+        D["Step Scaling<br/>(for well-understood tiers)"]:::stepscale
+        E["Explicit breakpoints:<br/>+2 pods if CPU 50-70%<br/>+5 pods if CPU 70%+"]:::stepscale
+        B --> C
+        D --> E
+    end
+    A --> B
+    A --> D
+
+    subgraph LEVERS["Levers that make reactive scaling actually keep up"]
+        direction TB
+        F["Warm Pool<br/>removes the cold-boot tax<br/>on every scale-out"]:::lever
+        G["SQS queue depth /<br/>ALB RequestCountPerTarget<br/>as the metric instead of CPU<br/>— CPU is a lagging indicator"]:::lever
+        H["InstanceWarmup tuned accurately —<br/>too short under-scales,<br/>too long over-scales"]:::caution
+    end
+    A --> F
+    A --> G
+    A --> H
 ```
 
 **Target tracking** (recommended default — self-tuning, avoids manual threshold tuning):
@@ -657,11 +693,30 @@ aws autoscaling put-scaling-policy \
 
 **Prevention / operational guardrails common to all modes:** always set a sane `MaxSize` ceiling (predictive scaling can raise it automatically if `IncreaseMaxCapacity` is set — make sure that's intentional, not a runaway). Use mixed instance policies + Spot allocation strategies (`capacity-optimized`) to reduce the chance of `InsufficientInstanceCapacity` errors during a big scale-out. Alert on ASG activity history for `Failed` scaling activities (`describe-scaling-activities`), which silently cap your real capacity below `desired-capacity` if instance launches keep failing.
 
+<div class="quiz-card">
+  <p class="quiz-q">A target-tracking policy has <code>InstanceWarmup</code> set far shorter than the time the app actually takes to ramp up. Does this make the ASG scale out too aggressively or too little during a burst?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Too little — the opposite of what "shorter warmup" sounds like it should do. Target tracking's own internal math folds <code>InstanceWarmup</code> into how much it counts a freshly-launched instance as already contributing to the tracked metric. Set it too short, and the controller "sees" those brand-new instances as fully ramped-up capacity before they actually are, so it concludes less additional capacity is needed and under-scales relative to real demand. Set it too long, and the opposite happens — it discounts real capacity that's already contributing, and over-scales while waiting. The fix is measuring actual app startup time, not guessing in either direction.</div>
+</div>
+
 ---
 
 ## 5. Load Balancers — Reserving LCU/NLCU Capacity for Predictable and Bursty Load
 
 Full LCU/NLCU pricing math lives in [networking/load-balancers.md §11](../networking/load-balancers.md). This section is the operational angle: how to make sure you don't get throttled/degraded when load spikes, since ALB/NLB capacity isn't provisioned like an EC2 instance — it scales elastically but needs *warm-up* just like ASG instances do.
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="alb" class="active state-warn">ALB (LCU)</button>
+    <button data-toggle-opt="nlb" class="state-ok">NLB (NLCU)</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="alb">
+    <strong>Fastest-saturating dimension:</strong> new connections/sec — 1 LCU covers only 25 new connections/sec, a low ceiling that a sudden traffic jump can outrun before ALB's own internal-node auto-scaling catches up. <strong>Pre-warming:</strong> not self-service — request it via an AWS Support case ahead of a known event. <strong>Direct fix for steady load:</strong> client/CDN keep-alive so connections are reused instead of paying the new-connection cost per request.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="nlb">
+    <strong>Fastest-saturating dimension:</strong> new TLS connections/sec, but only if you terminate TLS on the NLB itself — TLS listeners get just 50 new connections/sec per NLCU vs 800 for plain TCP. Pass-through (plaintext) TCP doesn't hit this ceiling at all. <strong>Pre-warming:</strong> less often needed — NLB is closer to raw flow-based load balancing with far more elastic headroom than ALB. <strong>Direct fix:</strong> terminate TLS at the target instead of the NLB, removing the TLS dimension entirely and falling back to the much larger TCP/UDP NLCU allowance.
+  </div>
+</div>
 
 ### 5.1 ALB — pre-warming and LCU headroom
 
@@ -669,11 +724,31 @@ ALB capacity is elastic but not instantaneous — a sudden 10x traffic jump can 
 
 ```mermaid
 flowchart TD
-    A["Predictable big event<br/>(product launch, sale, migration cutover)"] --> B["Open AWS Support case:<br/>request ALB pre-warming<br/>(specify expected RPS + burst pattern)"]
-    A --> C["Alternative if no support case:<br/>ramp traffic gradually<br/>(canary/staged cutover)<br/>so ALB's own scaling keeps pace"]
-    D["Ongoing steady high load"] --> E["Track ConsumedLCUs metric<br/>vs known LCU dimension limits"]
-    E --> F["If new-connections dominate:<br/>enable client keep-alive /<br/>connection reuse to shift<br/nload off that dimension"]
-    E --> G["If rule evaluations dominate:<br/>reduce listener rule count<br/>or consolidate rules"]
+    classDef event fill:#7f8c8d,stroke:#616a6b,color:#fff
+    classDef action fill:#3498db,stroke:#2471a3,color:#fff
+    classDef ongoing fill:#8e44ad,stroke:#6c3483,color:#fff
+    classDef decision fill:#f39c12,stroke:#ba6018,color:#fff
+    classDef fix fill:#27ae60,stroke:#1e8449,color:#fff
+
+    subgraph KNOWN["Known big event, ahead of time"]
+        direction TB
+        A["Predictable big event<br/>(product launch, sale,<br/>migration cutover)"]:::event
+        B["Open AWS Support case:<br/>request ALB pre-warming<br/>(specify expected RPS + burst pattern)"]:::action
+        C["No support case available:<br/>ramp traffic gradually<br/>(canary / staged cutover)<br/>so ALB's own scaling keeps pace"]:::action
+        A --> B
+        A --> C
+    end
+
+    subgraph STEADY["Ongoing steady high load"]
+        direction TB
+        D["Track ConsumedLCUs metric<br/>vs known LCU dimension limits"]:::ongoing
+        E{"Which dimension<br/>is dominating?"}:::decision
+        F["New-connections dominate:<br/>enable client keep-alive /<br/>connection reuse to shift<br/>load off that dimension"]:::fix
+        G["Rule evaluations dominate:<br/>reduce listener rule count<br/>or consolidate rules"]:::fix
+        D --> E
+        E -->|"new conns/sec<br/>near 25 per LCU"| F
+        E -->|"rule evals/sec<br/>climbing"| G
+    end
 ```
 
 ```bash
@@ -700,6 +775,38 @@ NLB scales more transparently (it's closer to raw flow-based load balancing with
 - Set a CloudWatch alarm on `ConsumedLCUs` (ALB) / equivalent NLCU metric approaching a level you've empirically mapped to degraded p99 latency for your workload — LCUs are a *cost* metric but also a decent proxy for "is the LB itself becoming the bottleneck."
 - For known traffic events, combine ALB pre-warming with ASG warm pools + predictive scaling on the target group side — the load balancer being ready is necessary but not sufficient if the targets behind it are still cold-booting.
 - Target group health check `HealthyThresholdCount`/`Interval` should be tuned so newly launched (or warm-pool-resumed) instances are marked healthy and receive traffic as soon as they're actually ready — an overly conservative health check delays effective capacity even after ASG/warm pool have done their job.
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Know your dimension ceilings before load hits.</strong> ALB: 1 LCU = 25 new connections/sec (usually the first thing to saturate). NLB: TLS-terminated listeners get only 50 new connections/sec per NLCU vs 800 for plain TCP — a much lower ceiling that only applies if TLS is terminated on the NLB itself.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Known event ahead of time?</strong> Open an AWS Support case requesting ALB pre-warming (specify expected RPS + burst shape) — it isn't self-service. No support case available? Ramp traffic gradually via canary/staged cutover instead, so the load balancer's own auto-scaling keeps pace.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Ongoing steady load — find the dominant dimension.</strong> Watch <code>ConsumedLCUs</code> (or the NLCU equivalent) in CloudWatch and work out which dimension is actually climbing: new-connections, rule evaluations, or (NLB) TLS handshakes.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Apply the fix that matches the dominant dimension.</strong> New-connections dominant → client/CDN keep-alive so connections are reused. Rule evaluations dominant → consolidate/reduce listener rules. TLS handshakes dominant on NLB → terminate TLS at the target instead, dropping back to the much larger TCP/UDP allowance.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Confirm the fix actually helped, and guard against regressions.</strong> Alarm on <code>ConsumedLCUs</code> mapped to the LCU level you've empirically tied to degraded p99 latency — and remember the load balancer being ready is necessary but not sufficient if target group health checks are still gating traffic to newly launched instances.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">An NLB terminates TLS directly and is hit by a sudden burst of new client connections. Why does it get throttled at a much lower connection rate than the same NLB would handle for plain TCP, and what's the direct fix?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>TLS-terminated listeners on an NLB get only 50 new connections/sec per NLCU, versus 800 for plain TCP — TLS handshake overhead is what saturates that dimension first, not raw packet throughput, which is otherwise NLB's strength. The direct fix is to stop terminating TLS on the NLB and pass through TCP instead, terminating TLS at the target — this removes the TLS dimension from the equation entirely and puts the workload back on the much larger TCP/UDP NLCU allowance.</div>
+</div>
 
 ---
 
@@ -770,6 +877,12 @@ Again `ceil` — a fractional node requirement (e.g. 2.3 nodes' worth of pending
 | RollingUpdate `maxUnavailable` | capacity allowed to remove | `floor` | Never remove more than explicitly permitted |
 | Cluster Autoscaler node count | nodes to add | `ceil` | Never leave pending pods unschedulable |
 | VPA eviction decision | band check, not rounding | N/A (percentile bounds) | Avoid churn; act only outside tolerance band |
+
+<div class="quiz-card">
+  <p class="quiz-q">HPA is scaling DOWN — 4 replicas, current CPU 20%, target 70%. The raw ratio gives <code>4 × 20/70 = 1.142</code>. Why does HPA round this UP to 2 replicas instead of down to 1, even though it's shrinking the fleet?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>HPA always applies <code>ceil()</code> to the desired-replica formula, in both the scale-up AND scale-down direction — direction of travel never changes which rounding function is used. Flooring 1.142 down to 1 could under-provision: it might leave the fleet slightly short of what the metric ratio actually implies is needed, even mid-scale-down. Ceiling guarantees the computed count always covers at least the metric-implied need, at the cost of occasionally running one pod more than strictly required. It's the same "round toward more capacity, never less" bias used everywhere else in this file's autoscaling math — <code>maxSurge</code> ceils, Cluster Autoscaler's node count ceils — and <code>floor</code> is reserved exclusively for the "how much am I allowed to remove" side of an equation (<code>maxUnavailable</code>), never for "how much do I need."</div>
+</div>
 
 ---
 

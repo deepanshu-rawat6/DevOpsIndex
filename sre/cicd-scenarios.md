@@ -324,6 +324,12 @@ kubectl logs -n argocd deploy/argocd-image-updater | tail -50
 
 **Prevention:** Use image digest pinning in ArgoCD (`image: myapp@sha256:...`) — eliminates tag races. Store `imagePullSecrets` as a sealed secret or External Secrets Operator resource, not a manually-created secret. Add a registry reachability check to the CD pipeline before deploying.
 
+<div class="quiz-card">
+  <p class="quiz-q">ArgoCD shows the app as <code>Synced/Healthy</code>, and the manifest still references <code>image: myapp:v1.2.3</code> — that tag is deployed everywhere it's supposed to be. Can pods still land in <code>ImagePullBackOff</code>?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Yes — a mutable tag is a moving pointer, not a fixed reference. If <code>v1.2.3</code> gets re-pushed to point at a different digest after ArgoCD last synced, the tag ArgoCD recorded and the tag currently in the registry can disagree by the time a node actually pulls it, and the pull fails with no manifest change involved at all. ArgoCD's <code>Synced/Healthy</code> status only reflects the desired manifest matching the live object's spec — it has no way to know the tag it's pointing at silently changed underneath it. Pinning to a digest (<code>image: myapp@sha256:...</code>) removes the race entirely, since a digest can't be re-pushed to mean something else.</div>
+</div>
+
 ---
 
 ## 5. Jenkins Pipeline: Docker Build Fails in Agent
