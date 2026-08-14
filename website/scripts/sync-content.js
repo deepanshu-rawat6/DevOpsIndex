@@ -74,7 +74,7 @@ const SECTIONS = [
   },
   {
     slug: 'system-design', title: 'System Design', order: 17,
-    readOrder: ['README', 'scaling', 'cap-pacelc', 'rate-limiting', 'async-patterns', 'api-design', 'distributed-transactions'],
+    readOrder: ['README', 'scaling', 'cap-pacelc', 'rate-limiting', 'async-patterns', 'api-design', 'distributed-transactions', 'file-transfer-storage', 'realtime-chat', 'distributed-id-generation', 'geospatial-services'],
   },
   {
     slug: 'sre', title: 'SRE & Debugging', order: 18,
