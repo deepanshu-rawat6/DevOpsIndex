@@ -337,7 +337,7 @@ A 1:1 message has exactly one recipient to fan out to (times however many device
     <strong>Breaks down at:</strong> a "group" with 500,000 members turns one message send into 500,000 registry lookups and pushes — most of them to devices that are asleep, backgrounded, or simply not looking at the screen that instant. The write-side work scales with member count, and at broadcast scale that's the bottleneck, not the message volume itself.
   </div>
   <div class="toggle-panel" data-toggle-panel="broadcast">
-    <strong>Fan-out-on-read, a.k.a. pull model, applied to chat as a hybrid.</strong> The message is written to the conversation's log exactly once — no per-member copy, no per-member push on send. Each subscriber independently tracks their own **last-read pointer** (a sequence number, per Section 5) and pulls everything newer than that pointer when they actually open the channel or reconnect. Write cost is now O(1) regardless of subscriber count.
+    <strong>Fan-out-on-read, a.k.a. pull model, applied to chat as a hybrid.</strong> The message is written to the conversation's log exactly once — no per-member copy, no per-member push on send. Each subscriber independently tracks their own <strong>last-read pointer</strong> (a sequence number, per Section 5) and pulls everything newer than that pointer when they actually open the channel or reconnect. Write cost is now O(1) regardless of subscriber count.
     <br/><br/>
     <strong>The tradeoff:</strong> there's no instant push to every subscriber the moment the message lands — a subscriber only "gets" a channel message when they check in, which is fine for a broadcast channel (nobody expects millisecond delivery from a 500K-subscriber announcement channel) but wrong for an active back-and-forth conversation, where instant delivery is the entire point.
   </div>
@@ -533,6 +533,334 @@ Trace one message through the whole thing: it lands on a gateway, gets persisted
   <p class="quiz-q">In this architecture, if the persistent message store were slow or down, would relaying messages to already-connected recipients still work?</p>
   <button class="quiz-reveal">Reveal answer</button>
   <div class="quiz-a" hidden>It shouldn't be allowed to "work" in a way that skips the store — the diagram's relay step explicitly persists every message before the relay completes, precisely so a message that reached a live recipient's screen is never only living in an in-memory pub/sub hop. If the store is down, correct behavior is to fail or queue the send, not relay first and persist later — otherwise a gateway crash right after an in-memory relay would lose the message with no durable copy anywhere, the same durability gap Section 11 calls out for offline push.</div>
+</div>
+
+---
+
+## 13. MQTT for Real-Time Messaging
+
+Everything through Section 12 assumes a custom protocol riding on top of a WebSocket: your own JSON envelope, your own registry, your own relay — the right call when you control both ends and want a general-purpose, low-latency bidirectional channel. But there's a whole class of client where a raw WebSocket plus a hand-rolled protocol is more overhead than the problem needs: a mobile app waking on patchy cellular, a battery-constrained wearable, a fleet of IoT sensors. **MQTT (Message Queuing Telemetry Transport)** is a lightweight publish/subscribe protocol built specifically for that world — constrained devices, unreliable networks, and a wire format designed to cost as few bytes as possible.
+
+### Broker-mediated pub/sub, not direct relay
+
+Section 3's WebSocket relay model is fundamentally about **finding a specific recipient**: Gateway 1 looks up exactly which gateway holds User B's live socket, then pushes directly onto that one connection. MQTT throws that lookup away entirely. Publishers and subscribers never address each other and never know the other exists — every message is **published onto a named topic** on the broker, and every client currently subscribed to that topic (or a matching wildcard, like `chat/+/typing`) gets a copy. The broker is the only party either side ever talks to.
+
+```mermaid
+graph TD
+    classDef pub fill:#3498db,stroke:#2471a3,color:#fff,rx:6
+    classDef broker fill:#2c3e50,stroke:#1a252f,color:#fff,rx:6
+    classDef topic fill:#8e44ad,stroke:#6c3483,color:#fff,rx:6
+    classDef sub fill:#27ae60,stroke:#1e8449,color:#fff,rx:6
+
+    subgraph PUBLISHERS["Publishers — never address a subscriber directly"]
+        P1["Alice's phone"]:::pub
+        P2["Bob's phone"]:::pub
+    end
+
+    subgraph BROKERB["MQTT broker — the only party either side ever talks to"]
+        T1["Topic: chat/room42"]:::topic
+        T2["Topic: presence/bob, retained"]:::topic
+    end
+
+    subgraph SUBSCRIBERS["Subscribers — never know who published"]
+        S1["Carol's phone<br/>subscribed to chat/room42"]:::sub
+        S2["Carol's laptop<br/>subscribed to chat/room42"]:::sub
+        S3["Dave's phone<br/>subscribed to presence/bob"]:::sub
+    end
+
+    P1 -->|"PUBLISH chat/room42"| T1
+    P2 -->|"PUBLISH presence/bob, retained flag set"| T2
+    T1 -->|"fan-out to every subscriber"| S1
+    T1 --> S2
+    T2 -->|"fan-out"| S3
+```
+
+Compare this to Section 3's diagram: there, the relay's entire job was resolving "which gateway holds User B" before a single byte moved. Here, nobody resolves anything — the broker doesn't know or care who's publishing or how many subscribers exist; it just fans a topic out to whoever's currently listening. That's a strictly weaker addressing model (no way to reach exactly one recipient without a dedicated topic per user pair), but it's also why MQTT scales trivially at fan-out patterns like presence and broadcast (Section 8) — the broker does the fan-out work that Section 3's registry-plus-relay had to build by hand.
+
+### Quality of Service: three delivery guarantees, one protocol
+
+MQTT's QoS levels map directly onto the three tiers from [Section 4's delivery guarantees](#4-message-delivery-guarantees) — MQTT just gives each one a protocol-level number.
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="qos0" class="active state-bad">QoS 0 — at-most-once</button>
+    <button data-toggle-opt="qos1" class="state-warn">QoS 1 — at-least-once</button>
+    <button data-toggle-opt="qos2" class="state-ok">QoS 2 — exactly-once</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="qos0">
+    <strong>Fire and forget.</strong> The publisher sends the message once and moves on — no acknowledgment, no retry, no stored copy. This is Section 4's at-most-once tier: cheapest, and a dropped packet or a broker restart mid-delivery silently loses the message with nobody noticing. Fine for a stream of sensor readings where the next one is seconds away anyway; wrong for a chat message a human is waiting to see land.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="qos1">
+    <strong>Ack required, retry on timeout.</strong> The publisher keeps the message until the broker sends a <code>PUBACK</code>; no ack within the retry window means the publisher resends with the <code>DUP</code> flag set. This is Section 4's at-least-once tier exactly — it can never silently lose a message, but a <code>PUBACK</code> lost on the way back produces a real duplicate delivery. Getting to effectively-exactly-once from here needs the same fix as Section 4: a client-generated message ID and a dedup check on arrival. MQTT doesn't do that step for you.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="qos2">
+    <strong>Four-way handshake.</strong> <code>PUBLISH</code>, then <code>PUBREC</code>, then <code>PUBREL</code>, then <code>PUBCOMP</code> — the extra round trip versus QoS 1's single ack is specifically what lets the broker track "have I already completed this exact delivery" and suppress the duplicate that QoS 1 can't. Most expensive in latency and broker bookkeeping, reserved for messages where a duplicate is actively harmful (a payment confirmation, not a typing indicator).
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A chat app publishes messages at QoS 1 to avoid silent loss. A user reports seeing the same message twice after a spotty connection. Is that a bug in MQTT?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — that's QoS 1 behaving exactly as specified. QoS 1 is at-least-once: if the PUBACK is lost even though the PUBLISH actually landed, the publisher retries and the broker delivers it again. MQTT never promises QoS 1 is duplicate-free. Getting effectively-exactly-once out of it needs the same fix as Section 4's async delivery guarantees — a client-generated message ID checked against a dedup store on arrival — MQTT's QoS levels don't include that step for you.</div>
+</div>
+
+### Retained messages and Last Will and Testament
+
+Two MQTT features answer "what happened before I subscribed" and "how do we know a client vanished" without polling anything.
+
+**Retained messages.** Normally a subscriber only receives messages published *after* it subscribes — MQTT has no history playback like Section 9's per-conversation log. A **retained** publish is the one exception: the broker keeps exactly the last message published to a topic with the retained flag set, and hands it to any new subscriber immediately on subscribe, before any new traffic arrives. That's a single last-known-value cache per topic, not a log — a new subscriber gets *one* message, not everything that was ever published there.
+
+**Last Will and Testament (LWT).** When a client connects, it can register a "will" message — a topic and payload the broker promises to publish *on that client's behalf* if the connection ever drops ungracefully (TCP reset, keepalive timeout) instead of a clean `DISCONNECT`. This is a fundamentally different mechanism from Section 6's heartbeat-and-TTL presence: Section 6 is *pull*-shaped (a key silently expires, and anyone checking it later treats the absence as offline); LWT is *push*-shaped (the broker actively publishes a specific "this client went offline" message the moment it detects the drop, with nobody having to poll for it).
+
+```mermaid
+sequenceDiagram
+    participant Dev as Device
+    participant Broker as MQTT broker
+    participant Sub as Subscriber, presence/bob
+
+    Dev->>Broker: CONNECT, will topic=presence/bob, will payload=offline
+    Broker-->>Dev: CONNACK
+    Dev->>Broker: PUBLISH presence/bob, online, retained
+    Broker-->>Sub: fan out, presence/bob is online
+    Note over Dev,Broker: network drops, no clean DISCONNECT sent
+    Broker->>Broker: keepalive timeout expires, connection presumed dead
+    Broker->>Sub: PUBLISH presence/bob, offline, the registered will message
+    Note over Sub: learns Bob went offline immediately, no TTL wait required
+```
+
+Tying the two together for presence: publish "online" as a **retained** message on connect, and register "offline" as the **will** on the same connection. Every new subscriber immediately sees the current state via the retained value, and every subscriber already listening finds out the instant a device drops via the will — the retained flag covers "catch up," the will covers "notice a departure," and neither needs Section 6's polling-style TTL expiry at all.
+
+<div class="quiz-card">
+  <p class="quiz-q">A topic has had 500 messages published to it over the last hour, all with the retained flag set. A new client subscribes right now. How many of those 500 does it receive?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>One — the most recent retained message on the topic. The broker only ever keeps the latest retained publish per topic, not a history of every retained message that's been sent; each new retained publish simply overwrites the one before it. For actual message history, that's what Section 9's persisted, sequence-numbered log is for — retained messages are a last-known-value cache, not a log.</div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Section 6's presence system relies on a heartbeat and a TTL key that silently expires. Does MQTT's Last Will and Testament work the same way?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — they solve the same problem in opposite directions. Section 6 is pull-shaped: nobody actively marks a user offline, a key just stops being refreshed and anyone who checks it later finds it missing. LWT is push-shaped: the broker detects the dropped connection itself (via its own keepalive timeout) and immediately publishes the registered will message to every current subscriber, with no polling or expiry wait involved.</div>
+</div>
+
+### Why MQTT specifically suits mobile chat clients
+
+Three design choices separate MQTT from "WebSocket plus your own envelope," specifically for battery- and data-constrained clients:
+
+- **Fixed header as small as 2 bytes.** A minimal MQTT `PUBLISH` can carry a 1-byte control header plus a 1-byte remaining-length field before any actual payload — no HTTP-style headers, no JSON envelope wrapping the payload in field names. A WebSocket frame plus a hand-rolled JSON message (`{"type":"message","conversation_id":42,...}`) pays for every one of those field names on every single message; MQTT's binary framing doesn't.
+- **A keepalive tuned for the constrained side, not the server side.** The client, not the broker, picks the keepalive interval at `CONNECT` time — commonly 60–300s on mobile, far longer than a typical WebSocket ping/pong cycle — a deliberate tradeoff that trades faster dead-connection detection for fewer radio wake-ups, which is what actually drains a phone's battery on a cellular connection.
+- **Session persistence across reconnects.** The `CONNECT` packet's *clean session* flag decides what survives a disconnect: a clean session throws away all subscription state and any undelivered QoS 1/2 messages the moment the client drops, forcing a full resubscribe on reconnect. A **persistent session** (`clean session = false`) keeps the broker holding the client's subscriptions and any messages queued for it while it was offline, so a phone that drops in and out of coverage all day reconnects straight back into its existing subscriptions and picks up what it missed — much closer to Section 11's offline-push philosophy than to a WebSocket gateway that forgets a dropped client's state instantly.
+
+### MQTT encryption: TLS is not optional in production
+
+Plain MQTT on port 1883 is cleartext, full stop — the topic names, the payload, and even the username/password fields in the `CONNECT` packet (MQTT's own built-in auth mechanism) all go out on the wire exactly as typed. Anyone on the network path — a shared coffee-shop Wi-Fi, a compromised router, a man-in-the-middle — reads all of it. **MQTTS (MQTT over TLS), port 8883,** is the standard fix: the entire MQTT session, `CONNECT` packet included, rides inside a TLS tunnel the same way HTTPS wraps HTTP.
+
+The TLS handshake for MQTT looks like any other TLS handshake, with one addition common in IoT/device fleets: **mutual TLS**, where the broker also demands and validates a client certificate, authenticating the *device* itself before a single MQTT packet is exchanged — useful when "the client" is a fleet of sensors or app installs you provisioned, not a human typing a password.
+
+```mermaid
+sequenceDiagram
+    participant Dev as Device / mobile client
+    participant Broker as MQTT broker, port 8883
+
+    Dev->>Broker: TCP connect, port 8883
+    Dev->>Broker: TLS ClientHello
+    Broker-->>Dev: ServerHello, certificate chain
+    Dev->>Dev: validate broker certificate against a trusted CA
+    opt mutual TLS, common in IoT device fleets
+        Broker-->>Dev: CertificateRequest
+        Dev->>Broker: client certificate, CertificateVerify
+        Broker->>Broker: validate client certificate against a trusted device CA
+    end
+    Dev->>Broker: TLS handshake complete, encrypted tunnel established
+    Note over Dev,Broker: everything past this point is encrypted, not just the payload
+    Dev->>Broker: MQTT CONNECT, username and password, sent inside the TLS tunnel
+    Broker-->>Dev: CONNACK, accepted
+```
+
+**Username/password is layered on top of TLS, not a substitute for it.** MQTT's `CONNECT` packet has native username and password fields, but they're plain fields in the packet with no encryption of their own — sent over plain port 1883, they're exactly as readable as everything else on that connection. The fields only become a meaningful auth mechanism once TLS is already protecting the channel they travel over; the encryption comes from the transport, the authentication comes from the credentials, and skipping TLS doesn't make the credentials optional — it makes them public.
+
+---
+
+## 14. Voice/Video Calling — WebRTC, SRTP, and Call Encryption
+
+### Why calling can't reuse the message pipeline
+
+Every mechanism from Sections 1–13 — the relay, the broker, the persistent store, even MQTT's QoS retries — assumes a message can be queued, retried, or delivered a few hundred milliseconds late without anyone noticing. A voice or video call is the opposite: it's a continuous stream of latency-sensitive media where a frame that arrives 300ms late is worse than a frame that never arrives at all — there's no useful way to "retry" a dropped audio packet from a second ago into a live conversation. That rules out routing every audio/video frame through your app servers the way Section 3 routes chat messages: doubling every packet's trip (client to your server, then your server to the other client) adds a round trip of latency for every single frame, all day, for the whole call. The fix is architectural, not a delivery-guarantee tweak: get the actual media flowing **peer-to-peer** wherever possible, and use your servers only for the parts that genuinely need a rendezvous point.
+
+### WebRTC: signaling reuses what you already built, media doesn't
+
+WebRTC splits a call into two completely different jobs:
+
+- **Signaling** — negotiating *how* the call will connect: exchanging an SDP offer/answer (the codec, resolution, and format capabilities each side supports) and ICE candidates (below). Critically, **signaling is not a new transport** — it reuses the exact WebSocket gateway, connection registry, and pub/sub relay from Section 3. An SDP offer is just another payload relayed from Client A's gateway to Client B's gateway, looked up the same way a chat message is.
+- **Media** — the actual audio/video RTP stream, negotiated during signaling but carried over a completely separate path that WebRTC tries hard to make peer-to-peer, bypassing your servers for the actual audio/video bytes once the call is set up.
+
+```mermaid
+sequenceDiagram
+    participant A as Client A
+    participant GW as Signaling gateway, same infra as Section 3
+    participant B as Client B
+    participant STUN as STUN server
+
+    A->>STUN: request public IP and port, as seen from outside
+    STUN-->>A: server-reflexive candidate
+    A->>GW: send SDP offer, over the existing WebSocket
+    GW->>B: relay offer, registry lookup, same mechanism as Section 3
+    B->>STUN: request public IP and port
+    STUN-->>B: server-reflexive candidate
+    B->>GW: send SDP answer
+    GW->>A: relay answer
+    A->>GW: send ICE candidates as each is gathered
+    GW->>B: relay ICE candidates
+    B->>GW: send its own ICE candidates
+    GW->>A: relay ICE candidates
+    Note over A,B: signaling is done, both sides now try connecting directly
+    A->>B: media flows peer-to-peer once a working candidate pair is found
+```
+
+### NAT traversal: STUN, TURN, and why most clients can't just connect directly
+
+Almost every client sits behind a NAT (home router, carrier-grade NAT on mobile) that only allows outbound connections it initiated — it has no way to route an unsolicited inbound packet to a specific device behind it. Two clients on two different NATs can't simply open a socket to each other's private IP; neither address means anything from outside its own network.
+
+- **STUN (Session Traversal Utilities for NAT)** solves the easier half: a client asks a public STUN server "what does my traffic look like from outside," and the STUN server replies with the public IP and port the client's NAT mapped it to. That's enough for many NAT types to let two clients connect directly, once each has told the other its STUN-discovered address.
+- **TURN (Traversal Using Relays around NAT)** solves the case STUN can't: some NATs (symmetric NAT) or firewalls block any unsolicited inbound connection regardless of what address is used, so direct P2P never establishes. TURN is a fallback relay server that both clients connect *outbound* to (which almost never gets blocked) — the server then forwards media between them, at the cost of putting a server hop back in the path for the whole call, exactly the cost the P2P approach was trying to avoid.
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Gather candidates.</strong> Each client collects every address it might be reachable at: its local host address, a server-reflexive address from STUN, and a relay address from TURN, just in case.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Exchange candidates via signaling.</strong> Both sides send their full candidate lists over the existing WebSocket signaling channel from Section 3 — this step never touches the media path itself.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Try direct P2P first.</strong> ICE tries candidate pairs in priority order, host and server-reflexive pairs first, checking whether traffic actually flows between them.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Fall back to TURN relay if direct fails.</strong> If nothing in the P2P pairs works, typically because of a symmetric NAT or restrictive firewall, ICE falls back to the relay candidate, and media runs through the TURN server instead.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Media flowing.</strong> Whichever pair succeeded, P2P or TURN relay, is now the fixed path for the rest of the call — audio and video packets flow over it directly, with the signaling channel no longer involved.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Does a STUN server ever carry the actual audio/video packets of a call?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. STUN's only job is telling a client its own public IP and port as seen from outside its NAT — the client uses that discovered address to try a direct connection, but STUN itself never sits in the media path. TURN is the one that actually relays media, and only as a fallback once direct P2P has failed.</div>
+</div>
+
+### Group calls: mesh, SFU, or MCU
+
+One-to-one calls have exactly one peer to connect to. Group calls have to connect every participant to every other participant's media somehow, and there are three fundamentally different ways to do that.
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="mesh" class="active">Mesh</button>
+    <button data-tab="sfu">SFU</button>
+    <button data-tab="mcu">MCU</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="mesh">
+      <strong>Every participant connects directly to every other participant.</strong> No media server at all — pure peer-to-peer, N-way. Connection count grows as O(n²): a 3-person call needs 3 connections, a 6-person call needs 15, an 8-person call needs 28. Each participant also has to upload their own stream once <em>per other participant</em>, so upload bandwidth scales with group size too. Works fine for 2–4 people; falls apart well before 10.
+    </div>
+    <div class="tab-panel" data-tab-panel="sfu">
+      <strong>Selective Forwarding Unit — a server that receives each participant's stream once and forwards it to everyone else, unmodified.</strong> Each participant uploads exactly one stream (to the SFU) and downloads N-1 streams (one per other participant) — connection count and each client's upload cost stay flat regardless of group size, only download cost grows. The SFU does no transcoding or mixing, just packet forwarding, which keeps its own CPU cost low relative to an MCU. This is the architecture most modern group-calling products actually run.
+    </div>
+    <div class="tab-panel" data-tab-panel="mcu">
+      <strong>Multipoint Control Unit — a server that decodes every incoming stream, mixes them into one combined audio/video stream, and re-encodes that single stream for each participant.</strong> Clients now only ever handle one incoming stream no matter how large the call is, which massively simplifies thin or low-power clients. The cost moves entirely onto the server: decoding and re-encoding N streams per participant is CPU- and latency-heavy, and it's real transcoding, not just forwarding — by far the most expensive of the three to run at scale.
+    </div>
+  </div>
+</div>
+
+```mermaid
+graph TD
+    classDef client fill:#7f8c8d,stroke:#616a6b,color:#fff,rx:6
+    classDef sfu fill:#3498db,stroke:#2471a3,color:#fff,rx:6
+    classDef mcu fill:#e67e22,stroke:#ba6018,color:#fff,rx:6
+
+    subgraph MESH["Mesh — every client connects to every other client, O(n²) links"]
+        M1["Client A"]:::client
+        M2["Client B"]:::client
+        M3["Client C"]:::client
+        M1 --- M2
+        M2 --- M3
+        M1 --- M3
+    end
+
+    subgraph SFUD["SFU — one upload per client, server forwards to every other participant"]
+        SC1["Client A"]:::client
+        SC2["Client B"]:::client
+        SC3["Client C"]:::client
+        SRV["SFU — forward only"]:::sfu
+        SC1 --> SRV
+        SC2 --> SRV
+        SC3 --> SRV
+        SRV --> SC1
+        SRV --> SC2
+        SRV --> SC3
+    end
+
+    subgraph MCUD["MCU — server decodes, mixes, and re-encodes one combined stream"]
+        MC1["Client A"]:::client
+        MC2["Client B"]:::client
+        MC3["Client C"]:::client
+        MSRV["MCU — decode, mix, re-encode"]:::mcu
+        MC1 --> MSRV
+        MC2 --> MSRV
+        MC3 --> MSRV
+        MSRV --> MC1
+        MSRV --> MC2
+        MSRV --> MC3
+    end
+```
+
+<div class="quiz-card">
+  <p class="quiz-q">A 3-person mesh call adds a 4th participant. Does the bandwidth cost increase only for the new person joining?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — every existing participant now has to open a direct connection to the newcomer too, so each of the original 3 people's upload cost grows by one more stream. Mesh connection count is O(n²) across the whole group, not O(n) per new joiner, which is exactly why it breaks down well before a call reaches 10 or more people.</div>
+</div>
+
+### Media encryption: SRTP and the DTLS-SRTP handshake
+
+The actual audio/video payload is encrypted with **SRTP (Secure Real-time Transport Protocol)** — RTP is the base media transport format WebRTC carries audio/video in, and SRTP adds encryption and authentication to each packet. SRTP protects media **hop-by-hop**: client-to-server if you're behind a TURN relay or an SFU, client-to-client if the call stayed genuinely peer-to-peer.
+
+Getting SRTP's encryption keys onto both ends without a separate key-exchange channel is what **DTLS-SRTP** does: the two media endpoints run a DTLS (Datagram TLS — TLS's UDP-friendly sibling) handshake directly over the same media path ICE just established, and derive the SRTP keys from that handshake's resulting shared secret. No separate key-management server, no keys carried through signaling — the same UDP path that will carry the encrypted media also carries the handshake that produces its keys.
+
+```mermaid
+sequenceDiagram
+    participant A as Client A
+    participant B as Client B
+
+    Note over A,B: signaling already exchanged SDP and ICE candidates, media path is up
+    A->>B: DTLS ClientHello, over the established media path
+    B-->>A: DTLS ServerHello, self-signed certificate
+    A->>A: verify B certificate fingerprint against the one seen earlier in the SDP
+    A->>B: DTLS key exchange, finished
+    B->>A: DTLS finished
+    Note over A,B: DTLS handshake produces a shared master secret
+    A->>A: derive SRTP encryption and authentication keys from the master secret
+    B->>B: derive matching SRTP keys from the same master secret
+    Note over A,B: no separate key-management channel, SRTP keys ride entirely on the DTLS handshake
+    A->>B: encrypted audio and video, SRTP packets
+    B->>A: encrypted audio and video, SRTP packets
+```
+
+### Transport encryption is not the same claim as end-to-end encryption
+
+This is the single easiest idea to get wrong in this whole section: **"the call uses SRTP" and "the call is end-to-end encrypted" are not the same statement**, and the gap between them depends entirely on the topology from the section above. SRTP guarantees each *hop* is encrypted — but a hop is exactly what it says: client-to-SFU, then separately SFU-to-client. If the call routes through an SFU, the SFU necessarily terminates that first hop's DTLS-SRTP session to receive the packets it needs to forward — which means it holds keys capable of decrypting the media, even though its actual job is just routing packets, not watching them. "Encrypted in transit at every hop" and "no server in the path can ever see the plaintext" are different guarantees, and only the second one is what most people mean by "end-to-end encrypted."
+
+Getting the second guarantee for a group call — the approach Signal and WhatsApp use — needs an architecturally different step: **encrypting each media frame before it's handed to WebRTC's SRTP layer at all**, using the **Insertable Streams** API to apply per-frame encryption with keys only the actual participants hold. The SFU still receives and forwards packets exactly as before — it still needs the routing information SRTP-per-hop gives it — but the payload it forwards is now ciphertext it has no key for, encrypted above the layer the SFU can access rather than at the layer between hops. The SFU keeps doing its job (route packets, not decode them) without ever being *able* to see the plaintext, even though the underlying SRTP hop-by-hop encryption is still there doing its own job in parallel.
+
+<div class="quiz-card">
+  <p class="quiz-q">A group video call runs through an SFU, and every hop uses SRTP. Marketing calls this "end-to-end encrypted." Is that accurate?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Not by the usual meaning of end-to-end. SRTP encrypts each hop separately, client-to-SFU and SFU-to-client, which means the SFU has to terminate the DTLS-SRTP session on its side to forward packets at all — giving it keys capable of decrypting the media, even if it never actually inspects it. True end-to-end encryption for a group call needs an extra layer on top, like WebRTC's Insertable Streams, encrypting each frame with keys only the participants hold before it ever reaches the SFU, so the SFU only ever forwards ciphertext it has no key for. "Uses SRTP" describes hop-by-hop transport security; it doesn't by itself mean the routing server can't access the content.</div>
 </div>
 
 ---
