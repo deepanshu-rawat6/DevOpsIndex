@@ -35,7 +35,7 @@ Contributing a new guide or retrofitting an old one? [`website/COMPONENTS.md`](.
 16. Databases on K8s         → running Postgres, Kafka, Redis on GKE
 17. System Design            → scaling, CAP/PACELC, rate limiting, async patterns
 18. SRE & Debugging          → production incident runbooks, on-call tooling
-19. Coding Practice          → DSA implementations in Go (LRU cache, rate limiter, etc.)
+19. Coding Practice          → DSA implementations in Go & Python (B-trees, skip lists, LRU cache, rate limiter, etc.)
 ```
 
 ---
@@ -386,18 +386,20 @@ Running stateful databases on Kubernetes — system design, replication, failove
 
 ## 19. Coding Practice
 
-DSA implementations in Go, relevant to backend/infra engineering interviews — LRU cache, rate limiting, consistent hashing, bloom filters, and common concurrency patterns.
+DSA implementations in Go **and Python**, relevant to backend/infra engineering interviews — B-trees, skip lists, LRU cache, rate limiting, consistent hashing, bloom filters, and common concurrency patterns. Every structure ships with a heavy-visualization treatment (Mermaid diagrams, step-through walkthroughs of inserts/splits/evictions) and knowledge-check quizzes, matching the same interactive pattern used across the rest of the repo — see [Read it interactively](#read-it-interactively) below.
 
 | File | Topics | Level |
 |------|--------|-------|
 | [coding-practice/README.md](./coding-practice/README.md) | Index and interview relevance of each topic | — |
+| [coding-practice/concurrent-patterns.md](./coding-practice/concurrent-patterns.md) | Mutex vs atomic counter, bounded worker pool, channel pub/sub, debounce/throttle, goroutine/thread leak detection + fix | SDE-1/2 |
+| [coding-practice/btree.md](./coding-practice/btree.md) | B-tree vs B+tree, node-split-on-insert from scratch, linked-leaf range scans — the structure behind Postgres/MySQL default indexes | SDE-2 |
+| [coding-practice/skip-list.md](./coding-practice/skip-list.md) | Randomized-level skip list from scratch, insert/search traversal — the structure behind Redis sorted sets | SDE-2 |
 | [coding-practice/lru-cache.md](./coding-practice/lru-cache.md) | Doubly linked list + hashmap from scratch, thread-safe variant, LFU comparison, TTL-eviction variant | SDE-1/2 |
-| [coding-practice/rate-limiter-implementations.md](./coding-practice/rate-limiter-implementations.md) | Token bucket, leaky bucket, fixed window, sliding window log — full Go code + HTTP middleware wrapper | SDE-1/2 |
-| [coding-practice/consistent-hashing.md](./coding-practice/consistent-hashing.md) | Hash ring with virtual nodes, rebalancing on node add/remove, full Go implementation | SDE-2 |
+| [coding-practice/rate-limiter-implementations.md](./coding-practice/rate-limiter-implementations.md) | Token bucket, leaky bucket, fixed window, sliding window log — full code + HTTP middleware wrapper | SDE-1/2 |
+| [coding-practice/consistent-hashing.md](./coding-practice/consistent-hashing.md) | Hash ring with virtual nodes, rebalancing on node add/remove, full implementation | SDE-2 |
 | [coding-practice/bloom-filter.md](./coding-practice/bloom-filter.md) | False-positive rate math, double hashing, infra use cases (DB lookup pre-check, stream dedup) | SDE-2 |
-| [coding-practice/concurrent-patterns.md](./coding-practice/concurrent-patterns.md) | Mutex vs atomic counter, bounded worker pool, channel pub/sub, debounce/throttle, goroutine leak detection + fix | SDE-1/2 |
 
-**Read order:** README → lru-cache → rate-limiter-implementations → consistent-hashing → bloom-filter → concurrent-patterns
+**Read order:** README → concurrent-patterns → btree → skip-list → lru-cache → rate-limiter-implementations → consistent-hashing → bloom-filter
 
 ---
 
@@ -452,5 +454,5 @@ cicd/jenkins/plugin-development.md → cicd/gitops-secrets.md → cicd/argo-roll
 sre/k8s-scenarios.md (advanced) → sre/linux-debugging.md
 sre/cicd-scenarios.md → sre/iac-scenarios.md
 sre/sre-concepts.md → sre/oncall-tooling.md
-coding-practice/consistent-hashing.md → coding-practice/bloom-filter.md → coding-practice/concurrent-patterns.md
+coding-practice/btree.md → coding-practice/skip-list.md → coding-practice/consistent-hashing.md → coding-practice/bloom-filter.md → coding-practice/concurrent-patterns.md
 ```

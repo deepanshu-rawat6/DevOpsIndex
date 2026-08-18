@@ -28,10 +28,10 @@ existing — the same way it's already been applied across `databases/`,
    it's the flagship example every other guide was made to match.
 3. Confirm the target file is actually rendered by the website. Check
    `website/scripts/sync-content.js`'s `SECTIONS` array for the section slug.
-   `go/` and `coding-practice/` are **not** currently in that list — components
-   added there would be inert dead markup on GitHub (no JS engine runs them),
-   so skip this skill for files in those two directories unless the site's
-   `SECTIONS` list is extended to include them first.
+   `go/` is **not** currently in that list — components added there would be
+   inert dead markup on GitHub (no JS engine runs them), so skip this skill
+   for files in that directory unless the site's `SECTIONS` list is extended
+   to include it first. `coding-practice/` **is** in the list.
 
 ## The standard pattern
 

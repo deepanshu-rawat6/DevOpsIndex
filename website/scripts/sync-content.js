@@ -80,6 +80,10 @@ const SECTIONS = [
     slug: 'sre', title: 'SRE & Debugging', order: 18,
     readOrder: ['README', 'k8s-debugging', 'k8s-scenarios', 'linux-debugging', 'aws-scenarios', 'cicd-scenarios', 'iac-scenarios', 'sre-concepts', 'self-healing-aiops', 'db-monitoring'],
   },
+  {
+    slug: 'coding-practice', title: 'Coding Practice', order: 19,
+    readOrder: ['README', 'concurrent-patterns', 'btree', 'skip-list', 'lru-cache', 'rate-limiter-implementations', 'consistent-hashing', 'bloom-filter'],
+  },
 ];
 
 // Clean and recreate output dirs

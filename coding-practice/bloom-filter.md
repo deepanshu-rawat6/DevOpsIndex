@@ -1,19 +1,50 @@
-# Bloom Filter (Go)
+# Bloom Filter
 
 Probabilistic set-membership structure: space-efficient, no false negatives, tunable false positive rate. Answers "definitely not present" or "maybe present" — never "definitely present."
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
 
 ---
 
 ## Full Working Code
 
-```go
-package bloom
+Both implementations below use the same trick: only two independent hashes (`h1`, `h2`) are ever actually computed per item. All `k` bit positions are derived from those two via double hashing (Kirsch-Mitzenmacher) instead of writing `k` separate hash functions.
 
+```mermaid
+graph LR
+    I["item bytes, e.g. 'apple'"] --> H1["h1 = FNV-1a hash"]
+    I --> H2["h2 = FNV hash"]
+    H1 --> D0["hash_0 = h1 + 0 * h2, mod m"]
+    H2 --> D0
+    H1 --> D1["hash_1 = h1 + 1 * h2, mod m"]
+    H2 --> D1
+    H1 --> D2["hash_2 = h1 + 2 * h2, mod m"]
+    H2 --> D2
+    D0 --> B0["set bit position 1 of k"]
+    D1 --> B1["set bit position 2 of k"]
+    D2 --> B2["set bit position 3 of k"]
+```
+
+Go uses `fnv.New64a`/`fnv.New64` over a packed `[]uint64` bit array; Python uses two `hashlib` digests over a `bytearray` bit array (in production, prefer `mmh3.hash64` with two seeds — faster, still well-distributed, see the code comment below).
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="impl-go" class="active">Go</button>
+    <button data-tab="impl-py">Python</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="impl-go">
+<pre><code class="language-go">
+package bloom
+&#8203;
 import (
 	"hash/fnv"
 	"math"
 )
-
+&#8203;
 // Filter is a Bloom filter backed by a bit array and k independent hash
 // functions (simulated via double hashing from two base hashes).
 type Filter struct {
@@ -21,34 +52,34 @@ type Filter struct {
 	m    uint     // number of bits
 	k    uint     // number of hash functions
 }
-
+&#8203;
 // NewFilter creates a Bloom filter sized for n expected elements at the
 // given target false positive rate p (e.g. 0.01 for 1%).
 func NewFilter(n uint, p float64) *Filter {
 	m := optimalM(n, p)
 	k := optimalK(m, n)
-	return &Filter{
+	return &amp;Filter{
 		bits: make([]uint64, (m+63)/64), // round up to whole words
 		m:    m,
 		k:    k,
 	}
 }
-
+&#8203;
 // optimalM computes the number of bits needed: m = -(n * ln(p)) / (ln(2)^2)
 func optimalM(n uint, p float64) uint {
 	m := -1 * float64(n) * math.Log(p) / (math.Ln2 * math.Ln2)
 	return uint(math.Ceil(m))
 }
-
+&#8203;
 // optimalK computes the ideal number of hash functions: k = (m/n) * ln(2)
 func optimalK(m, n uint) uint {
 	k := (float64(m) / float64(n)) * math.Ln2
-	if k < 1 {
+	if k &lt; 1 {
 		return 1
 	}
 	return uint(math.Round(k))
 }
-
+&#8203;
 // hashes returns two independent base hashes of data. All k hash functions
 // are derived from these two via double hashing (Kirsch-Mitzenmacher),
 // avoiding the need for k separate hash implementations.
@@ -56,29 +87,29 @@ func hashes(data []byte) (uint64, uint64) {
 	h1 := fnv.New64a()
 	h1.Write(data)
 	sum1 := h1.Sum64()
-
+&#8203;
 	h2 := fnv.New64()
 	h2.Write(data)
 	sum2 := h2.Sum64()
-
+&#8203;
 	return sum1, sum2
 }
-
+&#8203;
 // Add inserts an element into the filter.
 func (f *Filter) Add(data []byte) {
 	h1, h2 := hashes(data)
-	for i := uint(0); i < f.k; i++ {
+	for i := uint(0); i &lt; f.k; i++ {
 		pos := f.combine(h1, h2, i) % uint64(f.m)
 		f.setBit(pos)
 	}
 }
-
+&#8203;
 // MightContain reports whether data may be in the set. False means
 // definitely not present. True means present with probability (1 - false
 // positive rate) — it might be a false positive.
 func (f *Filter) MightContain(data []byte) bool {
 	h1, h2 := hashes(data)
-	for i := uint(0); i < f.k; i++ {
+	for i := uint(0); i &lt; f.k; i++ {
 		pos := f.combine(h1, h2, i) % uint64(f.m)
 		if !f.getBit(pos) {
 			return false
@@ -86,24 +117,24 @@ func (f *Filter) MightContain(data []byte) bool {
 	}
 	return true
 }
-
+&#8203;
 // combine implements double hashing: hash_i(x) = h1(x) + i*h2(x)
 func (f *Filter) combine(h1, h2 uint64, i uint) uint64 {
 	return h1 + uint64(i)*h2
 }
-
+&#8203;
 func (f *Filter) setBit(pos uint64) {
 	word := pos / 64
 	bit := pos % 64
-	f.bits[word] |= 1 << bit
+	f.bits[word] |= 1 &lt;&lt; bit
 }
-
+&#8203;
 func (f *Filter) getBit(pos uint64) bool {
 	word := pos / 64
 	bit := pos % 64
-	return f.bits[word]&(1<<bit) != 0
+	return f.bits[word]&amp;(1&lt;&lt;bit) != 0
 }
-
+&#8203;
 // EstimatedFalsePositiveRate returns the current theoretical false positive
 // rate given m, k, and how many elements n have actually been inserted so
 // far (tracked externally by the caller, since the filter itself doesn't
@@ -111,80 +142,249 @@ func (f *Filter) getBit(pos uint64) bool {
 func (f *Filter) EstimatedFalsePositiveRate(n uint) float64 {
 	exp := -float64(f.k) * float64(n) / float64(f.m)
 	return math.Pow(1-math.Exp(exp), float64(f.k))
-}
-```
+}</code></pre>
+    </div>
+    <div class="tab-panel" data-tab-panel="impl-py">
+<pre><code class="language-python">from __future__ import annotations
+&#8203;
+import hashlib
+import math
+&#8203;
+&#8203;
+class BloomFilter:
+    """Probabilistic set-membership structure backed by a bit array and k
+    independent hash functions (simulated via double hashing from two base
+    hashes). Space-efficient, no false negatives, tunable false positive
+    rate. `might_contain()` answers "definitely not present" (False) or
+    "maybe present" (True) -- never "definitely present."
+    """
+&#8203;
+    def __init__(self, n: int, p: float) -&gt; None:
+        """Size a filter for `n` expected elements at target false positive
+        rate `p` (e.g. 0.01 for 1%)."""
+        self.m: int = self._optimal_m(n, p)
+        self.k: int = self._optimal_k(self.m, n)
+        self.bits = bytearray((self.m + 7) // 8)  # 1 bit per slot, packed into bytes
+&#8203;
+    @staticmethod
+    def _optimal_m(n: int, p: float) -&gt; int:
+        """Number of bits needed: m = -(n * ln(p)) / (ln(2)^2)"""
+        m = -1 * n * math.log(p) / (math.log(2) ** 2)
+        return math.ceil(m)
+&#8203;
+    @staticmethod
+    def _optimal_k(m: int, n: int) -&gt; int:
+        """Ideal number of hash functions: k = (m/n) * ln(2)"""
+        k = (m / n) * math.log(2)
+        return max(1, round(k))
+&#8203;
+    @staticmethod
+    def _hashes(data: bytes) -&gt; tuple[int, int]:
+        """Two independent base hashes of `data`. All k hash functions are
+        derived from these via double hashing (Kirsch-Mitzenmacher), avoiding
+        the need for k separate hash implementations. Two different digest
+        algorithms stand in as the independent bases here to keep this
+        dependency-free -- in a production system, prefer
+        `mmh3.hash64(data, seed=0)` / `mmh3.hash64(data, seed=1)`
+        (MurmurHash3), which is faster and just as well-distributed."""
+        h1 = int.from_bytes(hashlib.md5(data, usedforsecurity=False).digest()[:8], "big")
+        h2 = int.from_bytes(hashlib.sha1(data, usedforsecurity=False).digest()[:8], "big")
+        return h1, h2
+&#8203;
+    def _combine(self, h1: int, h2: int, i: int) -&gt; int:
+        """Double hashing: hash_i(x) = h1(x) + i*h2(x)"""
+        return h1 + i * h2
+&#8203;
+    def _set_bit(self, pos: int) -&gt; None:
+        byte_index, bit_index = divmod(pos, 8)
+        self.bits[byte_index] |= 1 &lt;&lt; bit_index
+&#8203;
+    def _get_bit(self, pos: int) -&gt; bool:
+        byte_index, bit_index = divmod(pos, 8)
+        return bool(self.bits[byte_index] &amp; (1 &lt;&lt; bit_index))
+&#8203;
+    def add(self, data: bytes) -&gt; None:
+        """Insert an element into the filter."""
+        h1, h2 = self._hashes(data)
+        for i in range(self.k):
+            pos = self._combine(h1, h2, i) % self.m
+            self._set_bit(pos)
+&#8203;
+    def might_contain(self, data: bytes) -&gt; bool:
+        """Return whether `data` may be in the set. False means definitely
+        not present. True means present with probability (1 - false positive
+        rate) -- it might be a false positive."""
+        h1, h2 = self._hashes(data)
+        for i in range(self.k):
+            pos = self._combine(h1, h2, i) % self.m
+            if not self._get_bit(pos):
+                return False
+        return True
+&#8203;
+    def estimated_false_positive_rate(self, n: int) -&gt; float:
+        """Theoretical false positive rate given m, k, and how many elements
+        n have actually been inserted so far (tracked externally by the
+        caller -- the filter itself doesn't count insertions, since duplicate
+        add() calls don't increase the "true" n)."""
+        exp = -self.k * n / self.m
+        return (1 - math.exp(exp)) ** self.k</code></pre>
+    </div>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">The Go and Python implementations only ever compute two hashes (h1, h2) per item, no matter how large k is. How do they still produce k different bit positions?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Via double hashing (Kirsch-Mitzenmacher): <code>hash_i(x) = h1(x) + i*h2(x)</code>, for <code>i = 0..k-1</code>. Each of the k "virtual" hash functions is just a different linear combination of the same two base hashes, mod m &mdash; that's <code>combine()</code> in Go and <code>_combine()</code> in Python. This avoids implementing k separate hash functions while still spreading bits across the array well enough in practice.</div>
+</div>
 
 ### Test cases
 
-```go
-package bloom
+Same double-hashing behavior, same test intent, in both languages:
 
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="tests-go" class="active">Go</button>
+    <button data-tab="tests-py">Python</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="tests-go">
+<pre><code class="language-go">package bloom
+&#8203;
 import "testing"
-
+&#8203;
 func TestNoFalseNegatives(t *testing.T) {
 	f := NewFilter(1000, 0.01)
-
+&#8203;
 	inserted := []string{"apple", "banana", "cherry", "date", "elderberry"}
 	for _, s := range inserted {
 		f.Add([]byte(s))
 	}
-
+&#8203;
 	for _, s := range inserted {
 		if !f.MightContain([]byte(s)) {
 			t.Fatalf("false negative for %q — Bloom filters must never do this", s)
 		}
 	}
 }
-
+&#8203;
 func TestDefinitelyAbsent(t *testing.T) {
 	f := NewFilter(1000, 0.01)
 	f.Add([]byte("present"))
-
+&#8203;
 	// Not a guarantee for every unrelated string (false positives are
 	// possible), but a filter sized for 1000 elements at 1% FP rate with
 	// only 1 element inserted should reject almost everything.
 	falsePositives := 0
 	trials := 1000
-	for i := 0; i < trials; i++ {
-		key := []byte{byte(i), byte(i >> 8)}
+	for i := 0; i &lt; trials; i++ {
+		key := []byte{byte(i), byte(i &gt;&gt; 8)}
 		if f.MightContain(key) {
 			falsePositives++
 		}
 	}
 	// Sanity bound — should be well under the target rate given only 1
 	// real insertion, not a tight statistical assertion.
-	if falsePositives > trials/10 {
+	if falsePositives &gt; trials/10 {
 		t.Fatalf("false positive rate too high: %d/%d", falsePositives, trials)
 	}
 }
-
+&#8203;
 func TestFalsePositiveRateNearTarget(t *testing.T) {
 	n := uint(10000)
 	targetP := 0.01
 	f := NewFilter(n, targetP)
-
-	for i := uint(0); i < n; i++ {
-		f.Add([]byte{byte(i), byte(i >> 8), byte(i >> 16)})
+&#8203;
+	for i := uint(0); i &lt; n; i++ {
+		f.Add([]byte{byte(i), byte(i &gt;&gt; 8), byte(i &gt;&gt; 16)})
 	}
-
+&#8203;
 	// Test with keys guaranteed not to have been inserted.
 	falsePositives := 0
 	trials := 10000
-	for i := 0; i < trials; i++ {
-		key := []byte{byte(i), byte(i >> 8), byte(i >> 16), 0xFF} // distinct namespace
+	for i := 0; i &lt; trials; i++ {
+		key := []byte{byte(i), byte(i &gt;&gt; 8), byte(i &gt;&gt; 16), 0xFF} // distinct namespace
 		if f.MightContain(key) {
 			falsePositives++
 		}
 	}
-
+&#8203;
 	observedRate := float64(falsePositives) / float64(trials)
 	t.Logf("observed FP rate: %.4f, target: %.4f", observedRate, targetP)
 	// Allow generous margin — this is a probabilistic structure.
-	if observedRate > targetP*3 {
+	if observedRate &gt; targetP*3 {
 		t.Fatalf("observed FP rate %.4f far exceeds target %.4f", observedRate, targetP)
 	}
-}
-```
+}</code></pre>
+    </div>
+    <div class="tab-panel" data-tab-panel="tests-py">
+<pre><code class="language-python">from bloom import BloomFilter
+&#8203;
+&#8203;
+def test_no_false_negatives():
+    f = BloomFilter(1000, 0.01)
+&#8203;
+    inserted = [b"apple", b"banana", b"cherry", b"date", b"elderberry"]
+    for item in inserted:
+        f.add(item)
+&#8203;
+    for item in inserted:
+        assert f.might_contain(item), (
+            f"false negative for {item!r} -- Bloom filters must never do this"
+        )
+&#8203;
+&#8203;
+def test_definitely_absent():
+    f = BloomFilter(1000, 0.01)
+    f.add(b"present")
+&#8203;
+    # Not a guarantee for every unrelated string (false positives are
+    # possible), but a filter sized for 1000 elements at 1% FP rate with
+    # only 1 element inserted should reject almost everything.
+    false_positives = 0
+    trials = 1000
+    for i in range(trials):
+        key = bytes([i &amp; 0xFF, (i &gt;&gt; 8) &amp; 0xFF])
+        if f.might_contain(key):
+            false_positives += 1
+    # Sanity bound -- should be well under the target rate given only 1
+    # real insertion, not a tight statistical assertion.
+    assert false_positives &lt;= trials / 10, (
+        f"false positive rate too high: {false_positives}/{trials}"
+    )
+&#8203;
+&#8203;
+def test_false_positive_rate_near_target():
+    n = 10_000
+    target_p = 0.01
+    f = BloomFilter(n, target_p)
+&#8203;
+    for i in range(n):
+        f.add(bytes([i &amp; 0xFF, (i &gt;&gt; 8) &amp; 0xFF, (i &gt;&gt; 16) &amp; 0xFF]))
+&#8203;
+    # Test with keys guaranteed not to have been inserted.
+    false_positives = 0
+    trials = 10_000
+    for i in range(trials):
+        key = bytes([i &amp; 0xFF, (i &gt;&gt; 8) &amp; 0xFF, (i &gt;&gt; 16) &amp; 0xFF, 0xFF])  # distinct namespace
+        if f.might_contain(key):
+            false_positives += 1
+&#8203;
+    observed_rate = false_positives / trials
+    print(f"observed FP rate: {observed_rate:.4f}, target: {target_p:.4f}")
+    # Allow generous margin -- this is a probabilistic structure.
+    assert observed_rate &lt;= target_p * 3, (
+        f"observed FP rate {observed_rate:.4f} far exceeds target {target_p:.4f}"
+    )</code></pre>
+    </div>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">TestNoFalseNegatives / test_no_false_negatives asserts MightContain (Go) / might_contain (Python) returns true for every inserted item. Could this test ever legitimately fail without a bug in the filter?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No &mdash; a Bloom filter must never produce a false negative by construction. Every bit an item's k hashes point to gets set at <code>Add</code>/<code>add</code> time, and standard Bloom filters never clear bits (no deletion), so those same bits are guaranteed still set when <code>MightContain</code>/<code>might_contain</code> checks them later. If this test fails, that means an actual bug (e.g., a mismatch between how <code>Add</code> and <code>MightContain</code> compute positions), not statistical bad luck.</div>
+</div>
 
 ---
 
@@ -242,7 +442,90 @@ p ≈ (1 - e^(-7*1,000,000/9,585,000))^7
   ≈ 0.00963   (≈0.96%, close to the 1% target)
 ```
 
+### Verified with Python
+
+Same three formulas, run instead of hand-computed — this removes the rounding error that accumulates across the by-hand steps above (0.96% by hand vs. the more precise figure below):
+
+```python
+import math
+
+n = 1_000_000
+p = 0.01
+
+m = math.ceil(-(n * math.log(p)) / (math.log(2) ** 2))
+k = max(1, round((m / n) * math.log(2)))
+fp = (1 - math.exp(-k * n / m)) ** k
+
+print(f"m = {m:,} bits (~{m / 8 / 1024 / 1024:.2f} MB)")
+print(f"k = {k}")
+print(f"p ~= {fp:.5f}")
+```
+
+Output:
+
+```
+m = 9,585,059 bits (~1.14 MB)
+k = 7
+p ~= 0.01004
+```
+
+Matches the hand-worked `m` and `k` (the tiny difference is just hand-rounding `m` to 9,585,000 above vs. the exact 9,585,059), and confirms `p` lands almost exactly on the 1% target once the rounding error is removed.
+
 **Compare to the naive alternative:** storing 1,000,000 actual keys (e.g., 8-byte hashes) in a hashset would take ~8 MB minimum, plus hashmap overhead (buckets, pointers) pushing it to 20-40 MB in practice. The Bloom filter does it in ~1.14 MB — roughly 20-30x less memory — at the cost of ~1% false positives and no ability to enumerate or delete elements (standard Bloom filters don't support deletion; that requires a Counting Bloom Filter variant with counters instead of bits).
+
+<div class="quiz-card">
+  <p class="quiz-q">Why can a Bloom filter produce false positives but never false negatives?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>MightContain</code>/<code>might_contain</code> only checks whether bits are set &mdash; it has no way to tell <em>which</em> item set a given bit. An item that was never inserted can still have all k of its hash positions happen to be set by other, unrelated items already in the filter &mdash; that's a false positive, and <code>p ≈ (1 - e^(-kn/m))^k</code> is exactly the probability of that overlap happening. A false negative would require a bit that a real member's own hashing set to somehow be unset later &mdash; and since bits are only ever set (never cleared, no deletion in a standard Bloom filter), that can't happen.</div>
+</div>
+
+---
+
+## Walking Through Inserts and a False Positive
+
+A concrete trace on a tiny filter makes the bit-overlap mechanism concrete. Take `m = 16` bits, `k = 3` hash positions per item, all bits starting at 0. Insert `"cat"`, `"dog"`, `"fox"`, then query `"bird"` — never inserted — and watch it come back a false positive purely because its 3 hash positions each happen to already be set by a *different* earlier item.
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Start: empty array.</strong> m=16 bits, k=3 positions per item, nothing inserted.
+      <pre><code> 0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15
+ 0  0  0  0  0  0  0  0  0  0  0  0  0  0  0  0</code></pre>
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Insert "cat".</strong> Double hashing derives 3 positions from cat's two base hashes: bits 2, 5, 9. All three flip from 0 to 1.
+      <pre><code> 0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15
+ 0  0  1  0  0  1  0  0  0  1  0  0  0  0  0  0</code></pre>
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Insert "dog".</strong> Positions 1, 5, 14. Bits 1 and 14 are new — but bit 5 was <em>already</em> set by "cat". The filter has no way to record that, and doesn't need to: it just leaves the bit at 1.
+      <pre><code> 0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15
+ 0  1  1  0  0  1  0  0  0  1  0  0  0  0  1  0</code></pre>
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Insert "fox".</strong> Positions 9, 12, 15. Bits 12 and 15 are new; bit 9 was already set by "cat" — a second silent overlap.
+      <pre><code> 0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15
+ 0  1  1  0  0  1  0  0  0  1  0  0  1  0  1  1</code></pre>
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Query "bird" (never inserted) &mdash; false positive.</strong> Bird's own hashes land on positions 1, 9, 12. Check each: bit 1 is set (by "dog"), bit 9 is set (by "cat"), bit 12 is set (by "fox"). <code>MightContain</code> only reads bit values, not who set them, so all three checks pass and it returns <strong>true</strong> — "bird" looks present even though it was never added. Three unrelated inserts each left one bit behind that, purely by coincidence, lined up with bird's own hash positions.
+      <pre><code> 0  1  2  3  4  5  6  7  8  9 10 11 12 13 14 15
+ 0  1  1  0  0  1  0  0  0  1  0  0  1  0  1  1</code></pre>
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">In the walkthrough above, querying "bird" (never inserted) returns a false positive. Why did that happen even though bird's own hash positions were computed correctly?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Because each of bird's 3 hash positions (1, 9, 12) happened to already be set &mdash; but by three different, unrelated earlier inserts (dog set bit 1, cat set bit 9, fox set bit 12), not by bird itself. <code>MightContain</code> only reads bit values, not who set them, so a real item never inserted can still pass the check purely by coincidental overlap. This gets less likely as the array gets bigger relative to the number of items (larger m/n) &mdash; exactly what <code>optimalM</code>/<code>optimalK</code> (<code>_optimal_m</code>/<code>_optimal_k</code> in Python) are tuning for.</div>
+</div>
 
 ---
 
@@ -285,6 +568,12 @@ func ProcessEvent(filter *Filter, event Event, handler func(Event)) {
 ```
 
 Used for at-least-once delivery systems where occasional duplicate suppression false positives (dropping a genuinely new event because it collided with a filter bit pattern) are acceptable, but exact deduplication via a full seen-set would be too memory-expensive at scale (e.g., billions of event IDs/day).
+
+<div class="quiz-card">
+  <p class="quiz-q">In the stream-dedup use case, what's the actual failure mode of using a Bloom filter instead of a full seen-set, and why is it considered acceptable there?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>A false positive can make <code>ProcessEvent</code> treat a genuinely new event as a duplicate and silently drop it &mdash; the same bit-overlap failure mode as everywhere else in this filter, not a crash or data corruption. It's acceptable in at-least-once systems processing billions of events/day because a small, tunable percentage of dropped-as-duplicate events is a better tradeoff than the memory cost of storing every seen event ID forever in a full set.</div>
+</div>
 
 ### 3. Other infra-relevant use cases worth mentioning in an interview
 
