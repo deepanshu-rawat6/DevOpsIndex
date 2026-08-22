@@ -2,6 +2,11 @@
 
 Prometheus stores data locally for 15 days by default. For long-term retention, global query across clusters, and high availability, you need Thanos or Mimir.
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## The Problem Prometheus Alone Can't Solve
@@ -13,6 +18,31 @@ Prometheus stores data locally for 15 days by default. For long-term retention, 
 | Prometheus HA (2 replicas scraping same targets) | Duplicate series, can't merge |
 | Downsampling for long-range queries | Raw data is slow at 1-year range |
 | Object storage cost efficiency | Local disk is expensive at scale |
+
+<div class="quiz-card">
+  <p class="quiz-q">Two Prometheus instances each run in their own isolated cluster. Can one PromQL query see data from both, with no Thanos or Mimir in front of them?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — each Prometheus is isolated, so a query across multiple clusters is exactly one of the problems Prometheus alone can't solve. That's what Thanos's Querier fan-out and Mimir's distributed query path exist to fix.</div>
+</div>
+
+---
+
+Two different answers to that problem — flip between them before going deeper into either:
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="thanos" class="active">Thanos</button>
+    <button data-tab="mimir">Mimir</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="thanos">
+      Bolts onto existing Prometheus instances via a Sidecar (or Receive) — Prometheus itself is unmodified. Lower operational complexity. Best for &lt; 5 clusters, &lt; 10M series.
+    </div>
+    <div class="tab-panel" data-tab-panel="mimir">
+      A fully distributed, horizontally scalable TSDB speaking the Prometheus remote_write and query API. Higher operational complexity, but every component scales independently and multi-tenancy is built in. Best for &gt; 5 clusters, SaaS, millions of series.
+    </div>
+  </div>
+</div>
 
 ---
 
@@ -53,6 +83,72 @@ graph TD
 | **Ruler** | Evaluates recording rules and alert rules globally (across all clusters) |
 | **Receive** (alternative) | Push-based ingestion via remote_write — no sidecar needed |
 
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="sidecar" class="active">Sidecar</button>
+    <button data-toggle-opt="receive">Receive</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="sidecar">
+    Runs next to each Prometheus, exposes StoreAPI, and uploads TSDB blocks to object storage. This is the path in the architecture diagram above — Prometheus itself stays completely unmodified.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="receive">
+    Push-based ingestion via <code>remote_write</code> — no sidecar needed. Prometheus (or anything speaking remote_write) pushes samples straight into Receive instead of Receive pulling from a Sidecar.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">You can't run a Sidecar next to a given Prometheus. What's the alternative ingestion path, and what does Ruler add on top of either one?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><strong>Receive</strong> — push-based ingestion via remote_write, no sidecar needed. <strong>Ruler</strong> is a separate component from both: it evaluates recording rules and alert rules globally, across all clusters, rather than replacing Sidecar or Receive.</div>
+</div>
+
+A single query touches every one of these pieces at once — here's one PromQL query's path through the fan-out:
+
+```mermaid
+sequenceDiagram
+    participant G as Grafana
+    participant QF as Query Frontend
+    participant Q as Querier
+    participant S as Sidecars
+    participant SG as Store Gateway
+    G->>QF: PromQL query
+    QF->>QF: split into sub-queries, check cache
+    QF->>Q: forward sub-queries
+    Q->>S: fan-out, live data
+    Q->>SG: fan-out, historical data from object storage
+    S-->>Q: recent series
+    SG-->>Q: historical series
+    Q->>Q: merge, dedupe by replica label
+    Q-->>QF: merged result
+    QF-->>G: response
+```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Grafana sends PromQL to Query Frontend.</strong> The Frontend sits in front of the Querier.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Frontend splits and caches.</strong> Long-range queries get split into parallelizable sub-queries before being forwarded to the Querier.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Querier fans out.</strong> It queries every Sidecar for live data and the Store Gateway for historical data from object storage, in parallel.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Merge and dedupe.</strong> The Querier merges the results and deduplicates HA replicas by matching the <code>replica</code> label.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Response returns.</strong> The merged result flows back through the Frontend to Grafana as one PromQL response — the caller never sees which Sidecar or Store Gateway a given series came from.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 ### Deduplication
 
 When two Prometheus replicas scrape the same targets (HA setup), both upload identical data. Thanos Querier deduplicates by matching `replica` label:
@@ -70,6 +166,12 @@ global:
 thanos query --query.replica-label=replica
 # Querier merges series with identical labels except the replica label
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">Two Prometheus replicas in an HA pair scrape the same targets and both upload blocks with identical series, differing only in their <code>replica</code> external label. How does Thanos Querier avoid double-counting them?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>By deduplicating on <code>--query.replica-label=replica</code> — it merges series that are identical on every label except <code>replica</code>, so the two copies collapse into one logical series instead of being double-counted.</div>
+</div>
 
 ### Object Storage Config
 
@@ -98,6 +200,34 @@ Thanos Compactor creates downsampled versions of old data:
 # You can also explicitly request:
 # step=5m → Thanos picks 5m downsampled if range > 40h
 ```
+
+Here's what happens to a single data point as it ages past each threshold:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. 0–40 hours: raw.</strong> Kept at the original 15s scrape resolution — no aggregation yet.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. 40h–10 days: 5-minute resolution.</strong> The Compactor aggregates it into 5-minute buckets (min/max/sum/count).
+    </div>
+    <div class="stepper-panel">
+      <strong>3. 10 days+: 1-hour resolution.</strong> The Compactor aggregates it further into 1-hour buckets — this is what keeps a 1-year range query fast instead of scanning raw 15s data end to end.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A Grafana dashboard queries a full year of data. Why doesn't Thanos have to scan a year of raw 15s-resolution samples to answer it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The Compactor already downsampled anything older than 10 days to 1-hour resolution (and 40h–10d to 5-minute resolution) — Grafana/Thanos auto-selects the coarser resolution for a range that long, so the query touches far fewer aggregated points instead of every raw sample.</div>
+</div>
 
 ---
 
@@ -153,6 +283,12 @@ curl -H "X-Scope-OrgID: team-platform" \
   "http://mimir-query-frontend:8080/prometheus/api/v1/query?query=up"
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">Two teams both push metrics to the same Mimir cluster via remote_write. What keeps their data (and queries) from mixing?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The <code>X-Scope-OrgID</code> header on both the remote_write push and the query — Mimir is multi-tenant by design, unlike Thanos which is single-tenant, so every request carries a tenant ID that keeps series fully separated.</div>
+</div>
+
 ---
 
 ## Choosing Between Them
@@ -172,6 +308,23 @@ SaaS / platform team serving many teams
 Already on Grafana Cloud
   → Grafana Mimir (hosted)
 ```
+
+The same decision, as a flowchart:
+
+```mermaid
+graph TD
+    Q{"What's the scale?"}
+    Q -->|"1-5 clusters, under 5M series, under 1yr retention"| T["Thanos: Sidecar + S3 + Store Gateway<br/>simplest to operate, reuses existing Prometheus"]
+    Q -->|"5+ clusters, 5-50M series, multi-tenant"| M1["Mimir<br/>purpose-built for scale"]
+    Q -->|"SaaS / platform team serving many teams"| M2["Mimir<br/>multi-tenancy built-in"]
+    Q -->|"already on Grafana Cloud"| M3["Grafana Mimir (hosted)"]
+```
+
+<div class="quiz-card">
+  <p class="quiz-q">A platform team is standing up metrics for many separate internal teams on one shared backend. Which system fits, and why?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Mimir — multi-tenancy is built in (a tenant per <code>X-Scope-OrgID</code>), which is exactly the SaaS/platform-team-serving-many-teams case. Thanos is single-tenant, so isolating teams on it would need separate clusters instead of one shared backend.</div>
+</div>
 
 ---
 

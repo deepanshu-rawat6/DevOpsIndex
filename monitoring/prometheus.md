@@ -1,5 +1,10 @@
 # Prometheus — Production Reference Guide
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## 1. Architecture
@@ -41,6 +46,12 @@ graph LR
 ```
 
 **Key insight:** Prometheus is a **pull-based** system. It scrapes HTTP `/metrics` endpoints on a configured interval (default 15s). This inverts the model — targets don't push; Prometheus fetches.
+
+<div class="quiz-card">
+  <p class="quiz-q">Why does Prometheus scrape targets instead of having them push metrics?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Prometheus is pull-based by design — it fetches HTTP <code>/metrics</code> endpoints on a configured interval (default 15s) rather than waiting for targets to push. This inverts the usual push model: Prometheus decides when and whether to scrape, which is what makes service discovery, scrape health (the <code>up</code> metric), and centralized interval control possible.</div>
+</div>
 
 ---
 
@@ -138,6 +149,37 @@ rpc_duration_seconds_sum              18.6
 - Use histogram when you need to aggregate; use summary when you need accurate single-instance quantiles cheaply
 - Cannot do `histogram_quantile()` on summaries
 
+Side by side, the four types at a glance:
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="pm-counter" class="active">Counter</button>
+    <button data-tab="pm-gauge">Gauge</button>
+    <button data-tab="pm-histogram">Histogram</button>
+    <button data-tab="pm-summary">Summary</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="pm-counter">
+      <strong>Monotonically increasing.</strong> Never decreases except on a process restart, which resets it to 0. Never read directly &mdash; always wrap it in <code>rate()</code> or <code>increase()</code> to get a useful per-second or total-over-window number.
+    </div>
+    <div class="tab-panel" data-tab-panel="pm-gauge">
+      <strong>Current snapshot value.</strong> Can go up or down freely (memory, goroutines, load average). Read it directly &mdash; no <code>rate()</code> needed &mdash; or use <code>delta()</code> to see how much it changed over a window.
+    </div>
+    <div class="tab-panel" data-tab-panel="pm-histogram">
+      <strong>Distribution via cumulative buckets.</strong> Each <code>le</code> bucket includes all smaller values; <code>_count</code> and <code>_sum</code> ride alongside. Buckets are stored server-side, so <code>histogram_quantile()</code> can aggregate across every instance of a service &mdash; at the cost of only an interpolated, approximate quantile.
+    </div>
+    <div class="tab-panel" data-tab-panel="pm-summary">
+      <strong>Client-side pre-computed quantiles.</strong> The quantile math happens inside the client library before the scrape ever happens, so it's cheap and exact for that one instance &mdash; but it cannot be aggregated across instances, and <code>histogram_quantile()</code> does not work on it at all.
+    </div>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">You need a fleet-wide p99 latency across every pod of a service. Would a Summary metric work for this?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Summary quantiles are computed inside the client library, per instance, and cannot be aggregated across instances — you can't average or combine already-computed quantiles from different pods into one fleet-wide number. You'd need a Histogram instead: its cumulative buckets can be summed with <code>sum by (le, ...)</code> across every instance first, then passed to <code>histogram_quantile()</code>.</div>
+</div>
+
 ---
 
 ## 3. TSDB Internals
@@ -182,6 +224,40 @@ data/
 **Compaction** merges small adjacent blocks into larger ones, applies tombstones, and removes redundant chunks. Prometheus runs compaction automatically. Default retention is 15 days; TSDB deletes blocks outside the retention window entirely.
 
 **WAL replay:** On crash, Prometheus replays the WAL to reconstruct the head block. WAL segments are 128MB by default; old segments are checkpointed and removed once the head is flushed.
+
+A sample's life, step by step:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Write.</strong> An incoming scrape sample is written to the WAL first for durability, then to an in-memory chunk in the head block.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Flush.</strong> After a 2-hour window, the head chunk is flushed to a new persistent block on disk (<code>chunks/</code>, <code>index</code>, <code>meta.json</code>, <code>tombstones</code>).
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Compaction.</strong> Prometheus automatically merges small adjacent blocks into larger ones, applying any pending tombstones and removing redundant chunks along the way.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Retention delete.</strong> Once a block falls entirely outside the retention window (default 15 days), TSDB deletes it outright.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Crash recovery (if it happens).</strong> On restart after a crash, Prometheus replays the WAL to reconstruct whatever the head block held before the process died — nothing durably written is lost.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Prometheus crashes 90 minutes after the head block last flushed. What happens to the samples written in those 90 minutes?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Nothing is lost, as long as they made it to the WAL. Every incoming sample is written to the WAL before it's written to the in-memory head chunk, so on restart Prometheus replays the WAL to reconstruct the head block exactly as it was — independent of the 2-hour flush-to-disk cadence.</div>
+</div>
 
 ---
 
@@ -410,6 +486,43 @@ graph TD
     R --> GF[Grafana / API caller]
 ```
 
+Walking through what happens to a query string before it becomes a number on a dashboard:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Parse.</strong> The raw PromQL string is parsed into an AST — the query's structure, independent of any data.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Analyze.</strong> The analyzer type-checks the AST and validates label matchers before touching storage.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Evaluate + fetch.</strong> The evaluator drives a TSDB chunk iterator to pull the raw samples the query actually needs.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Apply functions.</strong> Functions like <code>rate()</code> or <code>histogram_quantile()</code> run over the fetched samples.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Aggregate.</strong> <code>sum</code>, <code>by</code>, <code>without</code> and friends collapse series down to the requested grouping.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Result vector.</strong> The final instant or range vector is handed back to Grafana or whatever called the API.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A target stops responding to scrapes. Five minutes later, why doesn't <code>rate()</code> return a misleading negative number once the process comes back with a reset counter?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Prometheus marks a target's last sample stale after 5 &times; scrape_interval (default 5 min) of no new scrapes, and stale series are excluded from rate() and aggregations entirely rather than treated as a real value. That staleness marker lets Prometheus detect the counter reset before the new post-restart samples arrive, so rate() handles the reset correctly instead of computing a huge negative delta between the old high value and the new near-zero one.</div>
+</div>
+
 ---
 
 ## 5. Scrape Configuration
@@ -506,6 +619,51 @@ scrape_configs:
 | `labeldrop` | Remove labels matching regex from final set |
 | `labelkeep` | Remove all labels NOT matching regex |
 
+Relabel rules run **in order**, and an early `drop`/`keep` can remove a target before any later rule ever sees it. Here's the `k8s-pods` job's pipeline from the config above:
+
+```mermaid
+graph TD
+    SD["kubernetes_sd_configs discovers<br/>every pod in production/staging"] --> R1{"keep: has<br/>prometheus.io/scrape=true?"}
+    R1 -->|no| D1(["target dropped"])
+    R1 -->|yes| R2["replace: rewrite __address__<br/>to the annotation's port"]
+    R2 --> R3["copy pod name + namespace<br/>onto final series labels"]
+    R3 --> R4{"drop: phase is<br/>Terminating/Succeeded/Failed?"}
+    R4 -->|yes| D2(["target dropped"])
+    R4 -->|no| KEEP(["target scraped"])
+```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Discover.</strong> <code>kubernetes_sd_configs</code> finds every pod in the <code>production</code> and <code>staging</code> namespaces, whether or not it should actually be scraped.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. keep on the scrape annotation.</strong> Only pods with <code>prometheus.io/scrape=true</code> survive; everything else is dropped from the target list right here, before any later rule matters.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. replace __address__.</strong> The custom port from the <code>prometheus.io/port</code> annotation overwrites the scrape address, so Prometheus hits the right port instead of a default one.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Copy metadata labels.</strong> Pod name and namespace are copied from <code>__meta_kubernetes_*</code> labels onto the final <code>pod</code> and <code>namespace</code> labels the series will carry.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. drop on pod phase.</strong> Pods currently <code>Terminating</code>, <code>Succeeded</code>, or <code>Failed</code> are dropped last, so Prometheus never wastes a scrape attempt on a pod that's already gone.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">What's the difference between the <code>keep</code> and <code>drop</code> relabel actions?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>keep</code> drops every series where the regex does <em>not</em> match — it's an allowlist. <code>drop</code> drops every series where the regex <em>does</em> match — it's a denylist. In the k8s-pods job, <code>keep</code> is used to allowlist annotated pods, and <code>drop</code> is used to denylist pods in a terminal phase.</div>
+</div>
+
 ---
 
 ## 6. Recording Rules
@@ -556,6 +714,42 @@ groups:
 ```
 
 **Naming convention:** `level:metric:operation` — e.g., `job:http_requests_total:rate5m`. This is the Prometheus community standard.
+
+```mermaid
+graph LR
+    E["record + expr defined<br/>in rules/recording.yaml"] --> V["Rule Manager evaluates expr<br/>every group interval (30s here)"]
+    V --> S["result stored as a new metric,<br/>e.g. job:http_requests_total:rate5m"]
+    S --> Q["dashboards / alerts query<br/>the cheap pre-computed metric"]
+```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Define.</strong> A <code>record:</code> name and a PromQL <code>expr:</code> are declared inside a rule group.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Evaluate on interval.</strong> The Rule Manager re-runs that <code>expr</code> on every group <code>interval</code> (30s in this file's example, or the global <code>evaluation_interval</code> if unset).
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Store as a new series.</strong> Each evaluation's result is written into TSDB under the new metric name — indistinguishable from a regularly scraped metric once it's stored.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Query the cheap version.</strong> Dashboards and alert rules query <code>job:http_requests_total:rate5m</code> directly instead of re-running the expensive raw aggregation on every request.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Why does <code>job:http_requests_total:rate5m</code> follow that exact naming shape instead of a free-form name?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>It follows the Prometheus community's <code>level:metric:operation</code> convention — <code>job</code> is the aggregation level, <code>http_requests_total</code> is the base metric, and <code>rate5m</code> is the operation applied. Naming it this way makes it obvious at a glance what a recording rule's output actually represents without having to go read its expr.</div>
+</div>
 
 ---
 
@@ -686,6 +880,31 @@ sequenceDiagram
         RM->>AM: POST /alerts resolved
     end
 ```
+
+An alert's own state, flipped through:
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="pending" class="active state-warn">Pending</button>
+    <button data-toggle-opt="firing" class="state-bad">Firing</button>
+    <button data-toggle-opt="resolved" class="state-ok">Resolved</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="pending">
+    The alert <code>expr</code> just evaluated non-empty for the first time. State flips to <code>pending</code>, but nothing is sent to AlertManager yet &mdash; Prometheus is waiting out the rule's <code>for:</code> duration to confirm this isn't a one-off blip.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="firing">
+    The <code>expr</code> stayed non-empty for the entire <code>for:</code> duration. Prometheus now <code>POST</code>s the alert to AlertManager as firing, which groups, inhibits, and applies silences before deciding whether to actually notify PagerDuty or Slack.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="resolved">
+    The <code>expr</code> evaluated empty again. Prometheus posts a resolved notification so AlertManager can clear the alert instead of leaving it stuck firing.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">An alert's expr goes non-empty, then empty again 2 minutes later, on a rule with <code>for: 5m</code>. Does PagerDuty ever get paged?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. The alert only reaches <code>pending</code> state — it never accumulates a full 5 minutes of continuously non-empty expr results, so it never crosses into <code>firing</code> and nothing is ever POSTed to AlertManager. This is exactly what <code>for:</code> is for: filtering out short-lived blips before they become a page.</div>
+</div>
 
 ---
 

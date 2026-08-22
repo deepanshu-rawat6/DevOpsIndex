@@ -36,6 +36,9 @@ const currentPath = Astro.url.pathname;
   <meta name="description" content={description} />
   <title>{title} | DevOpsIndex</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <!-- VS Code-style syntax highlighting for code fences (see initSyntaxHighlighting below) -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/vs2015.min.css" />
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 </head>
 <body class="min-h-screen flex flex-col bg-slate-900 text-slate-200">
   <header class="border-b border-slate-800 px-6 py-4 flex items-center gap-4">
@@ -113,6 +116,17 @@ const currentPath = Astro.url.pathname;
         pre.replaceWith(div);
       });
       mermaid.run();
+    }
+
+    // Syntax highlighting (VS Code-like theme, loaded in <head> as a
+    // classic global script — see BaseLayout's <head> for the CDN tags).
+    // Runs after renderMermaid() so `.language-mermaid` blocks have already
+    // been swapped out for rendered SVG and never reach the highlighter.
+    declare const hljs: any;
+    function initSyntaxHighlighting() {
+      document.querySelectorAll<HTMLElement>('pre > code:not(.language-mermaid)').forEach(el => {
+        hljs.highlightElement(el);
+      });
     }
 
     // Copy button injection
@@ -230,6 +244,7 @@ const currentPath = Astro.url.pathname;
 
     function init() {
       renderMermaid();
+      initSyntaxHighlighting();
       addCopyButtons();
       initQuizzes();
       initTabGroups();

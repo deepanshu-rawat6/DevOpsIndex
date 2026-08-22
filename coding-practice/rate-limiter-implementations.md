@@ -17,6 +17,7 @@ Bucket refills continuously at `rate` tokens/sec up to `capacity`; each request 
   <div class="tab-buttons">
     <button data-tab="tb-go" class="active">Go</button>
     <button data-tab="tb-py">Python</button>
+    <button data-tab="tb-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="tb-go">
@@ -88,6 +89,49 @@ class TokenBucket:
 # async def if callers are already inside an event loop instead of threads --
 # the refill math is identical, only the mutual-exclusion primitive changes.</code></pre>
     </div>
+    <div class="tab-panel" data-tab-panel="tb-java">
+      <pre><code class="language-java">package ratelimit;
+import java.util.concurrent.locks.ReentrantLock;
+// TokenBucket allows bursts up to capacity, then throttles to the refill rate.
+// Implements Limiter (defined below in the HTTP Middleware Wrapper section)
+// explicitly -- unlike Go's implicit interface satisfaction or Python's
+// structural Protocol above, Java requires "implements" up front.
+public class TokenBucket implements Limiter {
+    private final ReentrantLock lock = new ReentrantLock();
+    private final double capacity;
+    private double tokens;
+    private final double refillRate; // tokens per second
+    private long lastRefillNanos;
+    public TokenBucket(double capacity, double refillRate) {
+        this.capacity = capacity;
+        this.tokens = capacity; // start full
+        this.refillRate = refillRate;
+        this.lastRefillNanos = System.nanoTime();
+    }
+    // allow reports whether a single request may proceed right now.
+    @Override
+    public boolean allow() {
+        lock.lock();
+        try {
+            long now = System.nanoTime();
+            double elapsed = (now - lastRefillNanos) / 1_000_000_000.0;
+            tokens = Math.min(capacity, tokens + elapsed * refillRate);
+            lastRefillNanos = now;
+            if (tokens &lt; 1) {
+                return false;
+            }
+            tokens -= 1;
+            return true;
+        } finally {
+            lock.unlock();
+        }
+    }
+}
+// Uses a ReentrantLock (java.util.concurrent.locks) as the direct analog of
+// Go's sync.Mutex / Python's threading.Lock -- refill-then-check-then-consume
+// is a compound operation needing one critical section, not a single atomic
+// counter update, so a bare AtomicLong/AtomicDouble CAS loop wouldn't suffice.</code></pre>
+    </div>
   </div>
 </div>
 
@@ -150,6 +194,118 @@ A bucket with `capacity=5`, `refill_rate=1` token/sec, starting full, hit by a b
   </div>
 </div>
 
+### Try It Yourself: Live Token Bucket
+
+Same numbers as the walkthrough above (capacity 5, refills at 1 token/sec) — except this one runs on the real clock. Click "Send request" fast to burn through the burst allowance, then watch it get throttled; leave it alone for a few seconds and watch the gauge refill on its own.
+
+<div class="structure-viz" id="bucket-live-viz">
+  <svg class="viz-canvas" viewBox="0 0 320 140"></svg>
+  <div class="viz-controls">
+    <button class="viz-btn" data-viz-action="insert">Send request</button>
+    <button class="viz-btn" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root0 = document.getElementById('bucket-live-viz');
+  const svg = root0.querySelector('.viz-canvas');
+  const status = root0.querySelector('.viz-status');
+
+  const CAPACITY = 5, REFILL_RATE = 1; // tokens/sec, matches the walkthrough above
+
+  let tokens, lastCheck, history, tickTimer;
+
+  function reset() {
+    tokens = CAPACITY;
+    lastCheck = Date.now();
+    history = [];
+  }
+
+  function refill(now) {
+    const elapsed = Math.max(0, (now - lastCheck) / 1000);
+    tokens = Math.min(CAPACITY, tokens + elapsed * REFILL_RATE);
+    lastCheck = now;
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function draw() {
+    svg.setAttribute('viewBox', '0 0 320 140');
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    const gaugeX = 20, gaugeY = 10, gaugeW = 50, gaugeH = 100;
+    svg.appendChild(el('rect', { x: gaugeX, y: gaugeY, width: gaugeW, height: gaugeH, rx: 6, class: 'viz-edge', fill: 'none' }));
+    const fillH = (tokens / CAPACITY) * gaugeH;
+    svg.appendChild(el('rect', {
+      x: gaugeX, y: gaugeY + (gaugeH - fillH), width: gaugeW, height: fillH, rx: 6,
+      class: tokens < 1 ? 'viz-node-removing' : 'viz-node',
+    }));
+    for (let i = 1; i < CAPACITY; i++) {
+      const y = gaugeY + (gaugeH / CAPACITY) * i;
+      svg.appendChild(el('line', { x1: gaugeX, y1: y, x2: gaugeX + gaugeW, y2: y, stroke: '#0f172a', 'stroke-width': 1 }));
+    }
+    const label = el('text', { x: gaugeX + gaugeW / 2, y: gaugeY + gaugeH + 16 });
+    label.textContent = tokens.toFixed(2) + ' / ' + CAPACITY;
+    svg.appendChild(label);
+
+    const histX = 100, histY = 20;
+    history.slice(-14).forEach((h, i) => {
+      const c = el('circle', { cx: histX + i * 16, cy: histY, r: 6, fill: h ? '#4ade80' : '#f87171' });
+      svg.appendChild(c);
+    });
+    const histLabel = el('text', { x: histX, y: histY + 22, class: 'viz-label-dim', 'text-anchor': 'start' });
+    histLabel.textContent = 'recent requests (green=allowed, red=rejected)';
+    svg.appendChild(histLabel);
+
+    const rateLabel = el('text', { x: 190, y: 70, 'text-anchor': 'start', class: 'viz-label-dim' });
+    rateLabel.textContent = `refills at ${REFILL_RATE} token/sec, capacity ${CAPACITY}`;
+    svg.appendChild(rateLabel);
+  }
+
+  function sendRequest() {
+    const now = Date.now();
+    refill(now);
+    let allowed;
+    if (tokens >= 1) { tokens -= 1; allowed = true; } else { allowed = false; }
+    history.push(allowed);
+    setStatus(
+      allowed
+        ? `Allowed — ${tokens.toFixed(2)} token(s) left.`
+        : `Rejected — bucket empty (${tokens.toFixed(2)} tokens), refilling at ${REFILL_RATE}/sec.`,
+      allowed ? 'ok' : 'error'
+    );
+    draw();
+  }
+
+  root0.querySelector('[data-viz-action="insert"]').addEventListener('click', sendRequest);
+
+  root0.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    reset();
+    setStatus('Reset — bucket refilled to full.', '');
+    draw();
+  });
+
+  reset();
+  setStatus(`Bucket starts full (${CAPACITY} tokens). Click "Send request" repeatedly — the first ${CAPACITY} go through immediately (the burst allowance), then it throttles to ${REFILL_RATE}/sec. Watch the gauge refill in real time even without clicking.`, '');
+  draw();
+
+  clearInterval(tickTimer);
+  tickTimer = setInterval(() => { refill(Date.now()); draw(); }, 200);
+})();
+</script>
+
 ---
 
 ## 2. Leaky Bucket
@@ -160,6 +316,7 @@ Requests join a fixed-size queue; a background process drains (processes) at a f
   <div class="tab-buttons">
     <button data-tab="lb-go" class="active">Go</button>
     <button data-tab="lb-py">Python</button>
+    <button data-tab="lb-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="lb-go">
@@ -246,6 +403,59 @@ class LeakyBucket:
         self.queue -= leaked
         self.last_leak += leaked * self.leak_rate</code></pre>
     </div>
+    <div class="tab-panel" data-tab-panel="lb-java">
+      <pre><code class="language-java">package ratelimit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
+// LeakyBucket queues requests and lets them "leak" out at a fixed rate.
+// Unlike TokenBucket, it smooths bursts rather than passing them through.
+public class LeakyBucket implements Limiter {
+    private final ReentrantLock lock = new ReentrantLock();
+    private final int capacity; // max queued requests
+    private final AtomicInteger queue = new AtomicInteger(0); // current queue depth
+    private final long leakRateNanos; // time between each leak (1 request drained)
+    private long lastLeakNanos;
+    public LeakyBucket(int capacity, long leakRateMillis) {
+        this.capacity = capacity;
+        this.leakRateNanos = leakRateMillis * 1_000_000L;
+        this.lastLeakNanos = System.nanoTime();
+    }
+    // allow reports whether the request can be queued (accepted into the bucket).
+    // It does NOT mean the request is processed immediately -- only that it was
+    // admitted to the queue for eventual draining at leakRate.
+    @Override
+    public boolean allow() {
+        lock.lock();
+        try {
+            drain(System.nanoTime());
+            if (queue.get() &gt;= capacity) {
+                return false; // queue full, reject
+            }
+            queue.incrementAndGet();
+            return true;
+        } finally {
+            lock.unlock();
+        }
+    }
+    // drain removes completed "leaks" based on elapsed time since lastLeakNanos.
+    private void drain(long now) {
+        long elapsed = now - lastLeakNanos;
+        int leaked = (int) (elapsed / leakRateNanos);
+        if (leaked &lt;= 0) {
+            return;
+        }
+        int current = queue.get();
+        if (leaked &gt; current) {
+            leaked = current;
+        }
+        queue.addAndGet(-leaked);
+        lastLeakNanos += leaked * leakRateNanos;
+    }
+}
+// queue is an AtomicInteger purely so reads outside the lock (metrics,
+// health checks) stay tear-free -- the compound drain+check+increment
+// inside allow() still runs under the ReentrantLock for correctness.</code></pre>
+    </div>
   </div>
 </div>
 
@@ -280,6 +490,7 @@ Simplest algorithm. Counts requests in discrete, non-overlapping time windows. V
   <div class="tab-buttons">
     <button data-tab="fw-go" class="active">Go</button>
     <button data-tab="fw-py">Python</button>
+    <button data-tab="fw-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="fw-go">
@@ -342,6 +553,43 @@ class FixedWindow:
             self.count += 1
             return True</code></pre>
     </div>
+    <div class="tab-panel" data-tab-panel="fw-java">
+      <pre><code class="language-java">package ratelimit;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
+// FixedWindow counts requests per discrete time window.
+public class FixedWindow implements Limiter {
+    private final ReentrantLock lock = new ReentrantLock();
+    private final int limit;
+    private final long windowSizeNanos;
+    private long windowStartNanos;
+    private final AtomicInteger count = new AtomicInteger(0);
+    public FixedWindow(int limit, long windowSizeMillis) {
+        this.limit = limit;
+        this.windowSizeNanos = windowSizeMillis * 1_000_000L;
+        this.windowStartNanos = System.nanoTime();
+    }
+    @Override
+    public boolean allow() {
+        lock.lock();
+        try {
+            long now = System.nanoTime();
+            if (now - windowStartNanos &gt;= windowSizeNanos) {
+                // New window: reset counter and boundary.
+                windowStartNanos = now;
+                count.set(0);
+            }
+            if (count.get() &gt;= limit) {
+                return false;
+            }
+            count.incrementAndGet();
+            return true;
+        } finally {
+            lock.unlock();
+        }
+    }
+}</code></pre>
+    </div>
   </div>
 </div>
 
@@ -379,6 +627,7 @@ Stores the timestamp of every accepted request; on each check, prunes timestamps
   <div class="tab-buttons">
     <button data-tab="swl-go" class="active">Go</button>
     <button data-tab="swl-py">Python</button>
+    <button data-tab="swl-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="swl-go">
@@ -457,6 +706,57 @@ class SlidingWindowLog:
         while self.timestamps and self.timestamps[0] &lt; cutoff:
             self.timestamps.popleft()</code></pre>
     </div>
+    <div class="tab-panel" data-tab-panel="swl-java">
+      <pre><code class="language-java">package ratelimit;
+import java.util.concurrent.ConcurrentLinkedDeque;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.locks.ReentrantLock;
+// SlidingWindowLog is exact (no boundary burst) but stores one timestamp
+// per request within the window -- memory scales with request volume.
+public class SlidingWindowLog implements Limiter {
+    private final ReentrantLock lock = new ReentrantLock();
+    private final int limit;
+    private final long windowSizeNanos;
+    private final ConcurrentLinkedDeque&lt;Long&gt; timestamps = new ConcurrentLinkedDeque&lt;&gt;();
+    private final AtomicInteger size = new AtomicInteger(0);
+    public SlidingWindowLog(int limit, long windowSizeMillis) {
+        this.limit = limit;
+        this.windowSizeNanos = windowSizeMillis * 1_000_000L;
+    }
+    @Override
+    public boolean allow() {
+        lock.lock();
+        try {
+            long now = System.nanoTime();
+            long cutoff = now - windowSizeNanos;
+            pruneBefore(cutoff);
+            if (size.get() &gt;= limit) {
+                return false;
+            }
+            timestamps.addLast(now);
+            size.incrementAndGet();
+            return true;
+        } finally {
+            lock.unlock();
+        }
+    }
+    // pruneBefore drops timestamps older than cutoff. Timestamps are appended
+    // in increasing order, so the surviving deque is always a suffix -- this
+    // is O(k) where k is the number of expired entries, not a full O(n) scan
+    // with allocation per call.
+    private void pruneBefore(long cutoff) {
+        Long head;
+        while ((head = timestamps.peekFirst()) != null &amp;&amp; head &lt; cutoff) {
+            timestamps.pollFirst();
+            size.decrementAndGet();
+        }
+    }
+}
+// ConcurrentLinkedDeque gives lock-free peekFirst()/pollFirst()/addLast(),
+// but the overall prune-then-check-then-append sequence still needs the
+// ReentrantLock -- otherwise two threads could both pass the size check
+// before either appends, admitting one request too many past the limit.</code></pre>
+    </div>
   </div>
 </div>
 
@@ -508,6 +808,7 @@ Any of the four implementations satisfy the same `Limiter` interface, so the mid
   <div class="tab-buttons">
     <button data-tab="mw-go" class="active">Go</button>
     <button data-tab="mw-py">Python</button>
+    <button data-tab="mw-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="mw-go">
@@ -566,6 +867,60 @@ def rate_limit_middleware(limiter: Limiter, app: Callable) -&gt; Callable:
 #           resp.headers["Retry-After"] = "1"
 #           return resp</code></pre>
     </div>
+    <div class="tab-panel" data-tab-panel="mw-java">
+      <pre><code class="language-java">// File: Limiter.java
+package ratelimit;
+// Limiter is satisfied by TokenBucket, LeakyBucket, FixedWindow, and
+// SlidingWindowLog -- any algorithm above can be plugged into RateLimitFilter.
+// Java needs an explicit "implements Limiter" on each class (see above);
+// there's no structural typing the way Go's interfaces or Python's Protocol
+// give you for free.
+public interface Limiter {
+    boolean allow();
+}
+// File: RateLimitFilter.java
+package ratelimit;
+import jakarta.servlet.Filter;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.FilterConfig;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
+import jakarta.servlet.http.HttpServletResponse;
+import java.io.IOException;
+// RateLimitFilter wraps any Limiter as a jakarta.servlet.Filter, rejecting
+// requests with 429 when the underlying Limiter denies them. In production
+// this would key limiters per-client (see PerClientFilter below) rather than
+// share one global limiter across all traffic. Uses jakarta.servlet (Jakarta
+// EE 9+ / Servlet 6.0, the namespace shipped by Tomcat 10+ and Spring Boot
+// 3+) rather than the legacy javax.servlet package -- pick whichever matches
+// your container, the doFilter logic below is identical either way.
+public class RateLimitFilter implements Filter {
+    private final Limiter limiter;
+    public RateLimitFilter(Limiter limiter) {
+        this.limiter = limiter;
+    }
+    @Override
+    public void init(FilterConfig filterConfig) {
+        // No setup needed -- limiter is already constructed.
+    }
+    @Override
+    public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain)
+            throws IOException, ServletException {
+        if (!limiter.allow()) {
+            HttpServletResponse httpResponse = (HttpServletResponse) response;
+            httpResponse.setHeader("Retry-After", "1");
+            httpResponse.sendError(429, "429 Too Many Requests"); // no SC_TOO_MANY_REQUESTS constant in the servlet API
+            return;
+        }
+        chain.doFilter(request, response);
+    }
+    @Override
+    public void destroy() {
+        // No resources to release.
+    }
+}</code></pre>
+    </div>
   </div>
 </div>
 
@@ -575,6 +930,7 @@ def rate_limit_middleware(limiter: Limiter, app: Callable) -&gt; Callable:
   <div class="tab-buttons">
     <button data-tab="pc-go" class="active">Go</button>
     <button data-tab="pc-py">Python</button>
+    <button data-tab="pc-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="pc-go">
@@ -674,6 +1030,67 @@ class PerClientMiddleware:
 # Note: limiters dict above grows unbounded as new clients appear -- a
 # production version needs an eviction policy (e.g. LRU from lru-cache.md,
 # or a TTL sweep) to bound memory under a churn of unique client keys.</code></pre>
+    </div>
+    <div class="tab-panel" data-tab-panel="pc-java">
+      <pre><code class="language-java">package ratelimit;
+import jakarta.servlet.Filter;
+import jakarta.servlet.FilterChain;
+import jakarta.servlet.FilterConfig;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.ServletRequest;
+import jakarta.servlet.ServletResponse;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Supplier;
+// PerClientFilter maintains one Limiter per client key (e.g. IP address),
+// lazily created on first request. limiterFactory lets the caller choose
+// which of the four algorithms to instantiate per client.
+public class PerClientFilter implements Filter {
+    private final Map&lt;String, Limiter&gt; limiters = new ConcurrentHashMap&lt;&gt;();
+    private final Supplier&lt;Limiter&gt; limiterFactory;
+    public PerClientFilter(Supplier&lt;Limiter&gt; limiterFactory) {
+        this.limiterFactory = limiterFactory;
+    }
+    @Override
+    public void init(FilterConfig filterConfig) {
+        // No setup needed.
+    }
+    @Override
+    public void doFilter(ServletRequest request, ServletResponse response, FilterChain chain)
+            throws IOException, ServletException {
+        String key = clientKey((HttpServletRequest) request);
+        Limiter limiter = limiters.computeIfAbsent(key, k -&gt; limiterFactory.get());
+        if (!limiter.allow()) {
+            HttpServletResponse httpResponse = (HttpServletResponse) response;
+            httpResponse.setHeader("Retry-After", "1");
+            httpResponse.sendError(429, "429 Too Many Requests"); // no SC_TOO_MANY_REQUESTS constant in the servlet API
+            return;
+        }
+        chain.doFilter(request, response);
+    }
+    @Override
+    public void destroy() {
+        // No resources to release.
+    }
+    private static String clientKey(HttpServletRequest request) {
+        return request.getRemoteAddr();
+    }
+}
+// ConcurrentHashMap.computeIfAbsent gives lock-free-on-the-common-path,
+// exactly-once-per-key construction of each client's Limiter -- the direct
+// analog of Go's mutex-guarded map lookup and Python's lock-guarded dict.get.
+// Example wiring (web.xml or Servlet 6.0 annotation-based registration):
+//   PerClientFilter filter = new PerClientFilter(
+//       () -&gt; new TokenBucket(20, 5)); // burst 20, refill 5/sec, per client
+//   FilterRegistration.Dynamic reg =
+//       servletContext.addFilter("rateLimit", filter);
+//   reg.addMappingForUrlPatterns(null, false, "/api/*");
+// Note: limiters map above grows unbounded as new clients appear -- a
+// production version needs an eviction policy (e.g. LRU from lru-cache.md,
+// or a TTL sweep) to bound memory under a churn of unique client keys.</code></pre>
     </div>
   </div>
 </div>

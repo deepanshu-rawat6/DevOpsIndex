@@ -79,6 +79,7 @@ Node, insert with node-split-on-overflow, and search — the same B+tree in Go a
   <div class="tab-buttons">
     <button data-tab="impl-go" class="active">Go</button>
     <button data-tab="impl-py">Python</button>
+    <button data-tab="impl-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="impl-go">
@@ -370,6 +371,183 @@ class BPlusTree:
             n = n.children[0]
         return h</code></pre>
     </div>
+    <div class="tab-panel" data-tab-panel="impl-java">
+      <pre><code class="language-java">import java.util.ArrayList;
+import java.util.List;
+import java.util.Optional;
+// Node is a single B+tree node. Internal nodes hold routing keys and child
+// pointers only; leaf nodes hold keys and their associated values, plus a
+// pointer to the next leaf for range scans.
+class Node&lt;K, V&gt; {
+    List&lt;K&gt; keys = new ArrayList&lt;&gt;();
+    List&lt;Node&lt;K, V&gt;&gt; children = new ArrayList&lt;&gt;(); // internal nodes only
+    List&lt;V&gt; values = new ArrayList&lt;&gt;(); // leaf nodes only, parallel to keys
+    boolean leaf;
+    Node&lt;K, V&gt; next; // leaf chain pointer, leaf nodes only
+    Node(boolean leaf) {
+        this.leaf = leaf;
+    }
+}
+// BPlusTree is an in-memory B+tree. order is the maximum number of children
+// an internal node may have (== max keys + 1); real databases size this to
+// the number of keys that fit in one disk page -- typically hundreds.
+public class BPlusTree&lt;K extends Comparable&lt;K&gt;, V&gt; {
+    // SplitResult holds the outcome of a node split: the promoted key and
+    // the new right sibling.
+    private static class SplitResult&lt;K, V&gt; {
+        final K promotedKey;
+        final Node&lt;K, V&gt; newRight;
+        SplitResult(K promotedKey, Node&lt;K, V&gt; newRight) {
+            this.promotedKey = promotedKey;
+            this.newRight = newRight;
+        }
+    }
+    Node&lt;K, V&gt; root;
+    private final int order;
+    public BPlusTree(int order) {
+        if (order &lt; 3) {
+            throw new IllegalArgumentException("order must be &gt;= 3");
+        }
+        this.order = order;
+        this.root = new Node&lt;&gt;(true);
+    }
+    private int maxKeys() {
+        return order - 1;
+    }
+    // search returns the value stored for key, or Optional.empty() if not found.
+    public Optional&lt;V&gt; search(K key) {
+        Node&lt;K, V&gt; n = root;
+        while (!n.leaf) {
+            int i = 0;
+            while (i &lt; n.keys.size() &amp;&amp; key.compareTo(n.keys.get(i)) &gt;= 0) {
+                i++;
+            }
+            n = n.children.get(i);
+        }
+        for (int i = 0; i &lt; n.keys.size(); i++) {
+            if (n.keys.get(i).equals(key)) {
+                return Optional.of(n.values.get(i));
+            }
+        }
+        return Optional.empty();
+    }
+    // insert adds or updates key/value, splitting nodes top-down as needed
+    // to keep every node within maxKeys() keys.
+    public void insert(K key, V value) {
+        SplitResult&lt;K, V&gt; result = insert(root, key, value);
+        if (result != null) {
+            Node&lt;K, V&gt; newRoot = new Node&lt;&gt;(false);
+            newRoot.keys.add(result.promotedKey);
+            newRoot.children.add(root);
+            newRoot.children.add(result.newRight);
+            root = newRoot;
+        }
+    }
+    // insert recurses to the correct leaf, inserts, and splits any node
+    // (leaf or internal) that overflows maxKeys(). It returns a promoted
+    // key and new right sibling when the current node split, or null
+    // otherwise.
+    private SplitResult&lt;K, V&gt; insert(Node&lt;K, V&gt; n, K key, V value) {
+        if (n.leaf) {
+            int i = 0;
+            while (i &lt; n.keys.size() &amp;&amp; n.keys.get(i).compareTo(key) &lt; 0) {
+                i++;
+            }
+            if (i &lt; n.keys.size() &amp;&amp; n.keys.get(i).equals(key)) {
+                n.values.set(i, value); // update existing key in place
+                return null;
+            }
+            n.keys.add(i, key);
+            n.values.add(i, value);
+            if (n.keys.size() &lt;= maxKeys()) {
+                return null;
+            }
+            return splitLeaf(n);
+        }
+        int i = 0;
+        while (i &lt; n.keys.size() &amp;&amp; key.compareTo(n.keys.get(i)) &gt;= 0) {
+            i++;
+        }
+        SplitResult&lt;K, V&gt; childSplit = insert(n.children.get(i), key, value);
+        if (childSplit == null) {
+            return null;
+        }
+        n.keys.add(i, childSplit.promotedKey);
+        n.children.add(i + 1, childSplit.newRight);
+        if (n.keys.size() &lt;= maxKeys()) {
+            return null;
+        }
+        return splitInternal(n);
+    }
+    // splitLeaf splits an overflowing leaf into two, relinks the leaf chain,
+    // and returns the first key of the new right leaf as the promoted
+    // routing key -- a copy, since the key must still live in the leaf for
+    // search() to find its value.
+    private SplitResult&lt;K, V&gt; splitLeaf(Node&lt;K, V&gt; n) {
+        int mid = n.keys.size() / 2;
+        Node&lt;K, V&gt; right = new Node&lt;&gt;(true);
+        right.keys.addAll(n.keys.subList(mid, n.keys.size()));
+        right.values.addAll(n.values.subList(mid, n.values.size()));
+        right.next = n.next;
+        n.keys = new ArrayList&lt;&gt;(n.keys.subList(0, mid));
+        n.values = new ArrayList&lt;&gt;(n.values.subList(0, mid));
+        n.next = right;
+        return new SplitResult&lt;&gt;(right.keys.get(0), right);
+    }
+    // splitInternal splits an overflowing internal node. The middle key is
+    // removed and promoted, not copied -- an internal node holds only
+    // routing keys, never a value, so there is nothing left behind worth
+    // keeping.
+    private SplitResult&lt;K, V&gt; splitInternal(Node&lt;K, V&gt; n) {
+        int mid = n.keys.size() / 2;
+        K promoted = n.keys.get(mid);
+        Node&lt;K, V&gt; right = new Node&lt;&gt;(false);
+        right.keys.addAll(n.keys.subList(mid + 1, n.keys.size()));
+        right.children.addAll(n.children.subList(mid + 1, n.children.size()));
+        n.keys = new ArrayList&lt;&gt;(n.keys.subList(0, mid));
+        n.children = new ArrayList&lt;&gt;(n.children.subList(0, mid + 1));
+        return new SplitResult&lt;&gt;(promoted, right);
+    }
+    // rangeScan returns every value with start &lt;= key &lt;= end. It descends to
+    // the leftmost qualifying leaf exactly once, then walks the linked leaf
+    // chain -- never re-entering the tree from the root. This is the entire
+    // reason B+tree leaves are linked and plain B-tree leaves aren't.
+    public List&lt;V&gt; rangeScan(K start, K end) {
+        Node&lt;K, V&gt; n = root;
+        while (!n.leaf) {
+            int i = 0;
+            while (i &lt; n.keys.size() &amp;&amp; start.compareTo(n.keys.get(i)) &gt;= 0) {
+                i++;
+            }
+            n = n.children.get(i);
+        }
+        List&lt;V&gt; result = new ArrayList&lt;&gt;();
+        while (n != null) {
+            for (int i = 0; i &lt; n.keys.size(); i++) {
+                K k = n.keys.get(i);
+                if (k.compareTo(end) &gt; 0) {
+                    return result;
+                }
+                if (k.compareTo(start) &gt;= 0) {
+                    result.add(n.values.get(i));
+                }
+            }
+            n = n.next;
+        }
+        return result;
+    }
+    // height reports the number of levels from root to leaf, inclusive.
+    public int height() {
+        Node&lt;K, V&gt; n = root;
+        int h = 1;
+        while (!n.leaf) {
+            h++;
+            n = n.children.get(0);
+        }
+        return h;
+    }
+}</code></pre>
+    </div>
   </div>
 </div>
 
@@ -379,6 +557,7 @@ class BPlusTree:
   <div class="tab-buttons">
     <button data-tab="test-go" class="active">Go</button>
     <button data-tab="test-py">Python</button>
+    <button data-tab="test-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="test-go">
@@ -501,6 +680,91 @@ def test_range_scan_no_match() -&gt; None:
         t.insert(k, k)
     assert t.range_scan(100, 200) == []</code></pre>
     </div>
+    <div class="tab-panel" data-tab-panel="test-java">
+      <pre><code class="language-java">import java.util.Arrays;
+import java.util.List;
+import java.util.Optional;
+public class BPlusTreeTest {
+    public static void main(String[] args) {
+        testSearchFoundAndMissing();
+        testUpdateExistingKey();
+        testSplitSequenceOrder4();
+        testRangeScan();
+        testRangeScanNoMatch();
+        System.out.println("All tests passed");
+    }
+    static void testSearchFoundAndMissing() {
+        BPlusTree&lt;Integer, Integer&gt; t = new BPlusTree&lt;&gt;(4);
+        int[] keys = {10, 20, 5, 6, 12, 30, 7, 17};
+        for (int k : keys) {
+            t.insert(k, k * 100);
+        }
+        for (int k : keys) {
+            Optional&lt;Integer&gt; v = t.search(k);
+            if (v.isEmpty() || v.get() != k * 100) {
+                throw new AssertionError("search(" + k + ") = " + v);
+            }
+        }
+        if (t.search(999).isPresent()) {
+            throw new AssertionError("search(999) should not be found");
+        }
+    }
+    static void testUpdateExistingKey() {
+        BPlusTree&lt;Integer, Integer&gt; t = new BPlusTree&lt;&gt;(4);
+        t.insert(1, 100);
+        t.insert(1, 999); // same key again -- must update in place, not insert a duplicate
+        Optional&lt;Integer&gt; v = t.search(1);
+        if (v.isEmpty() || v.get() != 999) {
+            throw new AssertionError("update failed: " + v);
+        }
+    }
+    // testSplitSequenceOrder4 inserts 10,20,...,100 into an order-4 tree
+    // (max 3 keys per node) -- deliberately tiny so splits happen
+    // constantly. The final shape is exactly the split-then-promote-then-
+    // split-again scenario the stepper in this file walks through by hand.
+    static void testSplitSequenceOrder4() {
+        BPlusTree&lt;Integer, Integer&gt; t = new BPlusTree&lt;&gt;(4);
+        int[] seq = {10, 20, 30, 40, 50, 60, 70, 80, 90, 100};
+        for (int k : seq) {
+            t.insert(k, k);
+        }
+        for (int k : seq) {
+            Optional&lt;Integer&gt; v = t.search(k);
+            if (v.isEmpty() || v.get() != k) {
+                throw new AssertionError("search(" + k + ") after full sequence = " + v);
+            }
+        }
+        if (t.height() &lt;= 1) {
+            throw new AssertionError("tree should have split into multiple levels");
+        }
+        if (!t.root.keys.equals(List.of(70)) || t.root.children.size() != 2) {
+            throw new AssertionError("expected root [70] with 2 children after this exact sequence, got keys="
+                    + t.root.keys + " children=" + t.root.children.size());
+        }
+    }
+    static void testRangeScan() {
+        BPlusTree&lt;Integer, Integer&gt; t = new BPlusTree&lt;&gt;(4);
+        for (int k = 1; k &lt;= 20; k++) {
+            t.insert(k, k * 10);
+        }
+        List&lt;Integer&gt; got = t.rangeScan(5, 12);
+        List&lt;Integer&gt; want = Arrays.asList(50, 60, 70, 80, 90, 100, 110, 120);
+        if (!got.equals(want)) {
+            throw new AssertionError("rangeScan(5,12) = " + got + ", want " + want);
+        }
+    }
+    static void testRangeScanNoMatch() {
+        BPlusTree&lt;Integer, Integer&gt; t = new BPlusTree&lt;&gt;(4);
+        for (int k : new int[]{1, 2, 3}) {
+            t.insert(k, k);
+        }
+        List&lt;Integer&gt; got = t.rangeScan(100, 200);
+        if (!got.isEmpty()) {
+            throw new AssertionError("expected empty, got " + got);
+        }
+    }
+}</code></pre>
+    </div>
   </div>
 </div>
 
@@ -571,6 +835,378 @@ scan := t.RangeScan(35, 85) // walks the leaf chain only -- no re-descent per ke
   <button class="quiz-reveal">Reveal answer</button>
   <div class="quiz-a" hidden>Because B+tree leaves are linked via a <code>next</code> pointer. After finding the first qualifying leaf, every subsequent key in range is just one more pointer hop along the bottom of the tree — an O(1) step per leaf — rather than a fresh O(log n) descent from the root for each key, which is what a tree without linked leaves would require.</div>
 </div>
+
+---
+
+## Try It Yourself: Live B+Tree
+
+Everything above described insert-with-split in prose and one fixed walkthrough. This is the same order-4 B+tree running live in your browser — insert, search, or delete any key and watch it reshape. It starts loaded with the same 10..100 tree from the split walkthrough above, so the starting shape should already look familiar. Deleting enough keys will trigger the borrow/merge mechanics described in [Interview Follow-Up #1](#1-what-happens-on-delete--merge-and-borrow) below — try deleting a few neighboring keys in a row and read the status line after each one.
+
+<div class="structure-viz" id="btree-live-viz">
+  <svg class="viz-canvas" viewBox="0 0 640 220"></svg>
+  <div class="viz-controls">
+    <input class="viz-input" type="number" placeholder="key" />
+    <button class="viz-btn" data-viz-action="insert">Insert</button>
+    <button class="viz-btn" data-viz-action="search">Search</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="delete">Delete</button>
+    <button class="viz-btn" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#1e3a8a"></span> key</span>
+    <span><span class="viz-swatch" style="background:#14532d"></span> just inserted</span>
+    <span><span class="viz-swatch" style="background:#78350f"></span> on the search/delete path</span>
+    <span><span class="viz-swatch" style="background:#334155;border:1px dashed #64748b"></span> dashed = leaf chain (<code>next</code> pointer)</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root0 = document.getElementById('btree-live-viz');
+  const svg = root0.querySelector('.viz-canvas');
+  const input = root0.querySelector('.viz-input');
+  const status = root0.querySelector('.viz-status');
+
+  const ORDER = 4;
+  const MAX_KEYS = ORDER - 1;
+  const MIN_KEYS = Math.ceil(ORDER / 2) - 1;
+  const CELL_W = 34, NODE_H = 30, LEVEL_GAP = 74, LEAF_GAP = 16;
+
+  let nextId = 0;
+  let root, highlightIds, highlightKeys, newKey, flashTimer;
+
+  function makeNode(leaf) {
+    return { id: nextId++, leaf, keys: [], children: [], next: null };
+  }
+
+  function loadExample() {
+    nextId = 0;
+    root = makeNode(true);
+    highlightIds = new Set();
+    highlightKeys = new Set();
+    newKey = null;
+    [10, 20, 30, 40, 50, 60, 70, 80, 90, 100].forEach(k => insert(k, true));
+  }
+
+  function splitLeaf(leaf) {
+    const mid = Math.ceil(leaf.keys.length / 2);
+    const right = makeNode(true);
+    right.keys = leaf.keys.splice(mid);
+    right.next = leaf.next;
+    leaf.next = right;
+    return { promo: right.keys[0], right };
+  }
+
+  function splitInternal(node) {
+    const mid = Math.floor(node.keys.length / 2);
+    const promo = node.keys[mid];
+    const right = makeNode(false);
+    right.keys = node.keys.splice(mid + 1);
+    right.children = node.children.splice(mid + 1);
+    node.keys.splice(mid, 1);
+    return { promo, right };
+  }
+
+  function insertRec(node, key) {
+    if (node.leaf) {
+      let i = 0;
+      while (i < node.keys.length && node.keys[i] < key) i++;
+      if (node.keys[i] === key) return { dup: true };
+      node.keys.splice(i, 0, key);
+      if (node.keys.length > MAX_KEYS) return splitLeaf(node);
+      return null;
+    }
+    let i = 0;
+    while (i < node.keys.length && key >= node.keys[i]) i++;
+    const result = insertRec(node.children[i], key);
+    if (!result || result.dup) return result;
+    node.keys.splice(i, 0, result.promo);
+    node.children.splice(i + 1, 0, result.right);
+    if (node.keys.length > MAX_KEYS) return splitInternal(node);
+    return null;
+  }
+
+  function insert(key, silent) {
+    const before = countNodes();
+    const result = insertRec(root, key);
+    if (result && result.dup) {
+      if (!silent) setStatus(`${key} is already in the tree — no change.`, 'error');
+      return;
+    }
+    let splitMsg = '';
+    if (result) {
+      const newRoot = makeNode(false);
+      newRoot.keys = [result.promo];
+      newRoot.children = [root, result.right];
+      root = newRoot;
+      splitMsg = ' — this overflowed a node, split it, and promoted a key upward (the tree may have grown a level).';
+    } else if (countNodes() > before) {
+      splitMsg = ' — this overflowed a leaf and split it, promoting a key into its parent.';
+    }
+    newKey = key;
+    if (!silent) setStatus(`Inserted ${key}${splitMsg}`, 'ok');
+  }
+
+  function countNodes() {
+    let n = 0;
+    (function walk(node) { n++; if (!node.leaf) node.children.forEach(walk); })(root);
+    return n;
+  }
+
+  function findPathToLeaf(key) {
+    const path = [];
+    let node = root;
+    while (true) {
+      path.push({ node, childIdx: null });
+      if (node.leaf) break;
+      let i = 0;
+      while (i < node.keys.length && key >= node.keys[i]) i++;
+      path[path.length - 1].childIdx = i;
+      node = node.children[i];
+    }
+    return path;
+  }
+
+  function doSearch(key) {
+    const path = findPathToLeaf(key);
+    highlightIds = new Set(path.map(p => p.node.id));
+    highlightKeys = new Set();
+    const found = path[path.length - 1].node.keys.includes(key);
+    if (found) highlightKeys.add(key);
+    setStatus(
+      found
+        ? `Found ${key} — descended ${path.length - 1} level(s) to the leaf.`
+        : `${key} not found — descended to the leaf where it would live, but it isn't there.`,
+      found ? 'ok' : 'error'
+    );
+    scheduleFlashClear();
+  }
+
+  function fixUnderflow(path, log) {
+    for (let level = path.length - 1; level >= 0; level--) {
+      const node = path[level].node;
+      const isRoot = level === 0;
+      if (isRoot) {
+        if (!node.leaf && node.keys.length === 0) {
+          root = node.children[0];
+          log.push('root emptied — tree height decreased by one level');
+        }
+        return;
+      }
+      if (node.keys.length >= MIN_KEYS) return;
+
+      const parent = path[level - 1].node;
+      const myIdx = path[level - 1].childIdx;
+      const leftSib = myIdx > 0 ? parent.children[myIdx - 1] : null;
+      const rightSib = myIdx < parent.children.length - 1 ? parent.children[myIdx + 1] : null;
+
+      if (node.leaf) {
+        if (leftSib && leftSib.keys.length > MIN_KEYS) {
+          node.keys.unshift(leftSib.keys.pop());
+          parent.keys[myIdx - 1] = node.keys[0];
+          log.push('borrowed a key from the left sibling leaf');
+          return;
+        }
+        if (rightSib && rightSib.keys.length > MIN_KEYS) {
+          node.keys.push(rightSib.keys.shift());
+          parent.keys[myIdx] = rightSib.keys[0];
+          log.push('borrowed a key from the right sibling leaf');
+          return;
+        }
+        if (leftSib) {
+          leftSib.keys = leftSib.keys.concat(node.keys);
+          leftSib.next = node.next;
+          parent.keys.splice(myIdx - 1, 1);
+          parent.children.splice(myIdx, 1);
+          log.push('merged with the left sibling leaf');
+        } else if (rightSib) {
+          node.keys = node.keys.concat(rightSib.keys);
+          node.next = rightSib.next;
+          parent.keys.splice(myIdx, 1);
+          parent.children.splice(myIdx + 1, 1);
+          log.push('merged with the right sibling leaf');
+        }
+      } else {
+        if (leftSib && leftSib.keys.length > MIN_KEYS) {
+          node.keys.unshift(parent.keys[myIdx - 1]);
+          parent.keys[myIdx - 1] = leftSib.keys.pop();
+          node.children.unshift(leftSib.children.pop());
+          log.push('rotated a key through the parent from the left sibling');
+          return;
+        }
+        if (rightSib && rightSib.keys.length > MIN_KEYS) {
+          node.keys.push(parent.keys[myIdx]);
+          parent.keys[myIdx] = rightSib.keys.shift();
+          node.children.push(rightSib.children.shift());
+          log.push('rotated a key through the parent from the right sibling');
+          return;
+        }
+        if (leftSib) {
+          leftSib.keys.push(parent.keys[myIdx - 1]);
+          leftSib.keys = leftSib.keys.concat(node.keys);
+          leftSib.children = leftSib.children.concat(node.children);
+          parent.keys.splice(myIdx - 1, 1);
+          parent.children.splice(myIdx, 1);
+          log.push('merged with a sibling at the internal level, pulling the separator down');
+        } else if (rightSib) {
+          node.keys.push(parent.keys[myIdx]);
+          node.keys = node.keys.concat(rightSib.keys);
+          node.children = node.children.concat(rightSib.children);
+          parent.keys.splice(myIdx, 1);
+          parent.children.splice(myIdx + 1, 1);
+          log.push('merged with a sibling at the internal level, pulling the separator down');
+        }
+      }
+    }
+  }
+
+  function doDelete(key) {
+    const path = findPathToLeaf(key);
+    const leaf = path[path.length - 1].node;
+    const pos = leaf.keys.indexOf(key);
+    if (pos === -1) {
+      setStatus(`${key} isn't in the tree — nothing to delete.`, 'error');
+      return;
+    }
+    leaf.keys.splice(pos, 1);
+    const log = [];
+    fixUnderflow(path, log);
+    setStatus(
+      log.length ? `Deleted ${key} — ${log.join(', then ')}.` : `Deleted ${key} — no rebalancing needed.`,
+      'ok'
+    );
+  }
+
+  function scheduleFlashClear() {
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => { highlightIds = new Set(); highlightKeys = new Set(); draw(); }, 1600);
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function layout() {
+    const positions = new Map();
+    let cursorX = 16;
+    function layoutNode(node, depth) {
+      const width = Math.max(CELL_W, node.keys.length * CELL_W);
+      if (node.leaf) {
+        const x = cursorX;
+        cursorX += width + LEAF_GAP;
+        positions.set(node.id, { x, y: depth * LEVEL_GAP + 16, width, depth });
+        return { left: x, right: x + width };
+      }
+      const ranges = node.children.map(c => layoutNode(c, depth + 1));
+      const left = ranges[0].left;
+      const right = ranges[ranges.length - 1].right;
+      const center = (left + right) / 2;
+      const x = center - width / 2;
+      positions.set(node.id, { x, y: depth * LEVEL_GAP + 16, width, depth });
+      return { left: Math.min(left, x), right: Math.max(right, x + width) };
+    }
+    layoutNode(root, 0);
+    return positions;
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function draw() {
+    const positions = layout();
+    let maxX = 0, maxDepth = 0;
+    positions.forEach(p => { maxX = Math.max(maxX, p.x + p.width); maxDepth = Math.max(maxDepth, p.depth); });
+    const vbW = Math.max(600, maxX + 16);
+    const vbH = maxDepth * LEVEL_GAP + NODE_H + 60;
+    svg.setAttribute('viewBox', `0 0 ${vbW} ${vbH}`);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    (function drawEdges(node) {
+      if (node.leaf) return;
+      const p = positions.get(node.id);
+      node.children.forEach((c, i) => {
+        const cp = positions.get(c.id);
+        const fromX = p.x + (i + 0.5) * (p.width / node.children.length);
+        svg.appendChild(el('line', {
+          x1: fromX, y1: p.y + NODE_H, x2: cp.x + cp.width / 2, y2: cp.y,
+          class: 'viz-edge' + (highlightIds.has(c.id) && highlightIds.has(node.id) ? ' viz-edge-active' : ''),
+        }));
+        drawEdges(c);
+      });
+    })(root);
+
+    (function drawLeafChain(node) {
+      if (!node.leaf) { node.children.forEach(drawLeafChain); return; }
+      if (node.next) {
+        const p = positions.get(node.id), np = positions.get(node.next.id);
+        const line = el('line', {
+          x1: p.x + p.width, y1: p.y + NODE_H + 8, x2: np.x, y2: np.y + NODE_H + 8,
+          class: 'viz-edge', 'stroke-dasharray': '3,3',
+        });
+        svg.appendChild(line);
+      }
+    })(root);
+
+    (function drawNode(node) {
+      const p = positions.get(node.id);
+      const nodeHighlighted = highlightIds.has(node.id);
+      node.keys.forEach((k, i) => {
+        const cellX = p.x + i * CELL_W;
+        let cls = 'viz-node';
+        if (newKey === k && node.leaf) cls = 'viz-node-new';
+        if (nodeHighlighted && highlightKeys.has(k)) cls = 'viz-node-highlight';
+        else if (nodeHighlighted && highlightKeys.size === 0) cls = 'viz-node-highlight';
+        svg.appendChild(el('rect', { x: cellX, y: p.y, width: CELL_W, height: NODE_H, rx: 4, class: cls }));
+        const t = el('text', { x: cellX + CELL_W / 2, y: p.y + NODE_H / 2 });
+        t.textContent = k;
+        svg.appendChild(t);
+      });
+      if (!node.leaf) node.children.forEach(drawNode);
+    })(root);
+  }
+
+  root0.querySelector('[data-viz-action="insert"]').addEventListener('click', () => {
+    const v = parseInt(input.value, 10);
+    if (isNaN(v)) { setStatus('Enter a number first.', 'error'); return; }
+    highlightIds = new Set(); highlightKeys = new Set();
+    insert(v);
+    input.value = '';
+    draw();
+    scheduleFlashClear();
+  });
+
+  root0.querySelector('[data-viz-action="search"]').addEventListener('click', () => {
+    const v = parseInt(input.value, 10);
+    if (isNaN(v)) { setStatus('Enter a number first.', 'error'); return; }
+    newKey = null;
+    doSearch(v);
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="delete"]').addEventListener('click', () => {
+    const v = parseInt(input.value, 10);
+    if (isNaN(v)) { setStatus('Enter a number first.', 'error'); return; }
+    highlightIds = new Set(); highlightKeys = new Set(); newKey = null;
+    doDelete(v);
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    loadExample();
+    setStatus('Reset to the 10..100 example tree from the walkthrough above.', '');
+    draw();
+  });
+
+  loadExample();
+  setStatus('Loaded the same 10..100 tree from the walkthrough above — try inserting, searching, or deleting a key.', '');
+  draw();
+})();
+</script>
 
 ---
 

@@ -78,6 +78,7 @@ affair with no hand-rolled binary search to get subtly wrong.
   <div class="tab-buttons">
     <button data-tab="impl-go" class="active">Go</button>
     <button data-tab="impl-py">Python</button>
+    <button data-tab="impl-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="impl-go">
@@ -241,6 +242,101 @@ class HashRing:
         with self._lock:
             return sorted(set(self._ring_map.values()))</code></pre>
     </div>
+    <div class="tab-panel" data-tab-panel="impl-java">
+      <pre><code class="language-java">import java.nio.charset.StandardCharsets;
+import java.util.ArrayList;
+import java.util.HashSet;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.TreeMap;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
+import java.util.zip.CRC32;
+/**
+ * Consistent hash ring with virtual nodes, backed by a TreeMap. A TreeMap
+ * keeps ring positions sorted by key automatically, so "find the first node
+ * clockwise from this hash" is just ceilingKey() (the built-in equivalent of
+ * Go's sort.Search / Python's bisect.bisect_left) with a wraparound to
+ * firstKey() when the hash falls past the last entry -- no hand-rolled
+ * binary search needed.
+ */
+public class HashRing {
+    private final int replicas; // virtual nodes per physical node
+    private final TreeMap&lt;Long, String&gt; ring = new TreeMap&lt;&gt;(); // ring position -&gt; physical node ID
+    private final ReentrantReadWriteLock lock = new ReentrantReadWriteLock();
+    /**
+     * Creates a ring with the given number of virtual nodes (replicas) per
+     * physical node. Higher replicas = smoother distribution, more memory.
+     * 100-200 is a common production value.
+     */
+    public HashRing(int replicas) {
+        this.replicas = replicas;
+    }
+    /**
+     * Produces an unsigned 32-bit hash for any string key. CRC32 is fast and
+     * sufficiently uniform for ring placement; production systems sometimes
+     * use a stronger hash (murmur3, fnv) but CRC32 is fine here and in the
+     * standard library, no extra dependency.
+     */
+    private static long hashKey(String key) {
+        CRC32 crc = new CRC32();
+        crc.update(key.getBytes(StandardCharsets.UTF_8));
+        return crc.getValue();
+    }
+    /** Registers a physical node, creating `replicas` virtual points on the ring for it. */
+    public void addNode(String nodeId) {
+        lock.writeLock().lock();
+        try {
+            for (int i = 0; i &lt; replicas; i++) {
+                String vNodeKey = nodeId + "#" + i;
+                long pos = hashKey(vNodeKey);
+                ring.put(pos, nodeId);
+            }
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+    /** Removes a physical node and all of its virtual points. */
+    public void removeNode(String nodeId) {
+        lock.writeLock().lock();
+        try {
+            ring.values().removeIf(id -&gt; id.equals(nodeId));
+        } finally {
+            lock.writeLock().unlock();
+        }
+    }
+    /**
+     * Returns the physical node responsible for key: the first node found
+     * walking clockwise from key's hash position, wrapping around to the
+     * ring's first entry if the hash falls past the last one.
+     */
+    public Optional&lt;String&gt; getNode(String key) {
+        lock.readLock().lock();
+        try {
+            if (ring.isEmpty()) {
+                return Optional.empty();
+            }
+            long h = hashKey(key);
+            Map.Entry&lt;Long, String&gt; entry = ring.ceilingEntry(h);
+            if (entry == null) {
+                entry = ring.firstEntry(); // wrap around to the start of the ring
+            }
+            return Optional.of(entry.getValue());
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+    /** Returns the current distinct set of physical nodes on the ring. */
+    public List&lt;String&gt; nodes() {
+        lock.readLock().lock();
+        try {
+            return new ArrayList&lt;&gt;(new HashSet&lt;&gt;(ring.values()));
+        } finally {
+            lock.readLock().unlock();
+        }
+    }
+}</code></pre>
+    </div>
   </div>
 </div>
 
@@ -252,6 +348,7 @@ Same four cases in both languages — determinism, minimal reshuffle on add, red
   <div class="tab-buttons">
     <button data-tab="test-go" class="active">Go</button>
     <button data-tab="test-py">Python</button>
+    <button data-tab="test-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="test-go">
@@ -362,6 +459,83 @@ def test_empty_ring_returns_none() -&gt; None:
     ring = HashRing(replicas=100)
     assert ring.get_node("anything") is None</code></pre>
     </div>
+    <div class="tab-panel" data-tab-panel="test-java">
+      <pre><code class="language-java">import java.util.HashMap;
+import java.util.Map;
+import java.util.Optional;
+/** Tests for the consistent hash ring. */
+public class HashRingTest {
+    public static void main(String[] args) {
+        testBasicAssignmentIsDeterministic();
+        testMinimalReshuffleOnAdd();
+        testRemoveNodeRedistributes();
+        testEmptyRing();
+        System.out.println("ALL TESTS PASSED");
+    }
+    static void testBasicAssignmentIsDeterministic() {
+        HashRing ring = new HashRing(100);
+        ring.addNode("nodeA");
+        ring.addNode("nodeB");
+        ring.addNode("nodeC");
+        Optional&lt;String&gt; node = ring.getNode("user:1234");
+        assertTrue(node.isPresent(), "expected a node for key");
+        // Same key always maps to the same node while the ring is unchanged.
+        assertEquals(node, ring.getNode("user:1234"), "getNode not deterministic");
+        System.out.println("PASS testBasicAssignmentIsDeterministic");
+    }
+    static void testMinimalReshuffleOnAdd() {
+        HashRing ring = new HashRing(100);
+        ring.addNode("nodeA");
+        ring.addNode("nodeB");
+        ring.addNode("nodeC");
+        String[] keys = new String[1000];
+        Map&lt;String, Optional&lt;String&gt;&gt; before = new HashMap&lt;&gt;();
+        for (int i = 0; i &lt; keys.length; i++) {
+            keys[i] = "key:" + i;
+            before.put(keys[i], ring.getNode(keys[i]));
+        }
+        ring.addNode("nodeD"); // add a 4th node
+        int moved = 0;
+        for (String k : keys) {
+            if (!ring.getNode(k).equals(before.get(k))) {
+                moved++;
+            }
+        }
+        // With consistent hashing, expect roughly 1/4 of keys to move (the
+        // new node's fair share), not all 1000.
+        assertTrue(moved &lt; 400, "too many keys moved on node add: " + moved + "/1000");
+        System.out.println("PASS testMinimalReshuffleOnAdd (" + moved + "/1000 keys moved)");
+    }
+    static void testRemoveNodeRedistributes() {
+        HashRing ring = new HashRing(100);
+        ring.addNode("nodeA");
+        ring.addNode("nodeB");
+        ring.addNode("nodeC");
+        String key = "session:abc";
+        String before = ring.getNode(key).orElseThrow();
+        ring.removeNode(before); // remove whichever node currently owns this key
+        Optional&lt;String&gt; after = ring.getNode(key);
+        assertTrue(after.isPresent(), "expected a node after removal");
+        assertTrue(!after.get().equals(before), "key should have moved off the removed node");
+        System.out.println("PASS testRemoveNodeRedistributes");
+    }
+    static void testEmptyRing() {
+        HashRing ring = new HashRing(100);
+        assertTrue(ring.getNode("anything").isEmpty(), "expected empty Optional on empty ring");
+        System.out.println("PASS testEmptyRing");
+    }
+    static void assertTrue(boolean cond, String msg) {
+        if (!cond) {
+            throw new AssertionError(msg);
+        }
+    }
+    static void assertEquals(Object a, Object b, String msg) {
+        if (!a.equals(b)) {
+            throw new AssertionError(msg + ": " + a + " != " + b);
+        }
+    }
+}</code></pre>
+    </div>
   </div>
 </div>
 
@@ -469,6 +643,184 @@ Reusing the ring positions from the very first diagram (A @ 1000, B @ 4000, C @ 
     Whichever physical node happens to be B's immediate clockwise neighbor absorbs <em>all</em> of B's load at once &mdash; a hotspot risk right after a node removal. Virtual nodes fix this by spreading B's arcs across many different physical neighbors, so removal load distributes roughly evenly across the remaining nodes instead of landing on one.
   </div>
 </div>
+
+---
+
+## Try It Yourself: Live Hash Ring
+
+A real ring, drawn as an actual circle this time. Starts with 3 nodes (A, B, C), 3 virtual points each (real deployments use more like 150 — see above for why — this demo uses fewer purely so the dots stay readable). Add a node and watch how few keys move; remove one and watch its arc get absorbed by its neighbors, never touching anyone else's keys.
+
+<div class="structure-viz" id="ring-live-viz">
+  <svg class="viz-canvas" viewBox="0 0 440 320"></svg>
+  <div class="viz-controls">
+    <input class="viz-input" type="text" placeholder="node name or key" />
+    <button class="viz-btn" data-viz-action="insert">Add node</button>
+    <button class="viz-btn" data-viz-action="search">Look up key</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="delete">Remove node</button>
+    <button class="viz-btn" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span>Each color is one physical node's virtual points</span>
+    <span><span class="viz-swatch" style="background:#e2e8f0"></span> a looked-up key, linked to its owner</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root0 = document.getElementById('ring-live-viz');
+  const svg = root0.querySelector('.viz-canvas');
+  const input = root0.querySelector('.viz-input');
+  const status = root0.querySelector('.viz-status');
+
+  const RING_SIZE = 10000, REPLICAS = 3;
+  const CX = 220, CY = 160, R = 120;
+  const COLORS = ['#60a5fa', '#4ade80', '#fbbf24', '#f472b6', '#a78bfa', '#fb923c'];
+
+  let ring, nodeColor, highlightPos, keyMarker, flashTimer;
+
+  function reset() {
+    ring = [];
+    nodeColor = new Map();
+    highlightPos = null;
+    keyMarker = null;
+    ['A', 'B', 'C'].forEach(addNode);
+  }
+
+  function hashStr(s) {
+    let h = 2166136261;
+    for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return Math.abs(h) % RING_SIZE;
+  }
+
+  function colorFor(name) {
+    if (!nodeColor.has(name)) nodeColor.set(name, COLORS[nodeColor.size % COLORS.length]);
+    return nodeColor.get(name);
+  }
+
+  function addNode(name) {
+    if (ring.some(p => p.node === name)) return false;
+    for (let i = 0; i < REPLICAS; i++) ring.push({ pos: hashStr(`${name}#${i}`), node: name, replica: i });
+    ring.sort((a, b) => a.pos - b.pos);
+    colorFor(name);
+    return true;
+  }
+
+  function removeNode(name) {
+    const before = ring.length;
+    ring = ring.filter(p => p.node !== name);
+    return ring.length !== before;
+  }
+
+  function owner(pos) {
+    if (ring.length === 0) return null;
+    for (const p of ring) if (p.pos >= pos) return p;
+    return ring[0];
+  }
+
+  function angleOf(pos) { return (pos / RING_SIZE) * 2 * Math.PI - Math.PI / 2; }
+  function xy(pos, radius) {
+    const a = angleOf(pos);
+    return { x: CX + radius * Math.cos(a), y: CY + radius * Math.sin(a) };
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function scheduleFlashClear() {
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => { highlightPos = null; keyMarker = null; draw(); }, 2200);
+  }
+
+  function draw() {
+    svg.setAttribute('viewBox', '0 0 440 320');
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    svg.appendChild(el('circle', { cx: CX, cy: CY, r: R, class: 'viz-edge', fill: 'none' }));
+
+    if (keyMarker !== null) {
+      const kp = xy(keyMarker, R);
+      const own = owner(keyMarker);
+      if (own) {
+        const op = xy(own.pos, R);
+        svg.appendChild(el('line', { x1: kp.x, y1: kp.y, x2: op.x, y2: op.y, class: 'viz-edge-active', 'stroke-dasharray': '3,3' }));
+      }
+      svg.appendChild(el('circle', { cx: kp.x, cy: kp.y, r: 6, fill: '#e2e8f0', stroke: '#0f172a', 'stroke-width': 1.5 }));
+      const t = el('text', { x: kp.x, y: kp.y - 12 });
+      t.textContent = 'key';
+      svg.appendChild(t);
+    }
+
+    ring.forEach(p => {
+      const pt = xy(p.pos, R);
+      const isHi = highlightPos !== null && p.pos === highlightPos;
+      svg.appendChild(el('circle', {
+        cx: pt.x, cy: pt.y, r: isHi ? 12 : 9,
+        fill: colorFor(p.node), stroke: isHi ? '#fbbf24' : '#0f172a', 'stroke-width': isHi ? 3 : 1.5,
+      }));
+      const labelPt = xy(p.pos, R + 22);
+      const t = el('text', { x: labelPt.x, y: labelPt.y, class: 'viz-label-dim' });
+      t.textContent = `${p.node}#${p.replica}`;
+      svg.appendChild(t);
+    });
+
+    if (ring.length === 0) {
+      const t = el('text', { x: CX, y: CY });
+      t.textContent = 'ring is empty — add a node';
+      svg.appendChild(t);
+    }
+  }
+
+  root0.querySelector('[data-viz-action="insert"]').addEventListener('click', () => {
+    const name = input.value.trim();
+    if (!name) { setStatus('Enter a node name first.', 'error'); return; }
+    if (!addNode(name)) { setStatus(`Node "${name}" is already on the ring.`, 'error'); return; }
+    input.value = '';
+    setStatus(`Added "${name}" — placed ${REPLICAS} virtual points on the ring (only that node's fair share of keys should have moved).`, 'ok');
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="search"]').addEventListener('click', () => {
+    const key = input.value.trim();
+    if (!key) { setStatus('Enter a key to look up first.', 'error'); return; }
+    if (ring.length === 0) { setStatus('Ring is empty — add a node first.', 'error'); return; }
+    const pos = hashStr(key);
+    const own = owner(pos);
+    keyMarker = pos;
+    highlightPos = own.pos;
+    setStatus(`Key "${key}" hashes to position ${pos} — owned by node ${own.node} (its nearest virtual point clockwise).`, 'ok');
+    draw();
+    scheduleFlashClear();
+  });
+
+  root0.querySelector('[data-viz-action="delete"]').addEventListener('click', () => {
+    const name = input.value.trim();
+    if (!name) { setStatus('Enter a node name first.', 'error'); return; }
+    if (!removeNode(name)) { setStatus(`Node "${name}" isn't on the ring.`, 'error'); return; }
+    setStatus(`Removed "${name}" — its keys are absorbed by their new nearest clockwise neighbors; every other node's keys are untouched.`, 'ok');
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    reset();
+    setStatus('Reset to a 3-node ring (A, B, C).', '');
+    draw();
+  });
+
+  reset();
+  setStatus('Loaded a 3-node ring (A, B, C), 3 virtual points each. Type a node name and Insert/Delete it, or type any text and Search to see which node owns it.', '');
+  draw();
+})();
+</script>
 
 ---
 

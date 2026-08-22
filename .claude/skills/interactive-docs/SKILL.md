@@ -32,6 +32,26 @@ existing — the same way it's already been applied across `databases/`,
    inert dead markup on GitHub (no JS engine runs them), so skip this skill
    for files in that directory unless the site's `SECTIONS` list is extended
    to include it first. `coding-practice/` **is** in the list.
+4. Code fences and raw `<pre><code class="language-xxx">` blocks get VS
+   Code-style syntax highlighting automatically (highlight.js, wired
+   site-wide in `BaseLayout.astro`) — there's nothing to do for this beyond
+   using the `language-xxx` class you'd already use for copy-button/Mermaid
+   purposes. Don't hand-roll highlighting markup.
+
+## Git safety when working alongside other agents
+
+This repo is frequently being edited by several agents/sessions at once.
+**Never run a git command that touches more than your own target file(s)** —
+no `git stash`, `git checkout .`, `git checkout -- <dir>`, `git reset`, or
+`git clean`. Any of these operate on the whole working tree and will silently
+wipe every other in-flight agent's uncommitted work, not just yours. If you
+need to check your own progress, scope it to your own path:
+`git diff -- path/to/your-file.md` / `git status --short -- path/to/your-file.md`.
+If you ever find your own target file unexpectedly reset to a prior state
+mid-task, assume another process's repo-wide git command wiped it (not a
+bug in your own edits) — recheck `git status --short` for a stray
+`stash@{N}` first, since the lost content may still be recoverable from
+there, before redoing the work from scratch.
 
 ## The standard pattern
 
@@ -59,7 +79,18 @@ into every file:
    aren't really "states" of the same thing. **Don't force either one** where
    an existing table is genuinely the clearer format for that data (dense
    multi-attribute comparisons, 5+ options) — a quiz-card alone is fine there.
-5. **ASCII → Mermaid** — convert plain-text box/arrow diagrams (more than a
+5. **structure-viz** — wherever the file centers on a data structure the
+   reader can meaningfully insert/delete/search into (a B-tree, skip list,
+   hash ring, bloom filter's bit array, LRU cache) rather than just diagram.
+   Unlike the other four components, this one has no shared JS in
+   `BaseLayout.astro` — read `website/COMPONENTS.md` section 5 in full
+   before writing one, especially the rule about the `<script>` living as a
+   sibling *after* the `.structure-viz` div, never nested inside it. See
+   `coding-practice/btree.md` for the reference implementation. Don't reach
+   for this by default — it's real per-structure engineering effort, not a
+   drop-in template like the others; use it where "try your own value" adds
+   something a stepper's fixed narrative can't.
+6. **ASCII → Mermaid** — convert plain-text box/arrow diagrams (more than a
    couple of connected components) into Mermaid `graph`/`sequenceDiagram`/
    `stateDiagram-v2` blocks, matching this repo's existing Mermaid style
    (dark-friendly, minimal explicit fill colors except to flag a
@@ -79,10 +110,10 @@ into every file:
    same component not switching. Keep every line non-blank inside these
    blocks, even where you'd normally leave one in a plain ` ```mermaid `
    fence.
-6. **Never remove** existing explanatory prose or already-good existing
+7. **Never remove** existing explanatory prose or already-good existing
    Mermaid diagrams. This skill adds interactivity and upgrades diagrams; it
    does not shorten a guide or change its voice.
-7. **Match the file's existing tone.** This repo's voice is concise,
+8. **Match the file's existing tone.** This repo's voice is concise,
    first-principles, "why it matters" callouts — write new quiz/component
    copy in that same register, not a generic tutorial voice.
 

@@ -1,5 +1,12 @@
 # Loki Log Aggregation
 
+Track how many of the checks below you clear as you go:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ## 1. Architecture
 
 ```mermaid
@@ -21,6 +28,40 @@ flowchart LR
 | Storage cost | Low (S3/GCS) | High |
 | Query speed | Fast on label filters | Fast on any field |
 | Schema | Schema-free | Mapping required |
+
+Walk through how a single log line actually moves through this pipeline, end to end:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Push.</strong> Promtail (or another agent) pushes a batch of log lines to the Distributor.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Replicate.</strong> The Distributor replicates the write to an Ingester.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Flush chunks.</strong> The Ingester flushes compressed chunks of log data out to the Object Store (S3 / GCS).
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Write index.</strong> The Ingester also writes the label-to-chunk mapping to the Index Store (BoltDB / Cassandra).
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Query.</strong> The Querier reads chunks from the Object Store and the index from the Index Store to answer a LogQL query sent from Grafana.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Why is Loki's storage so much cheaper than Elasticsearch's, and what do you give up for it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Loki stores raw log lines as compressed chunks with no full-text index &mdash; it indexes only labels, not log content. That keeps storage cheap (S3/GCS) but makes ad-hoc text search slower than Elasticsearch's full-text inverted index, since queries have to narrow by label first, then grep the actual log content.</div>
+</div>
 
 ---
 
@@ -44,6 +85,25 @@ flowchart TD
 - `request_id`, `user_id`, `trace_id`, `ip`
 
 High-cardinality labels = millions of streams = Loki OOM / slow queries. Put these values in log content, not labels.
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="good" class="active state-ok">Good labels</button>
+    <button data-toggle-opt="bad" class="state-bad">Bad labels</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="good">
+    Low cardinality: <code>job</code>, <code>namespace</code>, <code>pod</code>, <code>env</code>, <code>level</code>. A small, bounded set of values keeps the number of log streams manageable.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="bad">
+    High cardinality: <code>request_id</code>, <code>user_id</code>, <code>trace_id</code>, <code>ip</code>. Each unique value creates its own stream &mdash; millions of streams means Loki OOM or slow queries. Put these values in log content instead, not labels.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Someone adds request_id as a Loki label to make requests easy to filter. Why is this a bad idea?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>request_id is high-cardinality &mdash; every request gets a unique value, so every unique value becomes its own log stream. Millions of streams means Loki OOM or slow queries. The fix is to keep request_id in the log content and filter on it there, not promote it to a label.</div>
+</div>
 
 ---
 
@@ -131,14 +191,54 @@ scrape_configs:
 
 **Pipeline stage order:** `json/regex` → `labels` → `timestamp` → `output`
 
+Walk through what each stage in the config above actually does to a raw log line:
+
+```mermaid
+flowchart LR
+    L["Raw log line"] --> J["json stage<br/>extract level, msg, ts"]
+    J --> LB["labels stage<br/>promote level to a label"]
+    LB --> TS["timestamp stage<br/>parse ts as RFC3339"]
+    TS --> O["output stage<br/>replace line with msg"]
+```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Parse JSON.</strong> The <code>json</code> stage extracts <code>level</code>, <code>message</code>, and <code>timestamp</code> from the raw JSON log line.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Promote to label.</strong> The <code>labels</code> stage promotes the parsed <code>level</code> field to an actual Loki label.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Parse timestamp.</strong> The <code>timestamp</code> stage reads the parsed <code>ts</code> field and parses it as RFC3339 to set the log line's real timestamp.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Replace output.</strong> The <code>output</code> stage replaces the log output with just the parsed <code>msg</code> field.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">After the pipeline above runs, what does Loki actually store as the log line's content?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Just the parsed message field. The output stage replaces the log output with the msg value extracted earlier by the json stage &mdash; the original raw JSON line isn't what ends up stored.</div>
+</div>
+
 ---
 
 ## 5. Retention and Storage
 
-```
-chunks (compressed log data)  →  S3 / GCS / filesystem
-index (label → chunk mapping) →  BoltDB Shipper (single-node)
-                                  Cassandra / BigTable (cluster)
+```mermaid
+flowchart LR
+    C["chunks<br/>compressed log data"] --> CS["Object store<br/>S3 / GCS / filesystem"]
+    I["index<br/>label to chunk mapping"] --> IS1["BoltDB Shipper<br/>single-node"]
+    I --> IS2["Cassandra / BigTable<br/>cluster"]
 ```
 
 **Retention config (loki.yaml):**
@@ -153,6 +253,25 @@ compactor:
 ```
 
 Per-tenant retention via `overrides` if multi-tenant.
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="single" class="active">Single-node</button>
+    <button data-toggle-opt="cluster">Cluster</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="single">
+    Index store is <strong>BoltDB Shipper</strong>. Chunks still go to the object store (S3 / GCS / filesystem) either way &mdash; only the index backend changes.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="cluster">
+    Index store is <strong>Cassandra or BigTable</strong> instead, to handle the write volume of a multi-node deployment. Chunks are unaffected &mdash; still the same object store.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">In a multi-tenant Loki deployment, how do you give one tenant a longer retention period than the global default?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Via overrides &mdash; per-tenant retention is configured through the overrides section, layered on top of the global retention_period default in limits_config.</div>
+</div>
 
 ---
 
@@ -172,6 +291,12 @@ Now every log line with `trace_id=abc123` gets a clickable link to Tempo. Works 
 {job="api"} | json | trace_id != ""
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">What does adding a derived field with regex trace_id=(\w+) to the Loki datasource actually change in Grafana?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Every log line matching the regex (e.g. one containing trace_id=abc123) gets a clickable link built from the configured URL template, pointing straight to that trace in the tracing backend &mdash; Tempo, Jaeger, Zipkin, or any other. It's configured once, with three fields: Regex, Name, and URL.</div>
+</div>
+
 ---
 
 ## Fluent Bit — Zero Log Loss for ELK (Elasticsearch)
@@ -180,17 +305,43 @@ When Elasticsearch goes down, the question becomes: where do logs live while ES 
 
 ### Architecture: no-loss log pipeline
 
+```mermaid
+flowchart TD
+    APP["App container<br/>stdout/stderr"] --> NODE["Node filesystem"]
+    NODE --> FB["Fluent Bit DaemonSet, per node<br/>tail input reads /var/log/containers/*.log"]
+    FB --> BUF["Filesystem buffer on hostPath<br/>survives pod restarts"]
+    BUF --> RETRY["Retry loop, Retry_Limit False<br/>retries forever on ES failure"]
+    RETRY --> ES["Elasticsearch"]
+    RETRY -.->|"if ES down too long"| FALLBACK["Kafka / S3 fallback output<br/>secondary sink, no data lost"]
 ```
-App container
-    ↓ stdout/stderr written to node filesystem
-Fluent Bit DaemonSet (per node)
-    ↓ tail input reads /var/log/containers/*.log
-    ↓ [filesystem buffer on hostPath]        ← survives pod restarts
-    ↓ retry loop (Retry_Limit False)         ← retries forever on ES failure
-Elasticsearch
-    ↓ (if ES down for too long)
-Kafka / S3 fallback output                  ← secondary sink, no data lost
-```
+
+Walk through what happens to one log line as it moves through every layer of protection:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Written to disk.</strong> The app container's stdout/stderr is written to the node's filesystem &mdash; this happens regardless of Fluent Bit.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Tailed.</strong> The Fluent Bit DaemonSet on that node tails <code>/var/log/containers/*.log</code>, tracking read position in a <code>.db</code> file.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Buffered to disk.</strong> The line lands in the filesystem buffer on hostPath &mdash; this survives Fluent Bit pod restarts.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Retried forever.</strong> Fluent Bit attempts to send the buffered chunk to Elasticsearch. With Retry_Limit False, a failed send is retried instead of being dropped.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Fallback if ES stays down.</strong> If Elasticsearch is unavailable for too long, the Kafka / S3 fallback output acts as a secondary sink &mdash; no data lost even in extended outages.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ### Core configuration for durability
 
@@ -245,6 +396,12 @@ Kafka / S3 fallback output                  ← secondary sink, no data lost
     storage.total_limit_size  2G
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">The config sets storage.type filesystem at both the SERVICE level and the INPUT level. What does each one actually control?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The SERVICE-level setting switches Fluent Bit's overall buffering engine to filesystem-backed instead of in-memory (the default). The INPUT-level setting enables per-input filesystem buffering for that specific tail input &mdash; it's what actually turns on FS buffering for the logs that input reads.</div>
+</div>
+
 ### Retry_Limit False — what happens on ES downtime
 
 ```
@@ -262,7 +419,36 @@ t=2h:  ES comes back up
        No log loss — order preserved within each log stream
 ```
 
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>t=0: ES goes down.</strong> Fluent Bit attempts to send a chunk, it fails, and the chunk is marked for retry.
+    </div>
+    <div class="stepper-panel">
+      <strong>t=5s → t=23s: backoff retries.</strong> Retry #1 at a 1s delay, retry #2 at 2s, retry #3 at 4s &mdash; exponential backoff, climbing toward roughly 2h between retries.
+    </div>
+    <div class="stepper-panel">
+      <strong>Meanwhile: buffer keeps filling.</strong> All logs accumulate in the filesystem buffer during this time. New logs from containers keep being read and buffered to disk.
+    </div>
+    <div class="stepper-panel">
+      <strong>t=2h: ES recovers.</strong> Fluent Bit resumes sending and drains the backlog. No log loss, and order is preserved within each log stream.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 With the default `Retry_Limit 1`, Fluent Bit gives up after 1 retry and **drops the chunk**. In a 2-hour ES downtime with `Retry_Limit 1`, you lose all logs after the 2nd retry. With `Retry_Limit False` you lose nothing until the disk fills.
+
+<div class="quiz-card">
+  <p class="quiz-q">With the default Retry_Limit 1, what happens to logs during a 2-hour Elasticsearch outage?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Fluent Bit gives up after just 1 retry and drops the chunk &mdash; so you lose all logs generated after the 2nd retry attempt for the rest of the outage. Retry_Limit False avoids this: it retries forever, so nothing is lost until the disk itself fills up.</div>
+</div>
 
 ### hostPath vs emptyDir for the buffer
 
@@ -283,6 +469,27 @@ volumes:
 # Key: the tail DB tracks file read positions — if lost, Fluent Bit re-reads
 # all log files from the beginning → duplicate logs on restart
 ```
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="hostpath" class="active">hostPath</button>
+    <button data-tab="emptydir">emptyDir</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="hostpath">
+      <strong>Persists across pod restarts</strong> on the same node. This is what the buffer volume and the tail <code>.db</code> file both need &mdash; if the DB file survives, Fluent Bit knows exactly where it left off reading each log file.
+    </div>
+    <div class="tab-panel" data-tab-panel="emptydir">
+      <strong>Ephemeral</strong> &mdash; destroyed when the pod is deleted or restarted. Using it for the buffer or the tail DB means losing the read-position tracking on every restart, which makes Fluent Bit re-read all log files from the beginning and produce duplicate logs.
+    </div>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">If the Fluent Bit tail DB file is lost on pod restart, what happens on the next startup?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Fluent Bit has no record of where it left off, so it re-reads all log files from the beginning &mdash; producing duplicate logs on restart. This is exactly why the tail DB file needs a hostPath volume, not an ephemeral emptyDir.</div>
+</div>
 
 ### Kafka as durable intermediary
 
@@ -306,6 +513,12 @@ Fluent Bit → Kafka (retention=7d, replication=3) → Logstash → Elasticsearc
 ```
 
 Kafka producer with `acks=-1` (all ISRs) means the message is only acknowledged after being written to all in-sync replicas. Combined with Kafka's `min.insync.replicas=2`, this guarantees no message loss even if a broker crashes.
+
+<div class="quiz-card">
+  <p class="quiz-q">Fluent Bit's Kafka output uses rdkafka.acks -1, combined with Kafka's min.insync.replicas=2. What guarantee does that combination provide?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>acks=-1 (all ISRs) means the message is only acknowledged after being written to every in-sync replica. Combined with min.insync.replicas=2, this guarantees no message loss even if a broker crashes.</div>
+</div>
 
 ### DLQ / S3 fallback output
 
@@ -334,6 +547,12 @@ Configure a secondary output that captures records that fail the primary output 
 
 With parallel outputs (both ES and S3 match `*`), every log line goes to both sinks simultaneously. S3 is your permanent immutable archive; ES is your searchable hot tier.
 
+<div class="quiz-card">
+  <p class="quiz-q">In the config above, both the ES and S3 outputs match *. Does S3 only receive logs after Elasticsearch fails?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. Because both outputs match *, every log line goes to both sinks simultaneously, regardless of ES's health. S3 is an always-on permanent archive, not a fallback that only activates on ES failure.</div>
+</div>
+
 ### mem_buf_limit and backpressure
 
 ```ini
@@ -350,6 +569,12 @@ With parallel outputs (both ES and S3 match `*`), every log line goes to both si
 ```
 
 **Without `storage.type filesystem`:** once mem_buf_limit is hit, Fluent Bit starts dropping. With filesystem storage, it overflows to disk instead of dropping.
+
+<div class="quiz-card">
+  <p class="quiz-q">Mem_Buf_Limit is hit on an input, but storage.type filesystem is NOT set for that input. What happens to new log lines?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Fluent Bit starts dropping them. Without filesystem storage, hitting the in-memory limit means there's nowhere else for new data to go. With storage.type filesystem enabled, it overflows to disk instead of dropping.</div>
+</div>
 
 ### Prometheus alerts for Elasticsearch and Fluent Bit
 
@@ -401,6 +626,12 @@ With parallel outputs (both ES and S3 match `*`), every log line goes to both si
   annotations:
     summary: "Fluent Bit is DROPPING logs — Retry_Limit exceeded"
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">FluentBitRetrying fires with severity warning, and FluentBitDropping fires with severity critical. What's the actual difference in outcome between the two?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>FluentBitRetrying means Fluent Bit is retrying output because ES may be slow or down &mdash; no logs are lost yet, it's just degraded. FluentBitDropping means Retry_Limit has actually been exceeded and Fluent Bit is DROPPING logs for real &mdash; that's actual, permanent data loss, which is why it's critical instead of warning.</div>
+</div>
 
 ### Summary: settings that must be in every production Fluent Bit config
 

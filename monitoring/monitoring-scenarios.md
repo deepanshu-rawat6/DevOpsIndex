@@ -1,5 +1,12 @@
 # Monitoring & Observability Debugging Scenarios
 
+Twelve production monitoring-stack failure patterns — Prometheus, AlertManager, Grafana, Loki, and OpenTelemetry — with the symptom, the diagnostic flow, the root cause, and the fix that prevents a repeat.
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## Prometheus: Target Shows as DOWN
@@ -27,6 +34,29 @@ graph TD
     AUTH --> LABEL
 ```
 
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Read the scrape error first.</strong> Hover over the error in <code>/targets</code> before running anything else — the exact string (<code>connection refused</code>, <code>context deadline exceeded</code>, <code>tls: certificate</code>, <code>401 Unauthorized</code>) tells you which branch below to follow.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Check reachability.</strong> Can Prometheus reach the target's IP:port at all? Resolve DNS from the Prometheus pod, then confirm the port is open with <code>nc -zv target 9090</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. If reachable, check auth.</strong> A port being open doesn't mean the scrape succeeds — a missing or wrong <code>bearer_token</code>/<code>tls_config</code> produces a 401 or TLS error even with a perfectly healthy app behind it.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. If auth is fine, check <code>relabel_configs</code>.</strong> A target can resolve, be reachable, and pass auth, and still never show up — a relabel rule can drop it before Prometheus ever attempts the scrape. This is the case that looks like nothing is wrong until you specifically check for it.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 ```bash
 # Check error message on target (hover over error in /targets)
 # Common errors:
@@ -48,7 +78,36 @@ kubectl exec -n monitoring deploy/prometheus -- \
   wget -qO- http://localhost:9090/api/v1/targets | jq '.data.activeTargets[] | select(.health=="down")'
 ```
 
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="refused" class="active">connection refused</button>
+    <button data-tab="deadline">context deadline exceeded</button>
+    <button data-tab="tls">tls: certificate</button>
+    <button data-tab="unauth">401 Unauthorized</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="refused">
+      The app isn't running on that port at all — nothing is listening. Confirm with <code>kubectl exec ... wget</code> from the Prometheus pod, then check the target app's own container status.
+    </div>
+    <div class="tab-panel" data-tab-panel="deadline">
+      <code>scrape_timeout</code> is too short, or the app's <code>/metrics</code> endpoint is genuinely slow to respond. Raise the timeout or investigate why the endpoint is slow before assuming it's a config problem.
+    </div>
+    <div class="tab-panel" data-tab-panel="tls">
+      TLS config mismatch between Prometheus's scrape config and what the target actually presents — wrong CA, expired cert, or scraping an HTTPS endpoint with a plain HTTP scheme configured.
+    </div>
+    <div class="tab-panel" data-tab-panel="unauth">
+      Missing <code>bearer_token</code> or <code>basic_auth</code> in the scrape config. The target is reachable and healthy — Prometheus just isn't presenting the credentials it expects.
+    </div>
+  </div>
+</div>
+
 **Prevention:** Add a `BlackboxProber` synthetic probe to catch targets going down before Prometheus scrape fails. Use `up == 0` as a P2 alert with `for: 5m`. In K8s: ensure ServiceMonitor `namespaceSelector` and `selector` are correct in staging before prod deploy — `up` going to 0 after a deploy means something regressed in the `/metrics` endpoint.
+
+<div class="quiz-card">
+  <p class="quiz-q">A target's port is open and reachable, auth is configured correctly, and the app is healthy — yet it still never appears as scraped in Prometheus. What's the one remaining cause this runbook calls out, and why does it explain a target that looks completely fine everywhere else?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>relabel_configs</code> dropping the target before Prometheus ever attempts the scrape. Because the drop happens at the relabeling stage — before any network call to the target — none of the usual signals (reachability, auth, app health) show a problem, since Prometheus never even tries to reach it. Checking the relabel rules has to come after ruling out reachability and auth, exactly as the diagnostic flow orders it.</div>
+</div>
 
 ---
 
@@ -75,6 +134,29 @@ graph TD
     START --> COUNTER
 ```
 
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Check the query window first.</strong> This is the single most common cause — a <code>rate()</code>/<code>increase()</code> over a range smaller than 2× the scrape interval produces exactly this symptom, with nothing actually wrong on the ingest side.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Check staleness.</strong> Has the last sample come in more than 5 minutes ago? Prometheus marks a series stale after that gap, which shows up as a real "no data" hole, not a query-syntax problem.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Check for a recent Prometheus restart.</strong> A WAL replay after a restart produces a genuine gap in the data — this is expected behavior, not a config bug to chase.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Check for a counter reset.</strong> <code>rate()</code> handles a counter reset transparently; <code>increase()</code> may still show a visible gap around the same reset point.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 ```promql
 -- Check if target is being scraped
 up{job="my-app"}
@@ -97,7 +179,26 @@ resets(http_requests_total{job="my-app"}[1h])
 # scrape_interval: 60s → use [5m] in rate()
 ```
 
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="rate" class="active state-ok">rate()</button>
+    <button data-toggle-opt="increase" class="state-warn">increase()</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="rate">
+    Handles a counter reset transparently — the function accounts for the reset internally, so a reset in the underlying counter doesn't produce a visible hole in the graph.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="increase">
+    May still show a gap around the same reset point. It's built on top of <code>rate()</code> but extrapolates over the range, and that extrapolation is more sensitive to a reset landing right at the window boundary.
+  </div>
+</div>
+
 **Prevention:** Standardize on a single `scrape_interval` cluster-wide (30s recommended). Document the rule: always use `rate()[Xm]` where X ≥ 2 × scrape_interval. Add recording rules for the most-used `rate()` expressions — recording rules pre-compute at consistent intervals, eliminating scrape-window mismatch gaps.
+
+<div class="quiz-card">
+  <p class="quiz-q">A dashboard uses <code>rate(http_requests_total[1m])</code> against a target scraped every 30s, and the graph has intermittent gaps. What's wrong, and what's the fix?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The range window is smaller than 2× the scrape interval — with a 30s scrape interval, <code>[1m]</code> only spans about 2 samples, and any single missed or delayed scrape leaves too few points for <code>rate()</code> to compute over, producing a gap. The fix is to widen the window to at least <code>[2m]</code> (2 × scrape_interval) — the rule this runbook states explicitly or, better, replace the raw query with a recording rule that pre-computes at a consistent interval.</div>
+</div>
 
 ---
 
@@ -123,6 +224,29 @@ graph TD
     HIGH -->|"no"| RETENTION --> RULES --> LIMITS
 ```
 
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Check active series count.</strong> <code>prometheus_tsdb_head_series</code> over roughly 1M is the trigger to investigate cardinality first — this is the fork in the road for everything downstream.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. If high, find the top contributors.</strong> <code>topk(10, count by (__name__)({__name__=~".+"}))</code> in the Prometheus UI's <code>/tsdb-status</code> page ranks which metrics are driving the series count, so the fix targets the actual offenders.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. If not a cardinality problem, check retention.</strong> An overly long <code>--storage.tsdb.retention.time</code> grows the on-disk and in-memory footprint regardless of how well-behaved the label cardinality is.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Check recording-rule load and set hard limits.</strong> Too many recording rules evaluated on every cycle adds memory pressure on top of everything else — pair this with <code>--query.max-samples</code> and a real memory limit so an OOM becomes a bounded, predictable event instead of an unbounded one.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 ```promql
 -- Active time series (>1M = investigate)
 prometheus_tsdb_head_series
@@ -147,7 +271,26 @@ prometheus_tsdb_head_chunks
 # 4. Increase memory limit and resource requests
 ```
 
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="cardinality" class="active state-bad">High cardinality</button>
+    <button data-toggle-opt="retention" class="state-warn">Long retention</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="cardinality">
+    <code>prometheus_tsdb_head_series</code> is high right now. The fix is to find and drop the offending labels with <code>metric_relabel_configs</code> — raising the memory limit alone just delays the next OOM as series count keeps growing.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="retention">
+    Series count is normal, but <code>--storage.tsdb.retention.time</code> is set too long — the head/block size grows from keeping more history, not from more unique series. The fix is to shorten retention, or offload long-term storage to Thanos/Mimir so Prometheus itself only needs to hold a few days.
+  </div>
+</div>
+
 **Prevention:** Monitor `prometheus_tsdb_head_series` — alert when it exceeds 2M series (typical OOM threshold is 3-4M). Add `metric_relabel_configs` to drop unused high-cardinality metrics at ingest time. Use Thanos or Mimir for long-term storage so Prometheus retention can stay at 2-7 days, reducing TSDB head size.
+
+<div class="quiz-card">
+  <p class="quiz-q">Prometheus OOMKills and a teammate immediately doubles the memory limit. Under what condition does this "fix" just delay the next OOM instead of solving anything, according to this runbook?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>If the root cause is high active-series count (cardinality), not retention or recording-rule load. Raising the memory limit doesn't stop series count from continuing to grow — it just buys time until the new, larger limit is also exceeded. The actual fix in that case is finding the top contributors with <code>topk(10, count by (__name__)(...))</code> and dropping them via <code>metric_relabel_configs</code>, which caps the growth instead of just tolerating a bigger version of it.</div>
+</div>
 
 ---
 
@@ -171,6 +314,29 @@ graph TD
     START --> REGEX --> RECORD
     START --> STEP
 ```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Check the time range.</strong> A 90-day range with a 15s step is millions of data points for a single panel — reduce to 6h or 24h before looking anywhere else.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Check for an unindexed regex matcher.</strong> <code>{__name__=~".+"}</code> or any broad regex without a specific <code>job</code>/<code>instance</code> filter forces a scan across every series in the TSDB.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Convert the expensive query into a recording rule.</strong> This is the #1 cause of slow queries per this runbook's own prevention advice — pre-computing at a fixed interval turns a live scan into an instant lookup.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. If still slow, reduce resolution.</strong> Increasing the step interval trades graph smoothness for fewer computed points, which is a reasonable last lever once range and query shape are already fixed.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ```promql
 -- BAD: scans all series
@@ -196,7 +362,26 @@ rate(http_requests_total{job="api"}[5m])
 # --query.log-file=/var/log/prometheus/queries.log
 ```
 
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="bad" class="active state-bad">Bad: broad regex</button>
+    <button data-toggle-opt="good" class="state-ok">Good: specific matcher</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="bad">
+    <code>rate({__name__=~"http.*"}[5m])</code> — the regex on <code>__name__</code> has no index to narrow against, so Prometheus scans every series matching the pattern across the whole TSDB.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="good">
+    <code>rate(http_requests_total{job="api"}[5m])</code> — the exact metric name plus a <code>job</code> label lets Prometheus use its index to jump straight to the relevant series instead of scanning.
+  </div>
+</div>
+
 **Prevention:** Create recording rules for any query used in a dashboard panel or alert rule — dashboards hitting raw high-cardinality `rate()` over long ranges are the #1 cause of slow queries. Use Thanos Query Frontend with query splitting and result caching to handle range queries > 1 day without hammering Prometheus directly.
+
+<div class="quiz-card">
+  <p class="quiz-q">Per this runbook, what's the single most common root cause of slow dashboard queries — and what's the fix that addresses it structurally rather than just tuning the query each time?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Dashboards hitting raw, high-cardinality <code>rate()</code> queries over long time ranges. Tuning the range or adding a job matcher helps one query, but the structural fix is turning any query used in a dashboard panel or alert rule into a recording rule — it pre-computes on a schedule so the dashboard read becomes an instant lookup instead of a live scan every time someone opens the page.</div>
+</div>
 
 ---
 
@@ -222,6 +407,35 @@ graph TD
     SILENCE --> INHIBIT --> RECEIVER --> WEBHOOK
 ```
 
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Confirm AlertManager received the alert at all.</strong> <code>curl .../api/v2/alerts</code> — if it's not there, the problem is upstream of AlertManager entirely: Prometheus isn't reaching it.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Check routing.</strong> <code>amtool config routes test</code> shows exactly which receiver a given set of labels resolves to — confirm the alert's labels actually match the route's matchers.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Check for an active silence.</strong> A silence matching the alert's labels suppresses the notification with no visible sign anything fired — check <code>/api/v2/silences</code> for anything currently active.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Check inhibition rules.</strong> A broader "parent" alert can suppress this one entirely by design — that's a feature working as intended, not a bug, but it's easy to mistake for a delivery failure.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Validate the receiver config.</strong> <code>amtool check-config</code> catches a malformed receiver before you go looking for a network problem that isn't there.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Confirm the webhook/API endpoint is actually reachable</strong> from AlertManager's own pod — a receiver can be configured correctly and still fail if the destination itself is unreachable from that pod's network path.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 ```bash
 # 1. Check AlertManager received the alert
 curl http://alertmanager:9093/api/v2/alerts | jq '.[] | {labels, status}'
@@ -246,6 +460,12 @@ kubectl logs -n monitoring deploy/alertmanager | grep -i "error\|warn\|notify"
 
 **Prevention:** Test the full alerting pipeline end-to-end in staging on every change: fire a synthetic alert via `amtool`, verify it routes to the right receiver. Store AlertManager config in Git with CI validation (`amtool config check`). Use `amtool config routes test` to validate routing logic before deploying.
 
+<div class="quiz-card">
+  <p class="quiz-q">An alert is FIRING in Prometheus, no notification arrived, and a broader "parent" alert was also firing around the same time. Before assuming a delivery failure, what should you check — and why might there be nothing actually broken?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Check inhibition rules — an inhibition rule can suppress a "child" alert entirely when a matching "parent" alert (e.g. NodeDown suppressing Pod alerts on that node) is already firing, by design. That's the intended behavior, not a bug: if there's already a page for the node being down, individual pod alerts on that same node would just be noise. Confirming this means checking the inhibit_rules config and whether the parent alert's labels match the child's `equal` fields — not chasing a webhook or receiver problem that isn't there.</div>
+</div>
+
 ---
 
 ## AlertManager: Alert Storm / Too Many Notifications
@@ -268,6 +488,29 @@ graph TD
     START --> SILENCE
 ```
 
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Check <code>group_by</code>.</strong> Is it granular enough to collapse related alerts — <code>['alertname', 'cluster', 'namespace']</code> — or is it grouping by individual pod/instance, which defeats grouping entirely?
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Check <code>group_wait</code>.</strong> The 30s default may be too short to collect a burst of related alerts into one notification — 5m gives AlertManager time to batch what would otherwise be a wave of separate pages.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Add inhibition for parent-child relationships.</strong> A node going down shouldn't also page for every individual pod alert it causes — inhibit the derived alerts when the root-cause alert is already firing.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Silence during known deploys/maintenance.</strong> A planned change that will legitimately trip alerts doesn't need a live storm to prove it — silence the relevant matchers for the maintenance window instead.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 ```yaml
 # Fix: proper grouping
 route:
@@ -283,7 +526,36 @@ inhibit_rules:
     equal: [node]
 ```
 
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="groupby" class="active">group_by</button>
+    <button data-tab="groupwait">group_wait</button>
+    <button data-tab="inhibit">inhibit_rules</button>
+    <button data-tab="silence">silence</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="groupby">
+      Collapses related alerts into one notification by shared labels — <code>['alertname', 'cluster', 'namespace']</code>. Never group by individual pod/instance, or every pod effectively gets its own notification again.
+    </div>
+    <div class="tab-panel" data-tab-panel="groupwait">
+      How long AlertManager waits to collect more alerts into the same group before sending the first notification. Default is 30s; raising it to 5m lets a fast-firing burst land in one page instead of several.
+    </div>
+    <div class="tab-panel" data-tab-panel="inhibit">
+      Suppresses a "child" alert entirely when a matching "parent" alert is already firing — e.g. a NodeDown alert inhibiting every Pod alert on that same node, keyed on the shared <code>equal</code> label.
+    </div>
+    <div class="tab-panel" data-tab-panel="silence">
+      A manually or automatically applied suppression for a known window — deploys, maintenance — so alerts that are expected to trip during a planned change don't page anyone.
+    </div>
+  </div>
+</div>
+
 **Prevention:** Design `group_by` with `['alertname', 'cluster', 'service']` from day one — never group by individual pod/instance. Add inhibition rules for every parent-child alert relationship (node down → pod alerts, deployment degraded → individual pod alerts). Set `group_wait: 30s` and `group_interval: 5m` to batch rapid-fire alerts into one notification.
+
+<div class="quiz-card">
+  <p class="quiz-q">Why does grouping by individual pod/instance defeat the purpose of `group_by`, even though it's technically still "grouping"?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Grouping by pod/instance means each individual pod still forms its own group — a hundred failing pods produce a hundred separate groups, and therefore a hundred separate notifications, exactly the alert storm this feature exists to prevent. The point of `group_by` is to collapse alerts that share a higher-level identity (<code>alertname</code>, <code>cluster</code>, <code>namespace</code>/<code>service</code>) into one notification — which is why the prevention rule explicitly says to never key it on the per-instance label.</div>
+</div>
 
 ---
 
@@ -306,6 +578,32 @@ graph TD
     START --> DS --> QUERY --> TIME --> VAR --> STEP
 ```
 
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Confirm the data source itself.</strong> Test it directly under Connections — a wrong URL, http vs https, or wrong port fails every panel using it at once.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Run the exact query in Explore.</strong> If it returns data there but not in the panel, the problem is in the panel's configuration, not the query or the data source.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Check the time range.</strong> "Last 1h" vs "last 24h" is the single most common false alarm — the query is fine, it's just pointed at a window with no data in it.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Check that variables actually resolved.</strong> A dashboard variable like <code>$namespace</code> or <code>$pod</code> can display "All" while resolving to no concrete value the query can use.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Check <code>min_interval</code> against the real scrape interval.</strong> A <code>min_interval</code> set coarser than the actual scrape interval can coarsen real data away until it looks like nothing exists.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
 ```bash
 # Debug in Grafana Explore tab — run raw PromQL query
 # Check if variable values are resolving correctly
@@ -320,6 +618,12 @@ graph TD
 ```
 
 **Prevention:** Use Grafana dashboard-as-code (grafonnet or Terraform grafana provider) — metric name changes in the app trigger a CI check that validates dashboard queries still return data. Pin dashboard variables to specific values in CI snapshot tests. Add `min_interval` equal to your scrape interval in all panels.
+
+<div class="quiz-card">
+  <p class="quiz-q">A panel shows "No data." The dashboard variable dropdown shows "All" selected, and a teammate says "the variable is fine, it's set to All." What's the flaw in that reasoning?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>"All" showing in the dropdown doesn't guarantee the underlying query actually received a usable value — the variable can show "All" while resolving to no concrete value the query needs, which produces the same "No data" symptom as a genuinely broken query. This is exactly why the runbook lists checking that variables are resolved as its own separate step, distinct from just glancing at what the dropdown displays.</div>
+</div>
 
 ---
 

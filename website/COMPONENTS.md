@@ -199,6 +199,153 @@ into an actual `<br>` element *inside* the `<code>` tag, and `.textContent`
 break entirely and often mashing the two lines together with no separator.
 Keep labels on one line, or split into two edges/nodes, instead.
 
+## 5. Structure visualizer (live insert / delete / search)
+
+For data structures where the point is *watching it reshape as you operate
+on it* — a B-tree splitting on insert, a skip list's search path dropping
+levels, a consistent-hashing ring rebalancing when a node joins. This is
+different from the four components above: there's no shared JS wiring in
+`BaseLayout.astro` for it, because the actual insert/delete/search logic is
+different for every structure. Each instance is fully self-contained —
+markup plus its own `<script>` — and draws into an SVG using the shared
+`.viz-*` CSS classes (`global.css`) so every instance still looks and feels
+consistent.
+
+```html
+<div class="structure-viz" id="lru-demo">
+  <svg class="viz-canvas" viewBox="0 0 640 160"></svg>
+  <div class="viz-controls">
+    <input class="viz-input" type="number" placeholder="key" />
+    <button class="viz-btn" data-viz-action="insert">Insert</button>
+    <button class="viz-btn" data-viz-action="search">Search</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="delete">Delete</button>
+    <button class="viz-btn" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root = document.getElementById('lru-demo');
+  const svg = root.querySelector('.viz-canvas');
+  const status = root.querySelector('.viz-status');
+  let state = []; // whatever shape this structure needs
+
+  function draw() {
+    svg.innerHTML = '';
+    state.forEach((val, i) => {
+      const c = document.createElementNS(svgNS, 'circle');
+      c.setAttribute('cx', 40 + i * 70);
+      c.setAttribute('cy', 80);
+      c.setAttribute('r', 22);
+      c.setAttribute('class', 'viz-node');
+      svg.appendChild(c);
+      const t = document.createElementNS(svgNS, 'text');
+      t.setAttribute('x', 40 + i * 70);
+      t.setAttribute('y', 80);
+      t.textContent = val;
+      svg.appendChild(t);
+    });
+  }
+
+  root.querySelector('[data-viz-action="insert"]').addEventListener('click', () => {
+    const input = root.querySelector('.viz-input');
+    const v = input.value.trim();
+    if (!v) { status.textContent = 'Enter a value first.'; status.className = 'viz-status viz-status-error'; return; }
+    state.push(v);
+    input.value = '';
+    status.textContent = `Inserted ${v}.`;
+    status.className = 'viz-status viz-status-ok';
+    draw();
+  });
+
+  root.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    state = [];
+    status.textContent = 'Reset.';
+    status.className = 'viz-status';
+    draw();
+  });
+
+  draw();
+})();
+</script>
+```
+
+This toy example only shows the shape of the pattern — the real per-structure
+logic (a B-tree's split-on-overflow, a skip list's randomized-level search,
+a hash ring's clockwise-nearest-node lookup) is bespoke to that structure and
+belongs entirely inside that file's own `<script>`. Six reference
+implementations exist, each demonstrating a different layout/interaction
+shape — study whichever is closest to what you're building rather than
+starting from the toy example above:
+
+- `coding-practice/btree.md` — tree layout (BFS levels, leaf-order x-positioning,
+  parent centered over children), split/merge narrated in the status line.
+- `coding-practice/skip-list.md` — multi-row layout with a node's height drawn
+  as a dashed vertical span across the rows it appears on.
+- `coding-practice/lru-cache.md` — fixed-slot linear layout (simplest shape;
+  good starting point for a structure with a hard capacity).
+- `coding-practice/consistent-hashing.md` — actual circular SVG layout via
+  trig (`cx + r*cos(angle)`), for anything ring-shaped.
+- `coding-practice/bloom-filter.md` — flat bit-array with per-bit
+  "contributor" tracking purely for narration (the real structure doesn't
+  track this — it's added only to make the status messages teach the
+  false-positive mechanism).
+- `coding-practice/rate-limiter-implementations.md` — the one non-discrete
+  example: a continuously-refilling gauge driven by the real wall clock
+  (`Date.now()` + `setInterval`), for anything that evolves over time rather
+  than on discrete operations alone.
+
+Every one of these was built the same way — and any new one should be too:
+1. Write the core logic (no DOM) as a standalone script first.
+2. Test it headlessly: reproduce the file's own worked example/stepper
+   scenario exactly, then run a randomized stress test (tens of runs, each
+   hundreds of operations) asserting the structure's real invariants after
+   every single operation (sorted order, size bounds, no orphaned pointers,
+   whatever applies) — not just "it didn't throw."
+3. Only after that passes, add the SVG drawing and event wiring, and smoke-test
+   the DOM/interaction behavior with `jsdom` (`runScripts: 'dangerously'`)
+   before ever pasting it into the markdown file.
+A structure-viz that merely *looks* plausible but was never actually tested
+against the algorithm it claims to demonstrate is worse than no visualizer at
+all — a reader will trust the wrong belief it's animating.
+
+**Rules specific to this component:**
+- Give the `.structure-viz` div a **unique `id`** per instance on the page —
+  the script looks itself up by that id, and ids must be unique in HTML
+  regardless.
+- **Put the `<script>` as a sibling immediately after the closing
+  `</div>`, never nested inside it.** This isn't a style preference — it's
+  load-bearing. A `<script>` tag is itself a CommonMark "type 1" raw HTML
+  block, terminated only by its literal `</script>` closing tag, so blank
+  lines anywhere inside it are completely safe. But if you nest that same
+  `<script>` inside the `.structure-viz` `<div>` (a "type 6" block), the
+  *div's* blank-line-termination rule applies to everything inside it,
+  including your script — one blank line in your JS (normal, idiomatic
+  formatting) would silently truncate the whole component early, the same
+  failure mode documented above for `<pre><code>`. Keeping the script as a
+  top-level sibling sidesteps the whole hazard: write your JS however you
+  normally would, blank lines included.
+- Use the shared classes for anything drawn into the SVG so it matches the
+  rest of the site: `.viz-node` (default), `.viz-node-new` (just inserted),
+  `.viz-node-highlight` (currently being searched/traversed),
+  `.viz-node-removing` (mid-delete), `.viz-edge` / `.viz-edge-active` for
+  connecting lines, plain `<text>` for labels (already styled).
+- Always re-render by clearing and redrawing the whole SVG on every
+  operation (`svg.innerHTML = ''` then rebuild) rather than trying to
+  incrementally patch DOM nodes — these structures are small enough that a
+  full redraw is cheap, and it eliminates an entire class of "stale node
+  left behind" bugs.
+- Give the user feedback in `.viz-status` for every action, including
+  failure cases ("not found", "already exists", "enter a value first") —
+  a visualizer that silently does nothing on a bad input feels broken.
+- This component is for *manipulable* structures — trees, lists, rings,
+  bit arrays, hash tables. It is not a replacement for `stepper` (a fixed,
+  authored narrative works better as a stepper) — use a structure-viz when
+  the reader should be able to try their *own* values, not just watch one
+  scripted sequence.
+
 ## Authoring checklist
 
 - Keep components inside a single top-level `<div>` — remark's raw-HTML
@@ -209,4 +356,6 @@ Keep labels on one line, or split into two edges/nodes, instead.
   own HTML block rather than trying to parse its contents as markdown.
 - Everything inside a panel/answer is raw HTML, not markdown — use `<code>`,
   `<strong>`, `<br/>` etc., not backticks or `**bold**`.
-- Don't nest one interactive component inside another.
+- Don't nest one interactive component inside another (the structure-viz's
+  own `<script>` sibling is the one deliberate exception to "inside a single
+  top-level div" — see its rule above for why).

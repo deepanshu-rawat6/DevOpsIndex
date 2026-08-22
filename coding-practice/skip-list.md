@@ -96,6 +96,7 @@ Both versions implement the identical algorithm: a `header` sentinel present at 
   <div class="tab-buttons">
     <button data-tab="impl-go" class="active">Go</button>
     <button data-tab="impl-python">Python</button>
+    <button data-tab="impl-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="impl-go">
@@ -308,6 +309,135 @@ class SkipList:
             self.level -= 1
         return True</code></pre>
     </div>
+    <div class="tab-panel" data-tab-panel="impl-java">
+      <pre><code class="language-java">package skiplist;
+import java.util.concurrent.ThreadLocalRandom;
+// MAX_LEVEL caps how tall the list can ever grow. 16 comfortably covers
+// millions of entries at p=0.5 (2^16 is far more levels than log2(n) will
+// ever demand in practice) without unbounded per-node memory.
+// SkipList is an ordered map backed by a probabilistic multi-level linked
+// list. header is a sentinel node present at every level that never holds
+// a real key and always sorts before every real entry.
+public class SkipList&lt;K extends Comparable&lt;K&gt;, V&gt; {
+    private static final int MAX_LEVEL = 16;
+    private static final double P = 0.5;
+    // Node is one entry in the skip list. forward[i] points to the next
+    // node that also participates at level i. Level 0 is the full sorted
+    // list; higher levels are increasingly sparse "express lanes" over the
+    // same keys.
+    private static class Node&lt;K, V&gt; {
+        K key;
+        V value;
+        Node&lt;K, V&gt;[] forward;
+        @SuppressWarnings("unchecked")
+        Node(K key, V value, int level) {
+            this.key = key;
+            this.value = value;
+            this.forward = new Node[level];
+        }
+    }
+    private final Node&lt;K, V&gt; header;
+    private int level;
+    // New creates an empty skip list.
+    @SuppressWarnings("unchecked")
+    public SkipList() {
+        this.header = new Node&lt;&gt;(null, null, MAX_LEVEL);
+        this.level = 1;
+    }
+    // randomLevel flips a coin (p=0.5) repeatedly, climbing one more level on
+    // each "heads", stopping on the first "tails" or at MAX_LEVEL. This is a
+    // geometric distribution: P(level == k) = p^(k-1) * (1-p), so level 1 is
+    // the most common outcome and each additional level is half as likely as
+    // the one before it.
+    private int randomLevel() {
+        int lvl = 1;
+        while (lvl &lt; MAX_LEVEL &amp;&amp; ThreadLocalRandom.current().nextDouble() &lt; P) {
+            lvl++;
+        }
+        return lvl;
+    }
+    // search returns the value stored for key, or null if it was not found.
+    // It walks from the top level down: scan right while the next node's key
+    // is still less than the target, then drop a level once the next node
+    // would overshoot (or there is no next node at this level).
+    public V search(K key) {
+        Node&lt;K, V&gt; x = header;
+        for (int i = level - 1; i &gt;= 0; i--) {
+            while (x.forward[i] != null &amp;&amp; x.forward[i].key.compareTo(key) &lt; 0) {
+                x = x.forward[i];
+            }
+        }
+        x = x.forward[0];
+        if (x != null &amp;&amp; x.key.compareTo(key) == 0) {
+            return x.value;
+        }
+        return null;
+    }
+    // insert adds key/value, or updates value if key already exists.
+    @SuppressWarnings("unchecked")
+    public void insert(K key, V value) {
+        // update[i] records the rightmost node at level i that is still to the
+        // left of the insertion point -- exactly the nodes whose forward[i]
+        // pointer needs to be rewired to splice the new node in.
+        Node&lt;K, V&gt;[] update = new Node[MAX_LEVEL];
+        Node&lt;K, V&gt; x = header;
+        for (int i = level - 1; i &gt;= 0; i--) {
+            while (x.forward[i] != null &amp;&amp; x.forward[i].key.compareTo(key) &lt; 0) {
+                x = x.forward[i];
+            }
+            update[i] = x;
+        }
+        x = x.forward[0];
+        if (x != null &amp;&amp; x.key.compareTo(key) == 0) {
+            x.value = value;
+            return;
+        }
+        int newLevel = randomLevel();
+        if (newLevel &gt; level) {
+            // The coin flips climbed higher than any existing node. The header
+            // itself becomes the "update" pointer for the new top levels since
+            // nothing else reaches that high yet.
+            for (int i = level; i &lt; newLevel; i++) {
+                update[i] = header;
+            }
+            level = newLevel;
+        }
+        Node&lt;K, V&gt; newNode = new Node&lt;&gt;(key, value, newLevel);
+        for (int i = 0; i &lt; newLevel; i++) {
+            newNode.forward[i] = update[i].forward[i];
+            update[i].forward[i] = newNode;
+        }
+    }
+    // delete removes key if present, returning whether it was found.
+    @SuppressWarnings("unchecked")
+    public boolean delete(K key) {
+        Node&lt;K, V&gt;[] update = new Node[MAX_LEVEL];
+        Node&lt;K, V&gt; x = header;
+        for (int i = level - 1; i &gt;= 0; i--) {
+            while (x.forward[i] != null &amp;&amp; x.forward[i].key.compareTo(key) &lt; 0) {
+                x = x.forward[i];
+            }
+            update[i] = x;
+        }
+        x = x.forward[0];
+        if (x == null || x.key.compareTo(key) != 0) {
+            return false;
+        }
+        for (int i = 0; i &lt; level; i++) {
+            if (update[i].forward[i] != x) {
+                break;
+            }
+            update[i].forward[i] = x.forward[i];
+        }
+        // Shrink level if the top levels are now empty -- keeps future
+        // searches from wasting steps scanning levels with nothing on them.
+        while (level &gt; 1 &amp;&amp; header.forward[level - 1] == null) {
+            level--;
+        }
+        return true;
+    }
+}</code></pre>
+    </div>
   </div>
 </div>
 
@@ -317,6 +447,7 @@ class SkipList:
   <div class="tab-buttons">
     <button data-tab="test-go" class="active">Go</button>
     <button data-tab="test-python">Python</button>
+    <button data-tab="test-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="test-go">
@@ -426,6 +557,84 @@ class TestSkipList(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()</code></pre>
     </div>
+    <div class="tab-panel" data-tab-panel="test-java">
+      <pre><code class="language-java">package skiplist;
+public class SkipListTest {
+    public static void main(String[] args) {
+        testSearchFound();
+        testSearchMissing();
+        testInsertUpdatesExistingKey();
+        testOrderedTraversalAfterManyInserts();
+        testDeleteRemovesKey();
+        testDeleteMissingKey();
+        System.out.println("All tests passed");
+    }
+    static void testSearchFound() {
+        SkipList&lt;Integer, Integer&gt; sl = new SkipList&lt;&gt;();
+        sl.insert(3, 300);
+        sl.insert(6, 600);
+        sl.insert(9, 900);
+        Integer v = sl.search(6);
+        if (v == null || v != 600) {
+            throw new AssertionError("search(6) = " + v + "; want 600");
+        }
+    }
+    static void testSearchMissing() {
+        SkipList&lt;Integer, Integer&gt; sl = new SkipList&lt;&gt;();
+        sl.insert(1, 10);
+        if (sl.search(99) != null) {
+            throw new AssertionError("search(99) should return null for a key that was never inserted");
+        }
+    }
+    static void testInsertUpdatesExistingKey() {
+        SkipList&lt;Integer, Integer&gt; sl = new SkipList&lt;&gt;();
+        sl.insert(5, 50);
+        sl.insert(5, 999);
+        Integer v = sl.search(5);
+        if (v == null || v != 999) {
+            throw new AssertionError("search(5) = " + v + "; want 999 (update, not duplicate)");
+        }
+    }
+    static void testOrderedTraversalAfterManyInserts() {
+        SkipList&lt;Integer, Integer&gt; sl = new SkipList&lt;&gt;();
+        int[] keys = {17, 3, 9, 1, 12, 5, 19, 7};
+        for (int k : keys) {
+            sl.insert(k, k * 10);
+        }
+        for (int k : keys) {
+            Integer v = sl.search(k);
+            if (v == null || v != k * 10) {
+                throw new AssertionError("search(" + k + ") = " + v + "; want " + (k * 10));
+            }
+        }
+    }
+    static void testDeleteRemovesKey() {
+        SkipList&lt;Integer, Integer&gt; sl = new SkipList&lt;&gt;();
+        sl.insert(1, 1);
+        sl.insert(2, 2);
+        sl.insert(3, 3);
+        if (!sl.delete(2)) {
+            throw new AssertionError("delete(2) should return true for a present key");
+        }
+        if (sl.search(2) != null) {
+            throw new AssertionError("key 2 should no longer be found after delete");
+        }
+        if (sl.search(1) == null) {
+            throw new AssertionError("key 1 should be unaffected by deleting key 2");
+        }
+        if (sl.search(3) == null) {
+            throw new AssertionError("key 3 should be unaffected by deleting key 2");
+        }
+    }
+    static void testDeleteMissingKey() {
+        SkipList&lt;Integer, Integer&gt; sl = new SkipList&lt;&gt;();
+        sl.insert(1, 1);
+        if (sl.delete(42)) {
+            throw new AssertionError("delete(42) should return false for a key that was never inserted");
+        }
+    }
+}</code></pre>
+    </div>
   </div>
 </div>
 
@@ -485,6 +694,243 @@ Every insert is really two operations back to back: the same top-down search use
     <button class="stepper-next">Next →</button>
   </div>
 </div>
+
+---
+
+## Try It Yourself: Live Skip List
+
+The walkthrough above was one scripted insert. This is a real skip list running in your browser — insert, search, or delete any key and watch the levels reshape. Heights are genuinely randomized (an actual `Math.random()` coin flip per level, capped at 6 for this visualizer instead of the code's 16, since a demo never needs more), so your list won't look the same twice — that's the point. The dashed vertical line behind a node shows its full height; solid horizontal lines are the `forward` pointers a search actually follows.
+
+<div class="structure-viz" id="skiplist-live-viz">
+  <svg class="viz-canvas" viewBox="0 0 640 200"></svg>
+  <div class="viz-controls">
+    <input class="viz-input" type="number" placeholder="key" />
+    <button class="viz-btn" data-viz-action="insert">Insert</button>
+    <button class="viz-btn" data-viz-action="search">Search</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="delete">Delete</button>
+    <button class="viz-btn" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#1e3a8a"></span> key</span>
+    <span><span class="viz-swatch" style="background:#14532d"></span> just inserted</span>
+    <span><span class="viz-swatch" style="background:#78350f"></span> on the search path</span>
+    <span><span class="viz-swatch" style="background:#334155;border:1px dashed #64748b"></span> dashed = a node's full height</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root0 = document.getElementById('skiplist-live-viz');
+  const svg = root0.querySelector('.viz-canvas');
+  const input = root0.querySelector('.viz-input');
+  const status = root0.querySelector('.viz-status');
+
+  const MAX_LEVEL = 6, P = 0.5;
+  const ROW_H = 40, COL_W = 64, HEADER_W = 40;
+
+  let header, level, nextId, highlightIds, newId, flashTimer;
+
+  function reset() {
+    nextId = 0;
+    level = 1;
+    header = { id: 'H', key: -Infinity, forward: new Array(MAX_LEVEL).fill(null) };
+    highlightIds = new Set();
+    newId = null;
+    [3, 5, 7, 9, 17, 19].forEach(k => insert(k, true));
+  }
+
+  function randomLevel() {
+    let lvl = 1;
+    while (lvl < MAX_LEVEL && Math.random() < P) lvl++;
+    return lvl;
+  }
+
+  function insert(key, silent) {
+    const update = new Array(MAX_LEVEL).fill(header);
+    let node = header;
+    for (let i = level - 1; i >= 0; i--) {
+      while (node.forward[i] && node.forward[i].key < key) node = node.forward[i];
+      update[i] = node;
+    }
+    const next = node.forward[0];
+    if (next && next.key === key) {
+      if (!silent) setStatus(`${key} is already in the list — no change.`, 'error');
+      return;
+    }
+    const newLevel = randomLevel();
+    if (newLevel > level) {
+      for (let i = level; i < newLevel; i++) update[i] = header;
+      level = newLevel;
+    }
+    const id = 'n' + nextId++;
+    const newNode = { id, key, forward: new Array(newLevel).fill(null) };
+    for (let i = 0; i < newLevel; i++) {
+      newNode.forward[i] = update[i].forward[i];
+      update[i].forward[i] = newNode;
+    }
+    if (!silent) {
+      newId = id;
+      setStatus(`Inserted ${key} at height ${newLevel} (coin flips: ${newLevel - 1} heads then a tail, capped at ${MAX_LEVEL}).`, 'ok');
+    }
+  }
+
+  function findSearchPath(key) {
+    const visited = [header.id];
+    let node = header;
+    for (let i = level - 1; i >= 0; i--) {
+      while (node.forward[i] && node.forward[i].key < key) { node = node.forward[i]; visited.push(node.id); }
+    }
+    const cand = node.forward[0];
+    return { visited, found: !!(cand && cand.key === key) };
+  }
+
+  function doSearch(key) {
+    const { visited, found } = findSearchPath(key);
+    highlightIds = new Set(visited);
+    setStatus(
+      found ? `Found ${key} — visited ${visited.length} node(s) scanning right, dropping down each time the next key overshoots.`
+            : `${key} not found — visited ${visited.length} node(s) before landing on the spot it would occupy.`,
+      found ? 'ok' : 'error'
+    );
+    scheduleFlashClear();
+  }
+
+  function doDelete(key) {
+    const update = new Array(level).fill(null);
+    let node = header;
+    for (let i = level - 1; i >= 0; i--) {
+      while (node.forward[i] && node.forward[i].key < key) node = node.forward[i];
+      update[i] = node;
+    }
+    const target = node.forward[0];
+    if (!target || target.key !== key) {
+      setStatus(`${key} isn't in the list — nothing to delete.`, 'error');
+      return;
+    }
+    let levelsUnlinked = 0;
+    for (let i = 0; i < level; i++) {
+      if (update[i].forward[i] !== target) continue;
+      update[i].forward[i] = target.forward[i];
+      levelsUnlinked++;
+    }
+    const before = level;
+    while (level > 1 && !header.forward[level - 1]) level--;
+    const shrank = before !== level;
+    setStatus(`Deleted ${key} — unlinked at ${levelsUnlinked} level(s)${shrank ? `, list height shrank to ${level}` : ''}.`, 'ok');
+  }
+
+  function scheduleFlashClear() {
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => { highlightIds = new Set(); draw(); }, 1800);
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function draw() {
+    const order = [header];
+    let n = header.forward[0];
+    while (n) { order.push(n); n = n.forward[0]; }
+    const xOf = new Map();
+    order.forEach((node, i) => xOf.set(node.id, HEADER_W + i * COL_W));
+
+    const vbW = Math.max(500, HEADER_W + order.length * COL_W + 20);
+    const vbH = level * ROW_H + 40;
+    svg.setAttribute('viewBox', `0 0 ${vbW} ${vbH}`);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    for (let lvl = level - 1; lvl >= 0; lvl--) {
+      const y = (level - 1 - lvl) * ROW_H + 20;
+      const rowNodes = [header, ...order.slice(1).filter(nd => nd.forward.length > lvl)];
+      for (let i = 0; i < rowNodes.length - 1; i++) {
+        const a = rowNodes[i], b = rowNodes[i + 1];
+        svg.appendChild(el('line', {
+          x1: xOf.get(a.id) + 14, y1: y, x2: xOf.get(b.id) - 14, y2: y,
+          class: 'viz-edge' + (highlightIds.has(a.id) && highlightIds.has(b.id) ? ' viz-edge-active' : ''),
+        }));
+      }
+      const last = rowNodes[rowNodes.length - 1];
+      svg.appendChild(el('line', {
+        x1: xOf.get(last.id) + 14, y1: y, x2: xOf.get(last.id) + 30, y2: y, class: 'viz-edge',
+      }));
+    }
+
+    order.forEach(node => {
+      if (node === header) return;
+      const h = node.forward.length;
+      if (h <= 1) return;
+      const topY = (level - h) * ROW_H + 20;
+      const botY = (level - 1) * ROW_H + 20;
+      svg.appendChild(el('line', {
+        x1: xOf.get(node.id), y1: topY, x2: xOf.get(node.id), y2: botY,
+        class: 'viz-edge', 'stroke-dasharray': '2,3', opacity: '0.35',
+      }));
+    });
+
+    for (let lvl = level - 1; lvl >= 0; lvl--) {
+      const y = (level - 1 - lvl) * ROW_H + 20;
+      const rowNodes = lvl === level - 1 ? order : order.filter(nd => nd === header || nd.forward.length > lvl);
+      rowNodes.forEach(node => {
+        const x = xOf.get(node.id);
+        const isHeader = node === header;
+        let cls = 'viz-node';
+        if (node.id === newId && lvl === 0) cls = 'viz-node-new';
+        if (highlightIds.has(node.id)) cls = 'viz-node-highlight';
+        svg.appendChild(el('rect', { x: x - 14, y: y - 12, width: 28, height: 24, rx: 4, class: cls }));
+        const t = el('text', { x, y });
+        t.textContent = isHeader ? 'H' : node.key;
+        svg.appendChild(t);
+      });
+    }
+  }
+
+  root0.querySelector('[data-viz-action="insert"]').addEventListener('click', () => {
+    const v = parseInt(input.value, 10);
+    if (isNaN(v)) { setStatus('Enter a number first.', 'error'); return; }
+    highlightIds = new Set();
+    insert(v);
+    input.value = '';
+    draw();
+    scheduleFlashClear();
+  });
+
+  root0.querySelector('[data-viz-action="search"]').addEventListener('click', () => {
+    const v = parseInt(input.value, 10);
+    if (isNaN(v)) { setStatus('Enter a number first.', 'error'); return; }
+    newId = null;
+    doSearch(v);
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="delete"]').addEventListener('click', () => {
+    const v = parseInt(input.value, 10);
+    if (isNaN(v)) { setStatus('Enter a number first.', 'error'); return; }
+    highlightIds = new Set(); newId = null;
+    doDelete(v);
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    reset();
+    setStatus('Reset to the example list from the walkthrough above.', '');
+    draw();
+  });
+
+  reset();
+  setStatus('Loaded an example list — try inserting, searching, or deleting a key. Heights are randomized, so your list will reshape differently each time.', '');
+  draw();
+})();
+</script>
 
 ---
 

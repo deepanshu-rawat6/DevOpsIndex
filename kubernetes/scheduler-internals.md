@@ -210,6 +210,261 @@ Same sequence, one step at a time:
   <div class="quiz-a" hidden>No. Binding only writes <code>nodeName</code> &mdash; the kubelet still has to pull/start the container and get its IP from the CNI plugin, and only after the pod is <code>Running</code> does the API server propagate that IP into an EndpointSlice, which kube-proxy then turns into iptables rules. Traffic flows only after that last step.</div>
 </div>
 
+### Try It Yourself: Live Filter + Score
+
+Four nodes, 8 CPU each, all empty. Add a pod with a CPU request (leave it blank for a random 1-4) and watch the same two phases from above run for real: **Filter** drops any node that doesn't have enough free CPU, then **Score** ranks whatever's left with `LeastAllocated` &mdash; `score = (capacity - used) / capacity`, highest free-fraction wins, ties broken by lowest node index instead of the real scheduler's random tie-break so this demo stays reproducible. Push a pod too big for every remaining node and it lands in Pending instead of blocking, exactly like the `FailedScheduling` case above. Removing a bound pod frees its capacity immediately, but a pod already sitting in Pending is **not** auto-rescheduled &mdash; the real scheduler only retries on its own trigger, not the instant capacity opens up.
+
+<div class="structure-viz" id="scheduler-live-viz">
+  <svg class="viz-canvas" viewBox="0 0 640 220"></svg>
+  <div class="viz-controls">
+    <input class="viz-input" type="number" min="1" max="8" placeholder="CPU (blank=random 1-4)" />
+    <button class="viz-btn" data-viz-action="insert">Add Pod</button>
+    <input class="viz-input" type="text" placeholder="pod id e.g. P3" />
+    <button class="viz-btn viz-btn-danger" data-viz-action="delete">Delete</button>
+    <button class="viz-btn" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#1e3a8a"></span> bound capacity</span>
+    <span><span class="viz-swatch" style="background:#14532d"></span> just scheduled</span>
+    <span><span class="viz-swatch" style="background:#7f1d1d"></span> pending (unschedulable)</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root0 = document.getElementById('scheduler-live-viz');
+  const svg = root0.querySelector('.viz-canvas');
+  const cpuInput = root0.querySelectorAll('.viz-input')[0];
+  const idInput = root0.querySelectorAll('.viz-input')[1];
+  const status = root0.querySelector('.viz-status');
+
+  const NODE_COUNT = 4;
+  const NODE_CAPACITY = 8;
+
+  let nodes, pending, podCounter, flashNodeIndex, flashPendingId, flashTimer;
+
+  function reset() {
+    nodes = Array.from({ length: NODE_COUNT }, (_, i) => ({ index: i, capacity: NODE_CAPACITY, used: 0, pods: [] }));
+    pending = [];
+    podCounter = 0;
+    flashNodeIndex = null;
+    flashPendingId = null;
+  }
+
+  function randomCpu() {
+    return 1 + Math.floor(Math.random() * 4); // default 1-4 when left blank
+  }
+
+  // Filter + Score, pure (no mutation) -- also reused to check whether a
+  // pending pod would now fit after a removal frees capacity.
+  function filterAndScore(cpuRequest) {
+    const eligible = nodes.filter((n) => n.capacity - n.used >= cpuRequest);
+    if (eligible.length === 0) return { eligible };
+    // LeastAllocated: score = (capacity - used) / capacity -- higher free-fraction wins.
+    // Tie-break: lowest node index. The real scheduler tie-breaks randomly; this
+    // demo uses lowest-index instead so it stays deterministic and testable.
+    let winner = eligible[0];
+    let bestScore = (winner.capacity - winner.used) / winner.capacity;
+    let tie = false;
+    for (let i = 1; i < eligible.length; i++) {
+      const n = eligible[i];
+      const s = (n.capacity - n.used) / n.capacity;
+      if (s > bestScore) { winner = n; bestScore = s; tie = false; }
+      else if (s === bestScore) { tie = true; }
+    }
+    return { eligible, winner, score: bestScore, tie };
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function scheduleFlashClear() {
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => { flashNodeIndex = null; flashPendingId = null; draw(); }, 1600);
+  }
+
+  function addPod(cpuRequestRaw) {
+    let cpu;
+    if (cpuRequestRaw === undefined || cpuRequestRaw === null || cpuRequestRaw === '' || isNaN(cpuRequestRaw)) {
+      cpu = randomCpu();
+    } else {
+      cpu = Math.round(Number(cpuRequestRaw));
+      if (cpu < 1) cpu = 1;
+    }
+
+    const podId = 'P' + ++podCounter;
+    const { winner, score, tie } = filterAndScore(cpu);
+
+    if (!winner) {
+      pending.push({ id: podId, cpu });
+      flashNodeIndex = null;
+      flashPendingId = podId;
+      setStatus(`Pod ${podId} (${cpu} CPU) is Pending — no node has ${cpu} CPU free.`, 'error');
+      return;
+    }
+
+    winner.pods.push({ id: podId, cpu });
+    winner.used += cpu;
+    flashNodeIndex = winner.index;
+    flashPendingId = null;
+    const freeAfter = winner.capacity - winner.used;
+    const tieNote = tie ? ' (tied with another node, tie-broken by lowest node index)' : '';
+    setStatus(
+      `${podId} (${cpu} CPU) -> Node ${winner.index + 1} (${freeAfter}/${winner.capacity} free, score ${score.toFixed(3)}) — highest free capacity${tieNote}.`,
+      'ok'
+    );
+  }
+
+  function deletePod(podId) {
+    if (!podId) { setStatus('Enter a pod id first, e.g. P3.', 'error'); return; }
+
+    for (const node of nodes) {
+      const idx = node.pods.findIndex((p) => p.id === podId);
+      if (idx !== -1) {
+        const [pod] = node.pods.splice(idx, 1);
+        node.used -= pod.cpu;
+        const freeNow = node.capacity - node.used;
+        flashNodeIndex = null;
+        flashPendingId = null;
+
+        // Informational only -- does NOT auto-reschedule. Real k8s doesn't
+        // retroactively rebind pending pods just because capacity freed up;
+        // that needs a fresh scheduling attempt trigger.
+        let hint = null;
+        for (const p of pending) {
+          if (nodes.some((n) => n.capacity - n.used >= p.cpu)) { hint = p; break; }
+        }
+        const hintNote = hint ? ` Pod ${hint.id} (${hint.cpu} CPU) could now be manually re-added and would likely succeed.` : '';
+        setStatus(`Removed ${podId} (${pod.cpu} CPU) from Node ${node.index + 1} — ${freeNow}/${node.capacity} free now.${hintNote}`, 'ok');
+        return;
+      }
+    }
+
+    const pidx = pending.findIndex((p) => p.id === podId);
+    if (pidx !== -1) {
+      pending.splice(pidx, 1);
+      flashPendingId = null;
+      setStatus(`Removed ${podId} from Pending.`, 'ok');
+      return;
+    }
+
+    setStatus(`Pod ${podId} not found.`, 'error');
+  }
+
+  function draw() {
+    svg.setAttribute('viewBox', '0 0 640 220');
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    const gaugeW = 60, gaugeH = 120, gaugeY = 20, gap = 26, startX = 30;
+
+    nodes.forEach((node, i) => {
+      const x = startX + i * (gaugeW + gap);
+
+      // Outline (full capacity).
+      svg.appendChild(el('rect', { x, y: gaugeY, width: gaugeW, height: gaugeH, rx: 6, class: 'viz-edge', fill: 'none' }));
+
+      // Filled portion = used, growing up from the bottom.
+      const fillH = (node.used / node.capacity) * gaugeH;
+      if (fillH > 0) {
+        const cls = i === flashNodeIndex ? 'viz-node-new' : 'viz-node';
+        svg.appendChild(el('rect', {
+          x, y: gaugeY + (gaugeH - fillH), width: gaugeW, height: fillH, rx: 6, class: cls,
+        }));
+      }
+
+      const title = el('text', { x: x + gaugeW / 2, y: gaugeY - 6, class: 'viz-label-dim' });
+      title.textContent = `Node ${i + 1}`;
+      svg.appendChild(title);
+
+      const usedLabel = el('text', { x: x + gaugeW / 2, y: gaugeY + gaugeH + 14 });
+      usedLabel.textContent = `${node.used}/${node.capacity}`;
+      svg.appendChild(usedLabel);
+
+      const maxLines = 6;
+      node.pods.slice(0, maxLines).forEach((pod, li) => {
+        const t = el('text', { x: x + gaugeW / 2, y: gaugeY + gaugeH + 30 + li * 12, class: 'viz-label-dim' });
+        t.textContent = `${pod.id} (${pod.cpu})`;
+        svg.appendChild(t);
+      });
+      if (node.pods.length > maxLines) {
+        const t = el('text', { x: x + gaugeW / 2, y: gaugeY + gaugeH + 30 + maxLines * 12, class: 'viz-label-dim' });
+        t.textContent = `+${node.pods.length - maxLines} more`;
+        svg.appendChild(t);
+      }
+    });
+
+    // Pending box, to the right of the four node gauges.
+    const pendX = startX + NODE_COUNT * (gaugeW + gap) + 10;
+    const pendW = 640 - pendX - 20;
+    const pendH = gaugeH + 40;
+    svg.appendChild(el('rect', { x: pendX, y: gaugeY, width: pendW, height: pendH, rx: 6, class: 'viz-edge', fill: 'none' }));
+    const pendTitle = el('text', { x: pendX + pendW / 2, y: gaugeY - 6, class: 'viz-label-dim' });
+    pendTitle.textContent = 'Pending';
+    svg.appendChild(pendTitle);
+
+    if (pending.length === 0) {
+      const t = el('text', { x: pendX + pendW / 2, y: gaugeY + pendH / 2, class: 'viz-label-dim' });
+      t.textContent = '(empty)';
+      svg.appendChild(t);
+    } else {
+      const maxLines = 9;
+      pending.slice(0, maxLines).forEach((pod, li) => {
+        const cls = pod.id === flashPendingId ? 'viz-node-removing' : 'viz-edge';
+        svg.appendChild(el('rect', {
+          x: pendX + 8, y: gaugeY + 6 + li * 15, width: 12, height: 12, rx: 3, class: cls,
+        }));
+        const t = el('text', {
+          x: pendX + 26, y: gaugeY + 15 + li * 15, 'text-anchor': 'start', class: 'viz-label-dim',
+        });
+        t.textContent = `${pod.id} (${pod.cpu} CPU)`;
+        svg.appendChild(t);
+      });
+      if (pending.length > maxLines) {
+        const t = el('text', {
+          x: pendX + 26, y: gaugeY + 15 + maxLines * 15, 'text-anchor': 'start', class: 'viz-label-dim',
+        });
+        t.textContent = `+${pending.length - maxLines} more`;
+        svg.appendChild(t);
+      }
+    }
+  }
+
+  root0.querySelector('[data-viz-action="insert"]').addEventListener('click', () => {
+    addPod(cpuInput.value.trim());
+    cpuInput.value = '';
+    draw();
+    scheduleFlashClear();
+  });
+
+  root0.querySelector('[data-viz-action="delete"]').addEventListener('click', () => {
+    deletePod(idInput.value.trim());
+    idInput.value = '';
+    draw();
+    scheduleFlashClear();
+  });
+
+  root0.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    reset();
+    setStatus('Reset — 4 empty nodes, 8 CPU each.', '');
+    draw();
+  });
+
+  reset();
+  setStatus('4 nodes, 8 CPU each. Add pods (blank CPU = random 1-4) and watch Filter+Score place them, or force one to go Pending.', '');
+  draw();
+})();
+</script>
+
 ---
 
 ## Taints, Tolerations, and Affinity

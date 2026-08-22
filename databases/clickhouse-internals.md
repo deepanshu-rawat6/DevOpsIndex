@@ -42,6 +42,242 @@ graph TD
     MERGE --> BIGPART["Larger merged part: 20240115_1_3_1/<br/>rebuilt primary.idx, higher compression ratio"]:::result
 ```
 
+The diagram above shows one merge frozen in time. This is the same lifecycle running live: insert rows, watch them buffer in the memtable, flush into a part once 4 rows have accumulated (or force it sooner), and watch the background merge fire automatically once more than 3 parts pile up in the same partition — exactly the "many small parts → fewer, larger ones" cycle described above, just small enough numbers to actually watch happen.
+
+<div class="structure-viz" id="mergetree-live-viz">
+  <svg class="viz-canvas" viewBox="0 0 640 200"></svg>
+  <div class="viz-controls">
+    <input class="viz-input" type="number" placeholder="row value" />
+    <button class="viz-btn" data-viz-action="insert">Insert</button>
+    <button class="viz-btn" data-viz-action="flush">Force Flush</button>
+    <button class="viz-btn" data-viz-action="search">Search</button>
+    <button class="viz-btn" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#1e3a8a"></span> row / part contents</span>
+    <span><span class="viz-swatch" style="background:#14532d"></span> just flushed or merged</span>
+    <span><span class="viz-swatch" style="background:#78350f"></span> found by search</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root0 = document.getElementById('mergetree-live-viz');
+  const svg = root0.querySelector('.viz-canvas');
+  const input = root0.querySelector('.viz-input');
+  const status = root0.querySelector('.viz-status');
+
+  const FLUSH_THRESHOLD = 4;
+  const MERGE_THRESHOLD = 3;
+  const CELL_W = 36, CELL_H = 30, CELL_GAP = 6;
+  const PART_W = 150, PART_H = 58, PART_GAP = 18;
+
+  let memtable, parts, nextPartId;
+  let highlightMemVal, highlightPartId, newPartId, flashTimer;
+
+  function resetState() {
+    memtable = [];
+    parts = [];
+    nextPartId = 1;
+    highlightMemVal = null;
+    highlightPartId = null;
+    newPartId = null;
+  }
+
+  // Merge = concat + re-sort (a simplification of a real k-way merge over
+  // already-sorted runs -- ClickHouse never re-sorts from scratch since
+  // every source part is already sorted; it does a linear k-way merge
+  // instead. We concat+sort here purely because the result is identical
+  // and the code is simpler for a teaching demo).
+  function mergeIfNeeded(log) {
+    while (parts.length > MERGE_THRESHOLD) {
+      const oldest = parts.shift();
+      const second = parts.shift();
+      const mergedRows = oldest.rows.concat(second.rows).sort((a, b) => a - b);
+      const merged = { id: nextPartId++, rows: mergedRows };
+      parts.push(merged);
+      log.push(`${MERGE_THRESHOLD + 1} parts exceeded the threshold of ${MERGE_THRESHOLD} — background merge combined P${oldest.id}+P${second.id} into P${merged.id} (${merged.rows.length} rows)`);
+      newPartId = merged.id;
+    }
+  }
+
+  function doFlush(log, forced) {
+    if (memtable.length === 0) {
+      log.push('memtable is empty — nothing to flush');
+      return null;
+    }
+    const sorted = memtable.slice().sort((a, b) => a - b);
+    const part = { id: nextPartId++, rows: sorted };
+    parts.push(part);
+    memtable = [];
+    newPartId = part.id;
+    log.push(forced
+      ? `force-flushed as part P${part.id} (${part.rows.length} rows)`
+      : `memtable full — flushed as part P${part.id} (${part.rows.length} rows)`);
+    mergeIfNeeded(log);
+    return part;
+  }
+
+  function doInsert(value) {
+    const log = [];
+    highlightPartId = null;
+    highlightMemVal = null;
+    newPartId = null;
+    memtable.push(value);
+    if (memtable.length >= FLUSH_THRESHOLD) {
+      doFlush(log, false);
+    } else {
+      highlightMemVal = value;
+    }
+    setStatus(log.length ? `Inserted ${value} — ${log.join('; then ')}.` : `Inserted ${value} (${memtable.length}/${FLUSH_THRESHOLD} in memtable).`, 'ok');
+  }
+
+  function doSearch(value) {
+    highlightPartId = null;
+    highlightMemVal = null;
+    newPartId = null;
+    if (memtable.includes(value)) {
+      highlightMemVal = value;
+      setStatus(`Found ${value} in the memtable (not flushed yet).`, 'ok');
+      scheduleFlashClear();
+      return;
+    }
+    for (let i = parts.length - 1; i >= 0; i--) {
+      if (parts[i].rows.includes(value)) {
+        highlightPartId = parts[i].id;
+        setStatus(`Found ${value} in part P${parts[i].id}.`, 'ok');
+        scheduleFlashClear();
+        return;
+      }
+    }
+    setStatus(`${value} not found — checked the memtable and all ${parts.length} part(s).`, 'error');
+  }
+
+  function scheduleFlashClear() {
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => { highlightMemVal = null; highlightPartId = null; newPartId = null; draw(); }, 1800);
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function formatRows(rows) {
+    const MAX_SHOWN = 10;
+    if (rows.length <= MAX_SHOWN) return rows.join(', ');
+    return rows.slice(0, MAX_SHOWN).join(', ') + `, …+${rows.length - MAX_SHOWN} more`;
+  }
+
+  function draw() {
+    const memRowY = 14;
+    const memLabelY = 4;
+    const partsLabelY = memRowY + CELL_H + 22;
+    const partsRowY = partsLabelY + 8;
+
+    const memRowW = Math.max(CELL_W, memtable.length * (CELL_W + CELL_GAP));
+    let partsRowW = 16;
+    parts.forEach((p) => { partsRowW += PART_W + PART_GAP; });
+    const vbW = Math.max(320, memRowW + 32, partsRowW + 16);
+    const vbH = partsRowY + PART_H + 16;
+    svg.setAttribute('viewBox', `0 0 ${vbW} ${vbH}`);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    const memLabel = el('text', { x: 16, y: memLabelY + 6, class: 'viz-label-dim', 'text-anchor': 'start' });
+    memLabel.textContent = `memtable (${memtable.length}/${FLUSH_THRESHOLD})`;
+    svg.appendChild(memLabel);
+
+    if (memtable.length === 0) {
+      const empty = el('rect', {
+        x: 16, y: memRowY, width: CELL_W, height: CELL_H, rx: 4,
+        class: 'viz-edge', 'fill-opacity': '0', 'stroke-dasharray': '4,3',
+      });
+      svg.appendChild(empty);
+    } else {
+      memtable.forEach((v, i) => {
+        const x = 16 + i * (CELL_W + CELL_GAP);
+        const cls = v === highlightMemVal ? 'viz-node-new' : 'viz-node';
+        svg.appendChild(el('rect', { x, y: memRowY, width: CELL_W, height: CELL_H, rx: 4, class: cls }));
+        const t = el('text', { x: x + CELL_W / 2, y: memRowY + CELL_H / 2 });
+        t.textContent = v;
+        svg.appendChild(t);
+      });
+    }
+
+    const partsLabel = el('text', { x: 16, y: partsLabelY, class: 'viz-label-dim', 'text-anchor': 'start' });
+    partsLabel.textContent = parts.length
+      ? `parts, newest → oldest (${parts.length}/${MERGE_THRESHOLD} before next merge)`
+      : 'parts (none yet)';
+    svg.appendChild(partsLabel);
+
+    const newestFirst = parts.slice().reverse();
+    newestFirst.forEach((p, i) => {
+      const x = 16 + i * (PART_W + PART_GAP);
+      const y = partsRowY;
+      const cls = p.id === newPartId ? 'viz-node-new' : (p.id === highlightPartId ? 'viz-node-highlight' : 'viz-node');
+      svg.appendChild(el('rect', { x, y, width: PART_W, height: PART_H, rx: 6, class: cls, 'fill-opacity': '0.18' }));
+      const title = el('text', { x: x + PART_W / 2, y: y + 16, class: 'viz-label-dim' });
+      title.textContent = `P${p.id} • ${p.rows.length} row${p.rows.length === 1 ? '' : 's'}`;
+      svg.appendChild(title);
+      const body = el('text', { x: x + PART_W / 2, y: y + 38 });
+      body.textContent = formatRows(p.rows);
+      svg.appendChild(body);
+    });
+
+    if (parts.length === 0) {
+      const noPart = el('text', { x: 16 + PART_W / 2, y: partsRowY + PART_H / 2, class: 'viz-label-dim' });
+      noPart.textContent = '(empty)';
+      svg.appendChild(noPart);
+    }
+  }
+
+  root0.querySelector('[data-viz-action="insert"]').addEventListener('click', () => {
+    const v = parseInt(input.value, 10);
+    if (isNaN(v)) { setStatus('Enter a numeric row value first.', 'error'); return; }
+    doInsert(v);
+    input.value = '';
+    draw();
+    scheduleFlashClear();
+  });
+
+  root0.querySelector('[data-viz-action="flush"]').addEventListener('click', () => {
+    const log = [];
+    highlightPartId = null;
+    highlightMemVal = null;
+    newPartId = null;
+    const part = doFlush(log, true);
+    setStatus(log.join('; then '), part ? 'ok' : '');
+    draw();
+    scheduleFlashClear();
+  });
+
+  root0.querySelector('[data-viz-action="search"]').addEventListener('click', () => {
+    const v = parseInt(input.value, 10);
+    if (isNaN(v)) { setStatus('Enter a numeric row value first.', 'error'); return; }
+    doSearch(v);
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    resetState();
+    setStatus('Reset — memtable and all parts cleared.', '');
+    draw();
+  });
+
+  resetState();
+  setStatus('Insert rows to fill the memtable (flushes automatically at 4), or Force Flush to see a part sooner.', '');
+  draw();
+})();
+</script>
+
 The two index files do different jobs even though both sound like "an index on this column." `minmax_event_date.idx` works at the *partition* level — it lets the planner throw out whole partitions (whole months, in this schema) before opening them at all. `primary.idx` works one level down, inside whatever partitions survive that cut — it's the sparse index over the `ORDER BY` key that skips individual granules within a part. Partition pruning is the coarse first cut; the primary index skip is the fine-grained second one.
 
 <div class="stepper">

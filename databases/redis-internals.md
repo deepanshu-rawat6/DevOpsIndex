@@ -66,6 +66,320 @@ graph TD
   <div class="quiz-a" hidden>Listpacks pack every element contiguously in one memory block — no per-element pointers or allocation overhead — which is both more memory-efficient and more cache-friendly than a hashtable or skiplist for small collections. The tradeoff is that operations on a listpack are effectively linear scans, so it only stays cheap below the configured size thresholds; Redis automatically converts to the general-purpose encoding once a collection outgrows them, trading memory density for algorithmic efficiency at scale.</div>
 </div>
 
+### Incremental rehashing: growing the hashtable without a latency spike
+
+Once a hash (or Redis's own top-level keyspace dict, which is the same `dict` structure under the hood) is in `hashtable` mode, it keeps growing as more entries land in it. Growing a hashtable normally means allocating a bigger array and rehashing every existing key into it — for a dict with millions of keys, doing that in one blocking pass would stall every client for however long the full rehash takes, an O(n) latency spike landing on whichever unlucky command happened to trigger it.
+
+Redis avoids that by rehashing incrementally. When the load factor crosses its threshold, it allocates a second table double the size of the first and keeps **both tables alive at once** instead of rehashing everything up front. From that point on, every read or write that touches the dict does a small amount of extra work first: it migrates exactly one bucket from the old table into the new one, then proceeds with whatever operation was actually requested. A cursor tracks which old-table bucket is migrated next, so the work marches forward one bucket per operation until the old table is fully drained, at which point it's freed and the new table becomes the only table. If the server is otherwise idle, a periodic cron job (`serverCron`) also nudges the migration along so a quiet keyspace still finishes a rehash in the background rather than waiting indefinitely for the next command. While a rehash is in progress, lookups have to check both tables — new writes go straight to the new table, but a key inserted before the rehash started might still be sitting in either one, so a `GET` can't skip the old table until migration is finished.
+
+This is the mechanism that keeps Redis's per-command complexity at amortized O(1) even while a hashtable is actively resizing — the cost of moving the whole table is spread thinly across every subsequent operation instead of paid all at once, so no single command ever pays for more than one bucket's worth of migration.
+
+<div class="quiz-card">
+  <p class="quiz-q">While a hashtable is mid-rehash, why does a lookup have to check both the old and new tables instead of just the new one?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Migration only moves one bucket per operation, so at any point during a rehash most of the old table's keys haven't been migrated yet — only whichever buckets the cursor has already passed. A key inserted before the rehash started could still be sitting in an unmigrated old-table bucket, so skipping the old table would produce false misses until the whole migration finishes.</div>
+</div>
+
+Try it below: the load factor here is total keys divided by the old table's bucket count, and it's set to trigger a rehash the moment it exceeds 1.0, doubling the bucket count each time. Insert enough keys and Search mid-rehash to see both tables checked and the migration cursor advance one bucket per operation.
+
+<div class="structure-viz" id="redis-rehash-viz">
+  <svg class="viz-canvas" viewBox="0 0 640 200"></svg>
+  <div class="viz-controls">
+    <input class="viz-input" type="text" placeholder="key" />
+    <button class="viz-btn" data-viz-action="insert">Insert</button>
+    <button class="viz-btn" data-viz-action="search">Search</button>
+    <button class="viz-btn" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#1e3a8a"></span> bucket with keys</span>
+    <span><span class="viz-swatch" style="background:#14532d"></span> just inserted / just migrated into</span>
+    <span><span class="viz-swatch" style="background:#78350f"></span> found by last search</span>
+    <span><span class="viz-swatch" style="background:#7f1d1d"></span> just migrated out (old bucket, now empty)</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root0 = document.getElementById('redis-rehash-viz');
+  const svg = root0.querySelector('.viz-canvas');
+  const input = root0.querySelector('.viz-input');
+  const status = root0.querySelector('.viz-status');
+
+  const SEED_KEYS = ['alpha', 'beta', 'gamma'];
+  const CELL_W = 88, CELL_H = 42, GAP = 12;
+
+  let oldTable, newTable, rehashing, rehashCursor, hasRehashedOnce;
+  // Flash state, purely for narration/highlighting -- the real dict doesn't
+  // track any of this, it's added only so the visualizer can point at what
+  // just happened.
+  let flashOldRemoved, flashNewReceived, flashInsertLoc, flashSearchLoc, flashTimer;
+
+  function hashKey(str) {
+    let h = 5381;
+    for (let i = 0; i < str.length; i++) h = ((h * 33) ^ str.charCodeAt(i)) >>> 0;
+    return h >>> 0;
+  }
+
+  function makeBuckets(n) { return Array.from({ length: n }, () => []); }
+
+  function totalKeys(table) { return table.reduce((s, b) => s + b.length, 0); }
+
+  function containsKey(key) {
+    const oldPos = hashKey(key) % oldTable.length;
+    if (oldTable[oldPos].includes(key)) return true;
+    if (newTable) {
+      const newPos = hashKey(key) % newTable.length;
+      if (newTable[newPos].includes(key)) return true;
+    }
+    return false;
+  }
+
+  // Migrates exactly one bucket of oldTable into newTable, advancing the
+  // cursor. If this finishes the last bucket, the rehash completes: oldTable
+  // becomes newTable, newTable is cleared, rehashing flips off. Returns null
+  // if not currently rehashing.
+  function migrateOneBucket() {
+    if (!rehashing) return null;
+    const idx = rehashCursor;
+    const bucket = oldTable[idx];
+    const movedCount = bucket.length;
+    const receivedPositions = new Set();
+    for (const key of bucket) {
+      const pos = hashKey(key) % newTable.length;
+      newTable[pos].push(key);
+      receivedPositions.add(pos);
+    }
+    oldTable[idx] = [];
+    rehashCursor++;
+    let completed = false;
+    if (rehashCursor >= oldTable.length) {
+      oldTable = newTable;
+      newTable = null;
+      rehashing = false;
+      rehashCursor = 0;
+      completed = true;
+    }
+    return { migratedIndex: idx, movedCount, completed, receivedPositions };
+  }
+
+  function doInsert(key) {
+    const already = containsKey(key);
+    let migrationInfo = null;
+    let insertedInto, bucket, startedRehash = false;
+
+    if (rehashing) {
+      migrationInfo = migrateOneBucket();
+      const activeTable = rehashing ? newTable : oldTable;
+      bucket = hashKey(key) % activeTable.length;
+      if (!already) activeTable[bucket].push(key);
+      insertedInto = rehashing ? 'new' : 'old';
+    } else {
+      bucket = hashKey(key) % oldTable.length;
+      if (!already) oldTable[bucket].push(key);
+      insertedInto = 'old';
+      const lf = totalKeys(oldTable) / oldTable.length;
+      if (lf > 1.0) {
+        newTable = makeBuckets(oldTable.length * 2);
+        rehashing = true;
+        rehashCursor = 0;
+        startedRehash = true;
+      }
+    }
+
+    flashOldRemoved = migrationInfo ? migrationInfo.migratedIndex : null;
+    flashNewReceived = migrationInfo ? migrationInfo.receivedPositions : new Set();
+    flashInsertLoc = already ? null : { table: insertedInto, bucket };
+    flashSearchLoc = null;
+    if (migrationInfo) hasRehashedOnce = true;
+    if (startedRehash) hasRehashedOnce = true;
+
+    const parts = [];
+    if (migrationInfo) {
+      parts.push(`migrated bucket ${migrationInfo.migratedIndex} of old table (${migrationInfo.movedCount} key(s) moved)`);
+      if (migrationInfo.completed) parts.push('rehash complete — old table retired, new table is now the only table');
+    }
+    if (already) {
+      parts.push(`"${key}" was already present — no duplicate stored`);
+    } else if (insertedInto === 'new') {
+      parts.push(`inserted "${key}" directly into the new table, bucket ${bucket} (live writes go straight to the new table during a rehash)`);
+    } else {
+      parts.push(`inserted "${key}" into bucket ${bucket}`);
+    }
+    if (startedRehash) {
+      parts.push(`load factor exceeded 1.0 — starting rehash to ${newTable.length} buckets`);
+    }
+    setStatus(parts.join(' — '), 'ok');
+  }
+
+  function doSearch(key) {
+    let migrationInfo = null;
+    if (rehashing) migrationInfo = migrateOneBucket();
+
+    flashOldRemoved = migrationInfo ? migrationInfo.migratedIndex : null;
+    flashNewReceived = migrationInfo ? migrationInfo.receivedPositions : new Set();
+    flashInsertLoc = null;
+    if (migrationInfo) hasRehashedOnce = true;
+
+    const oldPos = hashKey(key) % oldTable.length;
+    let result;
+    if (oldTable[oldPos].includes(key)) {
+      result = { found: true, table: 'old', bucket: oldPos };
+    } else if (newTable && newTable[hashKey(key) % newTable.length].includes(key)) {
+      result = { found: true, table: 'new', bucket: hashKey(key) % newTable.length };
+    } else {
+      result = { found: false };
+    }
+    flashSearchLoc = result.found ? { table: result.table, bucket: result.bucket } : null;
+
+    const parts = [];
+    if (migrationInfo) {
+      parts.push(`migrated bucket ${migrationInfo.migratedIndex} of old table (${migrationInfo.movedCount} key(s) moved)`);
+      if (migrationInfo.completed) parts.push('rehash complete — old table retired');
+    }
+    if (result.found) {
+      parts.push(`"${key}" found in the ${result.table} table, bucket ${result.bucket}`);
+    } else {
+      parts.push(`"${key}" not found in either table`);
+    }
+    setStatus(parts.join(' — '), result.found ? 'ok' : 'error');
+  }
+
+  function reset() {
+    oldTable = makeBuckets(4);
+    newTable = null;
+    rehashing = false;
+    rehashCursor = 0;
+    hasRehashedOnce = false;
+    flashOldRemoved = null;
+    flashNewReceived = new Set();
+    flashInsertLoc = null;
+    flashSearchLoc = null;
+    for (const k of SEED_KEYS) {
+      const pos = hashKey(k) % oldTable.length;
+      oldTable[pos].push(k);
+    }
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function drawRow(table, which, yTop, label) {
+    const rowEls = [];
+    const labelEl = el('text', { x: 10, y: yTop - 12 });
+    labelEl.setAttribute('class', 'viz-label-dim');
+    labelEl.setAttribute('text-anchor', 'start');
+    labelEl.textContent = label;
+    rowEls.push(labelEl);
+
+    table.forEach((bucket, i) => {
+      const x = GAP + i * (CELL_W + GAP);
+      const occupied = bucket.length > 0;
+      let cls = occupied ? 'viz-node' : 'viz-edge';
+      let fillOpacity = occupied ? '1' : '0';
+      let dash = occupied ? '' : '4,3';
+
+      const isRemoved = which === 'old' && flashOldRemoved === i;
+      const isReceived = which === 'new' && flashNewReceived && flashNewReceived.has(i);
+      const isInsertLoc = flashInsertLoc && flashInsertLoc.table === which && flashInsertLoc.bucket === i;
+      const isSearchHit = flashSearchLoc && flashSearchLoc.table === which && flashSearchLoc.bucket === i;
+
+      if (isInsertLoc || isReceived) { cls = 'viz-node-new'; fillOpacity = '1'; dash = ''; }
+      else if (isSearchHit) { cls = 'viz-node-highlight'; fillOpacity = '1'; dash = ''; }
+      else if (isRemoved) { cls = 'viz-node-removing'; fillOpacity = '1'; dash = ''; }
+
+      rowEls.push(el('rect', {
+        x, y: yTop, width: CELL_W, height: CELL_H, rx: 6,
+        class: cls, 'fill-opacity': fillOpacity, 'stroke-dasharray': dash,
+      }));
+
+      const idxLabel = el('text', { x: x + CELL_W / 2, y: yTop - 4 });
+      idxLabel.setAttribute('class', 'viz-label-dim');
+      idxLabel.textContent = 'bucket ' + i;
+      rowEls.push(idxLabel);
+
+      const contentText = el('text', { x: x + CELL_W / 2, y: yTop + CELL_H / 2 });
+      contentText.setAttribute('style', 'font-size:9px');
+      contentText.textContent = occupied ? bucket.join(', ') : (isRemoved ? '(just emptied)' : '(empty)');
+      rowEls.push(contentText);
+    });
+
+    return rowEls;
+  }
+
+  function draw() {
+    const oldCount = oldTable.length;
+    const newCount = newTable ? newTable.length : 0;
+    const maxCols = Math.max(oldCount, newCount, 1);
+    const width = maxCols * (CELL_W + GAP) + GAP;
+    const showNewRow = hasRehashedOnce;
+    const height = showNewRow ? 190 : 90;
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    drawRow(oldTable, 'old', 30, `Old table (${oldCount} buckets)`).forEach((e) => svg.appendChild(e));
+
+    if (showNewRow) {
+      if (newTable) {
+        drawRow(newTable, 'new', 130, `New table (${newCount} buckets)`).forEach((e) => svg.appendChild(e));
+      } else {
+        const t = el('text', { x: width / 2, y: 150 });
+        t.setAttribute('class', 'viz-label-dim');
+        t.textContent = 'New table — no rehash currently in progress';
+        svg.appendChild(t);
+      }
+    }
+  }
+
+  function scheduleFlashClear() {
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => {
+      flashOldRemoved = null;
+      flashNewReceived = new Set();
+      flashInsertLoc = null;
+      flashSearchLoc = null;
+      draw();
+    }, 2400);
+  }
+
+  root0.querySelector('[data-viz-action="insert"]').addEventListener('click', () => {
+    const key = input.value.trim();
+    if (!key) { setStatus('Enter a key first.', 'error'); return; }
+    doInsert(key);
+    input.value = '';
+    draw();
+    scheduleFlashClear();
+  });
+
+  root0.querySelector('[data-viz-action="search"]').addEventListener('click', () => {
+    const key = input.value.trim();
+    if (!key) { setStatus('Enter a key first.', 'error'); return; }
+    doSearch(key);
+    draw();
+    scheduleFlashClear();
+  });
+
+  root0.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    reset();
+    setStatus('Reset — 4-bucket old table with alpha, beta, gamma pre-loaded.', '');
+    draw();
+  });
+
+  reset();
+  setStatus('Loaded: 4-bucket old table with alpha, beta, gamma pre-loaded. Insert a few more keys to push the load factor past 1.0 and trigger a rehash.', '');
+  draw();
+})();
+</script>
+
 ---
 
 ## Memory Model

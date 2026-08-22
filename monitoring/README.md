@@ -21,15 +21,15 @@ Metrics, logs, traces, and alerting — from Prometheus fundamentals to long-ter
 
 ## Read Order
 
-```
-prometheus            → data model, TSDB, PromQL foundation
-alertmanager          → routing, grouping, inhibition
-grafana               → dashboards (USE/RED/SLO)
-alerting-philosophy   → what to alert on, symptoms vs causes
-opentelemetry         → traces/metrics/logs, OTEL Collector
-loki                  → log aggregation, LogQL
-performance-debugging → USE/RED methods in practice
-slo-sli               → error budgets, burn-rate alerts
-thanos-mimir          → long-term/global metric storage
-monitoring-scenarios  → applied debugging runbooks
+```mermaid
+graph LR
+    A["prometheus<br/>data model, TSDB, PromQL foundation"] --> B["alertmanager<br/>routing, grouping, inhibition"]
+    B --> C["grafana<br/>dashboards (USE/RED/SLO)"]
+    C --> D["alerting-philosophy<br/>what to alert on, symptoms vs causes"]
+    D --> E["opentelemetry<br/>traces/metrics/logs, OTEL Collector"]
+    E --> F["loki<br/>log aggregation, LogQL"]
+    F --> G["performance-debugging<br/>USE/RED methods in practice"]
+    G --> H["slo-sli<br/>error budgets, burn-rate alerts"]
+    H --> I["thanos-mimir<br/>long-term/global metric storage"]
+    I --> J["monitoring-scenarios<br/>applied debugging runbooks"]
 ```

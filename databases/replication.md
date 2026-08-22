@@ -541,6 +541,198 @@ sequenceDiagram
   <div class="quiz-a" hidden>No. A node grants its vote only if it hasn't already voted this term <em>and</em> the candidate's log is at least as up-to-date as its own. Node A and Node B will see that Node C's log is behind theirs and withhold their votes, so Node C can't reach a majority no matter how quickly it started campaigning. Timing out first only earns a chance to run — an out-of-date log still loses.</div>
 </div>
 
+### Try It Yourself: Live Leader Election
+
+The stepper above walks through one scripted election. This one's live — kill the current leader as many times as you like and watch a new one get elected, term by term. Two simplifications versus real Raft, both to keep the demo focused on the election mechanic itself: there's no log here, so the "candidate log is at least as up-to-date" check from the stepper above is skipped (a vote is granted purely on term); and majority is computed over currently-*alive* nodes, not the fixed 5-node configuration — real Raft requires a majority of the full configured cluster so a minority partition can never elect its own leader.
+
+<div class="structure-viz" id="raft-election-viz">
+  <svg class="viz-canvas" viewBox="0 0 620 150"></svg>
+  <div class="viz-controls">
+    <button class="viz-btn viz-btn-danger" data-viz-action="kill-leader">Kill Leader</button>
+    <button class="viz-btn" data-viz-action="revive">Revive Dead Node</button>
+    <button class="viz-btn" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#1e3a8a"></span> Follower</span>
+    <span><span class="viz-swatch" style="background:#78350f"></span> Candidate</span>
+    <span><span class="viz-swatch" style="background:#14532d"></span> Leader</span>
+    <span><span class="viz-swatch" style="background:#7f1d1d"></span> Dead</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root0 = document.getElementById('raft-election-viz');
+  const svg = root0.querySelector('.viz-canvas');
+  const status = root0.querySelector('.viz-status');
+
+  const W = 100, H = 90, GAP = 20;
+
+  let nodes, leaderId;
+
+  function makeInitialNodes() {
+    return [1, 2, 3, 4, 5].map((i) => ({
+      id: 'N' + i,
+      term: 1,
+      state: i === 1 ? 'leader' : 'follower',
+      votedFor: 'N1',
+      alive: true,
+    }));
+  }
+
+  function reset() {
+    nodes = makeInitialNodes();
+    leaderId = 'N1';
+  }
+
+  function findNode(id) { return nodes.find((n) => n.id === id); }
+  function aliveNodes() { return nodes.filter((n) => n.alive); }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  // Core election logic — see this Raft section's two documented
+  // simplifications above (no log, majority over alive nodes only).
+  // Returns a narration array; caller joins it for the status line.
+  function killLeader() {
+    const messages = [];
+    const leader = leaderId ? findNode(leaderId) : null;
+    if (!leader || !leader.alive) {
+      messages.push('No leader is currently alive — nothing to kill.');
+      return messages;
+    }
+
+    leader.alive = false;
+    messages.push(`${leader.id} (Leader, term ${leader.term}) killed.`);
+    leaderId = null;
+
+    const alive = aliveNodes();
+    if (alive.length === 0) {
+      messages.push('All nodes are dead — no alive nodes can win a majority. Revive one or Reset.');
+      return messages;
+    }
+
+    const candidate = alive[Math.floor(Math.random() * alive.length)];
+    const newTerm = candidate.term + 1;
+    candidate.term = newTerm;
+    candidate.state = 'candidate';
+    candidate.votedFor = candidate.id;
+    messages.push(`${candidate.id} times out first -> Candidate, term ${newTerm - 1}→${newTerm}, votes for itself.`);
+
+    let votes = 1;
+    for (const n of alive) {
+      if (n.id === candidate.id) continue;
+      if (newTerm > n.term) {
+        n.term = newTerm;
+        n.votedFor = candidate.id;
+        votes++;
+        messages.push(`${n.id} grants its vote to ${candidate.id}.`);
+      } else {
+        messages.push(`${n.id} withholds its vote from ${candidate.id}.`);
+      }
+    }
+
+    const majority = Math.floor(alive.length / 2) + 1;
+    if (votes >= majority) {
+      candidate.state = 'leader';
+      leaderId = candidate.id;
+      for (const n of alive) {
+        if (n.id === candidate.id) continue;
+        n.state = 'follower';
+        n.term = candidate.term;
+        n.votedFor = candidate.id;
+      }
+      messages.push(`${candidate.id} wins ${votes}/${alive.length} votes (majority of alive nodes) -> new Leader, term ${newTerm}.`);
+    } else {
+      messages.push(`${candidate.id} only got ${votes}/${alive.length} votes -> no majority, election fails this round.`);
+    }
+    return messages;
+  }
+
+  function reviveDeadNode() {
+    const dead = nodes.filter((n) => !n.alive).sort((a, b) => a.id.localeCompare(b.id));
+    if (dead.length === 0) return ['No dead nodes to revive.'];
+    const node = dead[0];
+    node.alive = true;
+
+    const leader = leaderId ? findNode(leaderId) : null;
+    if (leader) {
+      node.term = leader.term;
+      node.state = 'follower';
+      node.votedFor = leader.id;
+      return [`${node.id} revived as Follower at term ${leader.term}, catching up and voting for current Leader ${leader.id}.`];
+    }
+    const alive = aliveNodes();
+    const maxTerm = alive.length ? Math.max(...alive.map((n) => n.term)) : node.term;
+    node.term = maxTerm;
+    node.state = 'follower';
+    node.votedFor = null;
+    return [`${node.id} revived as Follower at term ${maxTerm} — no Leader is currently elected, so it hasn't voted for anyone yet.`];
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function text(x, y, str, cls) {
+    const t = el('text', cls ? { x, y, class: cls } : { x, y });
+    t.textContent = str;
+    return t;
+  }
+
+  function draw() {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    nodes.forEach((n, i) => {
+      const x = GAP + i * (W + GAP);
+      const y = 25;
+      let cls = 'viz-node';
+      if (!n.alive) cls = 'viz-node-removing';
+      else if (n.state === 'leader') cls = 'viz-node-new';
+      else if (n.state === 'candidate') cls = 'viz-node-highlight';
+
+      svg.appendChild(el('rect', { x, y, width: W, height: H, rx: 8, class: cls }));
+      const cx = x + W / 2;
+      svg.appendChild(text(cx, y + 16, n.id));
+      svg.appendChild(text(cx, y + 34, n.alive ? capitalize(n.state) : 'Dead'));
+      svg.appendChild(text(cx, y + 52, `term ${n.term}`, 'viz-label-dim'));
+      svg.appendChild(text(cx, y + 70, n.votedFor ? `votes ${n.votedFor}` : 'votes —', 'viz-label-dim'));
+    });
+  }
+
+  function capitalize(s) { return s.charAt(0).toUpperCase() + s.slice(1); }
+
+  root0.querySelector('[data-viz-action="kill-leader"]').addEventListener('click', () => {
+    const messages = killLeader();
+    const joined = messages.join(' ');
+    const kind = /wins/.test(joined) ? 'ok' : 'error';
+    setStatus(joined, kind);
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="revive"]').addEventListener('click', () => {
+    const messages = reviveDeadNode();
+    setStatus(messages.join(' '), /No dead nodes/.test(messages[0]) ? 'error' : 'ok');
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    reset();
+    setStatus('Reset to a 5-node cluster: N1 is Leader, term 1, everyone else Follower voting for N1.', '');
+    draw();
+  });
+
+  reset();
+  setStatus('Loaded a 5-node cluster: N1 is Leader (term 1). Click "Kill Leader" to trigger an election.', '');
+  draw();
+})();
+</script>
+
 ### Paxos (Classic)
 
 Two phases:

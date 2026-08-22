@@ -139,6 +139,251 @@ The `keyword` field type skips analysis — stored as-is for exact matching, sor
   <div class="quiz-a" hidden>Both the indexed document and the search query go through the same analysis pipeline before matching happens — lowercasing, stop-word removal, and tokenization apply to the query text too, not just the stored document. "Quick Fox" tokenizes down to [quick, fox], "the quick brown fox" tokenizes to [quick, brown, fox] (the/stop word removed), and the query matches because both terms are present in the doc's term list — word order and original casing were thrown away for both sides before the lookup happened.</div>
 </div>
 
+### Try It Yourself: Live Document Indexer
+
+A simplified version of the same term → doc IDs mechanism above: tokenization here is just lowercase + split on whitespace + strip basic punctuation (no stop-word removal, no positions, no scoring — real Lucene does all three). Insert a few sentences, search a term, and watch which document boxes and which postings entry light up. Delete removes a doc immediately in this demo; the status message after a delete explains how that differs from real Elasticsearch.
+
+<div class="structure-viz" id="es-invindex-demo">
+  <svg class="viz-canvas" viewBox="0 0 640 220"></svg>
+  <div class="viz-controls">
+    <input class="viz-input" type="text" placeholder="sentence (insert/search) or doc id (delete)" />
+    <button class="viz-btn" data-viz-action="insert">Insert doc</button>
+    <button class="viz-btn" data-viz-action="search">Search term</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="delete">Delete doc id</button>
+    <button class="viz-btn" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root0 = document.getElementById('es-invindex-demo');
+  const svg = root0.querySelector('.viz-canvas');
+  const input = root0.querySelector('.viz-input');
+  const status = root0.querySelector('.viz-status');
+
+  function tokenize(text) {
+    return text
+      .toLowerCase()
+      .split(/\s+/)
+      .map((t) => t.replace(/^[.,!?]+|[.,!?]+$/g, ''))
+      .filter((t) => t.length > 0);
+  }
+
+  const EXAMPLE_DOCS = [
+    'The quick brown fox',
+    'The lazy dog sleeps all day',
+    'A quick fox jumps over the lazy dog',
+  ];
+
+  let docs, index, nextDocId, highlightDocIds, highlightTerm, newDocId, flashTimer;
+
+  function resetState() {
+    docs = new Map();
+    index = new Map();
+    nextDocId = 1;
+    highlightDocIds = new Set();
+    highlightTerm = null;
+    newDocId = null;
+    for (const text of EXAMPLE_DOCS) insertDoc(text, false);
+  }
+
+  function insertDoc(text, isUserAction) {
+    const tokens = tokenize(text);
+    const id = nextDocId++;
+    docs.set(id, text);
+    const uniqueTerms = new Set(tokens);
+    for (const term of uniqueTerms) {
+      if (!index.has(term)) index.set(term, new Set());
+      index.get(term).add(id);
+    }
+    if (isUserAction) {
+      highlightDocIds = new Set();
+      highlightTerm = null;
+      newDocId = id;
+    }
+    return { id, uniqueTerms: [...uniqueTerms] };
+  }
+
+  function searchTerm(term) {
+    const [t] = tokenize(term);
+    if (!t) return { term: null, ids: [] };
+    const set = index.get(t);
+    return { term: t, ids: set ? [...set] : [] };
+  }
+
+  function deleteDoc(id) {
+    if (!docs.has(id)) return false;
+    docs.delete(id);
+    for (const [term, idSet] of index) {
+      idSet.delete(id);
+      if (idSet.size === 0) index.delete(term);
+    }
+    return true;
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function truncate(text) {
+    return text.length > 22 ? text.slice(0, 22) + '…' : text;
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function scheduleFlashClear() {
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => {
+      highlightDocIds = new Set();
+      highlightTerm = null;
+      newDocId = null;
+      draw();
+    }, 3000);
+  }
+
+  function draw() {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    const docsArr = [...docs.entries()].sort((a, b) => a[0] - b[0]);
+    const termsArr = [...index.entries()].sort((a, b) => (a[0] < b[0] ? -1 : 1)).map(([term, idSet]) => [term, [...idSet].sort((a, b) => a - b)]);
+
+    const marginX = 10;
+    const docBoxW = 150, docBoxH = 46, docGapX = 14, docGapY = 12;
+    const docsPerRow = 4;
+    const docRows = Math.max(1, Math.ceil(docsArr.length / docsPerRow));
+    const docsAreaTop = 26;
+    const docsAreaHeight = docsArr.length > 0 ? docRows * docBoxH + (docRows - 1) * docGapY : 24;
+
+    const termRowW = marginX * 2 + docsPerRow * docBoxW + (docsPerRow - 1) * docGapX;
+    const termRowH = 24, termGapY = 4;
+    const termsAreaTop = docsAreaTop + docsAreaHeight + 34;
+    const termsAreaHeight = termsArr.length > 0 ? termsArr.length * (termRowH + termGapY) : 24;
+
+    const width = termRowW;
+    const height = termsAreaTop + termsAreaHeight + 10;
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+
+    const docsLabel = el('text', { x: marginX, y: 12, class: 'viz-label-dim', 'text-anchor': 'start' });
+    docsLabel.textContent = `Documents (${docsArr.length})`;
+    svg.appendChild(docsLabel);
+
+    if (docsArr.length === 0) {
+      const t = el('text', { x: width / 2, y: docsAreaTop + 16, class: 'viz-label-dim' });
+      t.textContent = 'no documents indexed';
+      svg.appendChild(t);
+    }
+
+    docsArr.forEach(([id, text], i) => {
+      const row = Math.floor(i / docsPerRow);
+      const col = i % docsPerRow;
+      const x = marginX + col * (docBoxW + docGapX);
+      const y = docsAreaTop + row * (docBoxH + docGapY);
+      let cls = 'viz-node';
+      if (id === newDocId) cls = 'viz-node-new';
+      else if (highlightDocIds.has(id)) cls = 'viz-node-highlight';
+      svg.appendChild(el('rect', { x, y, width: docBoxW, height: docBoxH, rx: 6, class: cls }));
+      const t1 = el('text', { x: x + docBoxW / 2, y: y + 16 });
+      t1.textContent = `Doc ${id}`;
+      svg.appendChild(t1);
+      const t2 = el('text', { x: x + docBoxW / 2, y: y + 32, class: 'viz-label-dim' });
+      t2.textContent = truncate(text);
+      svg.appendChild(t2);
+    });
+
+    const termsLabel = el('text', { x: marginX, y: termsAreaTop - 12, class: 'viz-label-dim', 'text-anchor': 'start' });
+    termsLabel.textContent = `Postings (term → doc ids), ${termsArr.length} terms`;
+    svg.appendChild(termsLabel);
+
+    if (termsArr.length === 0) {
+      const t = el('text', { x: width / 2, y: termsAreaTop + 12, class: 'viz-label-dim' });
+      t.textContent = 'index is empty';
+      svg.appendChild(t);
+    }
+
+    termsArr.forEach(([term, ids], i) => {
+      const y = termsAreaTop + i * (termRowH + termGapY);
+      const isHighlighted = highlightTerm !== null && term === highlightTerm;
+      const cls = isHighlighted ? 'viz-node-highlight' : 'viz-edge';
+      svg.appendChild(el('rect', {
+        x: marginX, y, width: termRowW - marginX * 2, height: termRowH, rx: 4,
+        class: cls, 'fill-opacity': isHighlighted ? '1' : '0',
+      }));
+      const t = el('text', { x: marginX + 8, y: y + termRowH / 2, 'text-anchor': 'start' });
+      t.textContent = `"${term}" → [${ids.join(', ')}]`;
+      svg.appendChild(t);
+    });
+  }
+
+  root0.querySelector('[data-viz-action="insert"]').addEventListener('click', () => {
+    const text = input.value.trim();
+    if (!text) { setStatus('Enter a sentence to index first.', 'error'); return; }
+    const { id, uniqueTerms } = insertDoc(text, true);
+    input.value = '';
+    const preview = uniqueTerms.slice(0, 3).map((t) => `"${t}"`).join(', ');
+    const more = uniqueTerms.length > 3 ? ` (${uniqueTerms.length} terms)` : ` (${uniqueTerms.length} term${uniqueTerms.length === 1 ? '' : 's'})`;
+    setStatus(`Indexed doc ${id}: added to postings for ${preview}${uniqueTerms.length > 3 ? ', …' : ''}${more}.`, 'ok');
+    draw();
+    scheduleFlashClear();
+  });
+
+  root0.querySelector('[data-viz-action="search"]').addEventListener('click', () => {
+    const raw = input.value.trim();
+    if (!raw) { setStatus('Enter a term to search first.', 'error'); return; }
+    const { term, ids } = searchTerm(raw);
+    newDocId = null;
+    if (!term || ids.length === 0) {
+      highlightTerm = term;
+      highlightDocIds = new Set();
+      setStatus(`No documents contain that term.`, 'ok');
+    } else {
+      highlightTerm = term;
+      highlightDocIds = new Set(ids);
+      const previews = ids.map((id) => `doc ${id} ("${truncate(docs.get(id))}")`).join(', ');
+      setStatus(`"${term}" found in: ${previews}.`, 'ok');
+    }
+    draw();
+    scheduleFlashClear();
+  });
+
+  root0.querySelector('[data-viz-action="delete"]').addEventListener('click', () => {
+    const raw = input.value.trim();
+    const id = Number(raw);
+    if (!raw || !Number.isInteger(id)) { setStatus('Enter a numeric doc id to delete.', 'error'); return; }
+    const ok = deleteDoc(id);
+    input.value = '';
+    highlightDocIds = new Set();
+    highlightTerm = null;
+    newDocId = null;
+    if (!ok) {
+      setStatus(`No document with id ${id} exists.`, 'error');
+    } else {
+      setStatus(
+        `Removed doc ${id} from the index. (Real Elasticsearch doesn't do this in-place — it marks the doc as deleted in its Lucene segment and the space is only reclaimed on the next segment merge, since segments are immutable once written. This demo removes it immediately for simplicity.)`,
+        'ok'
+      );
+    }
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    resetState();
+    setStatus('Reset to the 3 example documents (doc 1 is the exact "The quick brown fox" example above).', '');
+    draw();
+  });
+
+  resetState();
+  setStatus('3 example documents loaded. Insert a sentence, search a term, or delete a doc id.', '');
+  draw();
+})();
+</script>
+
 ---
 
 ## 5. Index Segments

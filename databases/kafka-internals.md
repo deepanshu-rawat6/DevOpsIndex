@@ -764,3 +764,227 @@ group.instance.id=payments-consumer-0   # unique, stable ID per consumer instanc
 session.timeout.ms=60000                # how long before a static member is considered dead
 # With static membership, restarts within session.timeout.ms skip rebalance
 ```
+
+### Try It Yourself: Live Partition Assignment (Range Assignor)
+
+The mermaid diagram earlier in this file already showed the shape of it — 6 partitions split into contiguous ranges across consumers. This is that assignment live: 6 fixed partitions (P0–P5), starting with a 2-consumer group. Add or remove a consumer by name to trigger a rebalance and watch the Range assignor — Kafka's default — recompute the whole assignment from scratch every time.
+
+<div class="structure-viz" id="rebalance-demo">
+  <svg class="viz-canvas" viewBox="0 0 616 130"></svg>
+  <div class="viz-controls">
+    <input class="viz-input" type="text" placeholder="consumer name (e.g. C3)" />
+    <button class="viz-btn" data-viz-action="insert">Add Consumer</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="delete">Remove Consumer</button>
+    <button class="viz-btn" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend"></div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root0 = document.getElementById('rebalance-demo');
+  const svg = root0.querySelector('.viz-canvas');
+  const input = root0.querySelector('.viz-input');
+  const status = root0.querySelector('.viz-status');
+  const legend = root0.querySelector('.viz-legend');
+
+  const NUM_PARTITIONS = 6;
+  const SLOT_W = 80, SLOT_H = 50, GAP = 14;
+  const COLORS = ['#60a5fa', '#4ade80', '#fbbf24', '#f472b6', '#a78bfa', '#fb923c', '#38bdf8', '#facc15'];
+  const UNASSIGNED_FILL = '#1e293b';
+
+  let consumers, assignment, consumerColor;
+  // Whether the "eager rebalance pauses everyone" callout has already been
+  // shown once. Deliberately NOT reset by the Reset button -- it's a
+  // one-time explanation of the protocol, not per-scenario state.
+  let hasExplainedEagerRebalance = false;
+
+  // Range assignor: sort consumers by name, divide partitions into
+  // contiguous ranges as evenly as possible. First `extra` consumers (in
+  // sorted order) get one extra partition. This is Kafka's default assignor.
+  function assign(list) {
+    const sorted = [...list].sort();
+    const n = sorted.length;
+    const result = new Array(NUM_PARTITIONS).fill(null);
+    if (n === 0) return result;
+    const base = Math.floor(NUM_PARTITIONS / n);
+    const extra = NUM_PARTITIONS % n;
+    let p = 0;
+    for (let i = 0; i < n; i++) {
+      const count = base + (i < extra ? 1 : 0);
+      for (let k = 0; k < count; k++) { result[p] = sorted[i]; p++; }
+    }
+    return result;
+  }
+
+  function reset() {
+    consumers = ['C1', 'C2'];
+    assignment = assign(consumers);
+    consumerColor = new Map();
+  }
+
+  function colorFor(name) {
+    if (!consumerColor.has(name)) consumerColor.set(name, COLORS[consumerColor.size % COLORS.length]);
+    return consumerColor.get(name);
+  }
+
+  // Turns a partition->owner array into { owner: "P0-P2" } range labels
+  // (or "P3" for a single partition). Consumers with zero partitions
+  // (more consumers than partitions) simply don't appear in the result.
+  function rangeLabel(assignmentArr) {
+    const map = {};
+    let i = 0;
+    while (i < assignmentArr.length) {
+      const owner = assignmentArr[i];
+      if (owner === null) { i++; continue; }
+      let j = i;
+      while (j < assignmentArr.length && assignmentArr[j] === owner) j++;
+      map[owner] = (j - 1 === i) ? `P${i}` : `P${i}-P${j - 1}`;
+      i = j;
+    }
+    return map;
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function draw() {
+    const vbW = NUM_PARTITIONS * (SLOT_W + GAP) + GAP;
+    const vbH = 130;
+    svg.setAttribute('viewBox', `0 0 ${vbW} ${vbH}`);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    for (let i = 0; i < NUM_PARTITIONS; i++) {
+      const x = GAP + i * (SLOT_W + GAP);
+      const y = 46;
+      const owner = assignment[i];
+      svg.appendChild(el('rect', {
+        x, y, width: SLOT_W, height: SLOT_H, rx: 6,
+        fill: owner ? colorFor(owner) : UNASSIGNED_FILL,
+        stroke: owner ? '#0f172a' : '#475569',
+        'stroke-width': owner ? '1.5' : '1.5',
+        'stroke-dasharray': owner ? '' : '4,3',
+      }));
+      const label = el('text', { x: x + SLOT_W / 2, y: 26, class: 'viz-label-dim' });
+      label.textContent = `P${i}`;
+      svg.appendChild(label);
+      const t = el('text', { x: x + SLOT_W / 2, y: y + SLOT_H / 2 });
+      t.textContent = owner || 'unassigned';
+      svg.appendChild(t);
+    }
+  }
+
+  function renderConsumerList() {
+    while (legend.firstChild) legend.removeChild(legend.firstChild);
+    if (consumers.length === 0) {
+      const span = document.createElement('span');
+      span.textContent = 'No active consumers — all partitions unassigned.';
+      legend.appendChild(span);
+      return;
+    }
+    const ranges = rangeLabel(assignment);
+    [...consumers].sort().forEach((c) => {
+      const span = document.createElement('span');
+      const swatch = document.createElement('span');
+      swatch.className = 'viz-swatch';
+      swatch.style.background = colorFor(c);
+      span.appendChild(swatch);
+      const label = document.createElement('span');
+      label.textContent = `${c}: ${ranges[c] || 'idle (no partitions)'}`;
+      span.appendChild(label);
+      legend.appendChild(span);
+    });
+  }
+
+  // Narrates a before/after rebalance: which consumers' assignments
+  // changed vs stayed byte-for-byte identical, even though the eager
+  // protocol pauses every consumer regardless.
+  function narrate(action, name, oldAssignment, oldConsumers) {
+    const oldRanges = rangeLabel(oldAssignment);
+    const newRanges = rangeLabel(assignment);
+    const survivors = oldConsumers.filter((c) => c !== name && consumers.includes(c));
+
+    let msg = action === 'add' ? `${name} joined the group. ` : `${name} left the group. `;
+
+    if (!hasExplainedEagerRebalance) {
+      msg += "Kafka's default eager rebalance protocol stops ALL consumers and reassigns everyone from scratch — even consumers who keep the same partitions still pause during this window. ";
+      hasExplainedEagerRebalance = true;
+    }
+
+    if (consumers.length === 0) {
+      msg += 'No consumers left — every partition is now unassigned, no active consumer.';
+      setStatus(msg, 'ok');
+      return;
+    }
+
+    if (action === 'add') {
+      const nr = newRanges[name];
+      msg += nr ? `It now owns ${nr}. ` : 'It got no partitions (idle — more consumers than partitions right now). ';
+    }
+
+    const changed = [];
+    const unchanged = [];
+    survivors.forEach((c) => {
+      const before = oldRanges[c] || 'idle';
+      const after = newRanges[c] || 'idle';
+      if (before === after) unchanged.push(`${c} stayed on ${after}`);
+      else changed.push(`${c}: ${before} -> ${after}`);
+    });
+
+    if (changed.length) msg += `Reassigned: ${changed.join('; ')}. `;
+    if (unchanged.length) msg += `Unchanged (paused during the rebalance, but the data never moved): ${unchanged.join('; ')}.`;
+
+    setStatus(msg.trim(), 'ok');
+  }
+
+  root0.querySelector('[data-viz-action="insert"]').addEventListener('click', () => {
+    const name = input.value.trim();
+    if (!name) { setStatus('Enter a consumer name first.', 'error'); return; }
+    if (consumers.includes(name)) { setStatus(`${name} is already in the group.`, 'error'); return; }
+    const oldAssignment = assignment.slice();
+    const oldConsumers = consumers.slice();
+    consumers.push(name);
+    assignment = assign(consumers);
+    input.value = '';
+    narrate('add', name, oldAssignment, oldConsumers);
+    draw();
+    renderConsumerList();
+  });
+
+  root0.querySelector('[data-viz-action="delete"]').addEventListener('click', () => {
+    const name = input.value.trim();
+    if (!name) { setStatus('Enter a consumer name first.', 'error'); return; }
+    if (!consumers.includes(name)) { setStatus(`${name} isn't in the group.`, 'error'); return; }
+    const oldAssignment = assignment.slice();
+    const oldConsumers = consumers.slice();
+    consumers = consumers.filter((c) => c !== name);
+    assignment = assign(consumers);
+    input.value = '';
+    narrate('remove', name, oldAssignment, oldConsumers);
+    draw();
+    renderConsumerList();
+  });
+
+  root0.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    reset();
+    setStatus('Reset to a 2-consumer group (C1, C2) evenly splitting all 6 partitions.', '');
+    draw();
+    renderConsumerList();
+  });
+
+  reset();
+  setStatus('Loaded with C1 and C2 evenly splitting 6 partitions (3 each). Add or remove a consumer to trigger a rebalance.', '');
+  draw();
+  renderConsumerList();
+})();
+</script>

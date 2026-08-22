@@ -195,6 +195,265 @@ graph TD
   </div>
 </div>
 
+**Try it yourself — MVCC visibility simulator.** The stepper above walks one scripted example. This one's live: it models a single row's version chain plus up to two concurrent transactions, so you can drive the same `xmin <= my_snapshot_xid < xmax` rule against sequences you pick yourself. Begin a transaction to get a snapshot xid, Update to branch the chain (old version's xmax gets set, a new version gets pushed), and watch each transaction's readout to see exactly which version its own snapshot resolves to — including the write-lock and write-conflict cases when two transactions touch the same row at once.
+
+<div class="structure-viz" id="mvcc-viz">
+  <svg class="viz-canvas" viewBox="0 0 700 190"></svg>
+  <div class="viz-controls">
+    <button class="viz-btn" data-viz-action="begin">Begin Txn</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div id="mvcc-txn-panel"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#1e3a8a"></span> live version</span>
+    <span><span class="viz-swatch" style="background:#7f1d1d"></span> dead / superseded (xmax set)</span>
+    <span><span class="viz-swatch" style="background:#14532d"></span> just written</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root0 = document.getElementById('mvcc-viz');
+  const svg = root0.querySelector('.viz-canvas');
+  const status = root0.querySelector('.viz-status');
+  const txnPanel = root0.querySelector('#mvcc-txn-panel');
+
+  // ---- core logic: identical to the standalone module verified against the
+  // doc's own worked example (txn 200 update) and a 15-seed x 150-step
+  // randomized stress test before any DOM code was written. ----
+  function createInitialState() {
+    return {
+      versions: [{ xmin: 100, xmax: null, value: 'Alice' }],
+      nextXid: 101,
+      transactions: [],
+    };
+  }
+
+  function isVisible(version, snapshotXid) {
+    return version.xmin <= snapshotXid && (version.xmax === null || snapshotXid < version.xmax);
+  }
+
+  function visibleVersions(state, snapshotXid) {
+    return state.versions.filter((v) => isVisible(v, snapshotXid));
+  }
+
+  function activeTransactions(state) {
+    return state.transactions.filter((t) => t.active);
+  }
+
+  function beginTxn(state) {
+    if (activeTransactions(state).length >= 2) {
+      return { ok: false, reason: 'Already 2 concurrent transactions — commit or roll one back first (demo caps at 2).' };
+    }
+    const xid = state.nextXid++;
+    const txn = { xid, snapshotXid: xid, active: true };
+    state.transactions.push(txn);
+    return { ok: true, txn };
+  }
+
+  function updateRow(state, txnXid, newValue) {
+    const txn = state.transactions.find((t) => t.xid === txnXid && t.active);
+    if (!txn) return { ok: false, reason: 'no such active transaction' };
+    const live = state.versions.find((v) => v.xmax === null);
+    if (!live) return { ok: false, reason: 'no live version to update' };
+    const creator = state.transactions.find((t) => t.xid === live.xmin);
+    if (creator && creator.active && creator.xid !== txn.xid) {
+      return { ok: false, reason: `row locked by uncommitted txn ${creator.xid} — commit or roll it back first` };
+    }
+    if (!isVisible(live, txn.snapshotXid)) {
+      return {
+        ok: false,
+        reason: `write conflict: your snapshot (${txn.snapshotXid}) can't see the current version (xmin=${live.xmin}) — someone else committed a newer version after you started`,
+      };
+    }
+    live.xmax = txn.xid;
+    const version = { xmin: txn.xid, xmax: null, value: newValue };
+    state.versions.push(version);
+    return { ok: true, version };
+  }
+
+  function commitTxn(state, txnXid) {
+    const txn = state.transactions.find((t) => t.xid === txnXid);
+    if (!txn) return { ok: false, reason: 'no such transaction' };
+    txn.active = false;
+    return { ok: true };
+  }
+
+  function rollbackTxn(state, txnXid) {
+    const txn = state.transactions.find((t) => t.xid === txnXid);
+    if (!txn) return { ok: false, reason: 'no such transaction' };
+    state.versions = state.versions.filter((v) => v.xmin !== txnXid);
+    state.versions.forEach((v) => {
+      if (v.xmax === txnXid) v.xmax = null;
+    });
+    txn.active = false;
+    return { ok: true };
+  }
+
+  // ---- DOM / SVG rendering ----
+  let state = createInitialState();
+  let lastCreated = null;
+  let flashTimer = null;
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function escapeHtml(s) {
+    return String(s).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;');
+  }
+
+  function txnColor(idx) {
+    return idx === 0 ? '#f59e0b' : '#a78bfa'; // amber / violet — distinct from tuple fill colors
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function scheduleFlashClear() {
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => {
+      lastCreated = null;
+      draw();
+    }, 1600);
+  }
+
+  function draw() {
+    const VW = 150, VH = 62, GAP = 22, PADX = 20, ROWY = 76;
+    const vbW = Math.max(620, PADX * 2 + state.versions.length * (VW + GAP) - GAP);
+    const vbH = 186;
+    svg.setAttribute('viewBox', `0 0 ${vbW} ${vbH}`);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    const active = activeTransactions(state);
+
+    // Version chain.
+    state.versions.forEach((v, i) => {
+      const x = PADX + i * (VW + GAP);
+      const dead = v.xmax !== null;
+      let cls = dead ? 'viz-node-removing' : 'viz-node';
+      if (v === lastCreated) cls = 'viz-node-new';
+      svg.appendChild(el('rect', { x, y: ROWY, width: VW, height: VH, rx: 8, class: cls }));
+      const t1 = el('text', { x: x + VW / 2, y: ROWY + 16 });
+      t1.textContent = `xmin=${v.xmin}`;
+      const t2 = el('text', { x: x + VW / 2, y: ROWY + 32 });
+      t2.textContent = `xmax=${v.xmax === null ? '—' : v.xmax}`;
+      const t3 = el('text', { x: x + VW / 2, y: ROWY + 48 });
+      t3.textContent = `value='${v.value}'`;
+      svg.appendChild(t1);
+      svg.appendChild(t2);
+      svg.appendChild(t3);
+      if (i < state.versions.length - 1) {
+        svg.appendChild(el('line', { x1: x + VW, y1: ROWY + VH / 2, x2: x + VW + GAP, y2: ROWY + VH / 2, class: 'viz-edge' }));
+      }
+    });
+
+    // Per-transaction "what do I see" markers, grouped by shared target so
+    // two txns pointing at the same version don't overlap.
+    const groups = new Map(); // versionIndex -> [{t, idx}]
+    active.forEach((t, idx) => {
+      const seen = visibleVersions(state, t.snapshotXid);
+      const target = seen[0];
+      if (!target) return;
+      const vi = state.versions.indexOf(target);
+      if (!groups.has(vi)) groups.set(vi, []);
+      groups.get(vi).push({ t, idx });
+    });
+
+    groups.forEach((entries, vi) => {
+      const cx = PADX + vi * (VW + GAP) + VW / 2;
+      const spread = entries.length > 1 ? 48 : 0;
+      entries.forEach((entry, pos) => {
+        const offset = entries.length > 1 ? (pos === 0 ? -spread : spread) : 0;
+        const mx = cx + offset;
+        const my = 14;
+        const color = txnColor(entry.idx);
+        svg.appendChild(el('line', { x1: mx, y1: my + 22, x2: cx, y2: ROWY, stroke: color, 'stroke-width': 2, 'stroke-dasharray': '4,3' }));
+        svg.appendChild(el('rect', { x: mx - 46, y: my, width: 92, height: 24, rx: 5, fill: color, 'fill-opacity': '0.18', stroke: color, 'stroke-width': 1.5 }));
+        const label = el('text', { x: mx, y: my + 13, style: `fill:${color};font-weight:600;` });
+        label.textContent = `T${entry.t.xid} snap=${entry.t.snapshotXid}`;
+        svg.appendChild(label);
+      });
+    });
+
+    renderTxnPanel(active);
+  }
+
+  function renderTxnPanel(active) {
+    if (active.length === 0) {
+      txnPanel.innerHTML = '<p style="margin:0.7rem 0 0;font-size:0.78rem;color:#64748b;">No active transactions &mdash; click &ldquo;Begin Txn&rdquo; to start one (up to 2 at a time).</p>';
+      return;
+    }
+    txnPanel.innerHTML = active.map((t, idx) => {
+      const color = txnColor(idx);
+      const seen = visibleVersions(state, t.snapshotXid);
+      const seenText = seen.length
+        ? seen.map((v) => `xmin=${v.xmin}, value=&#39;${escapeHtml(v.value)}&#39;`).join('; ')
+        : 'nothing (unexpected — please file this as a bug)';
+      return `
+        <div style="margin-top:0.7rem;padding:0.6rem 0.75rem;border-left:3px solid ${color};background:rgba(148,163,184,0.06);border-radius:0.25rem;">
+          <div style="font-size:0.8rem;font-weight:600;color:${color};">Txn ${t.xid} &mdash; snapshot ${t.snapshotXid}</div>
+          <div style="font-size:0.76rem;color:#94a3b8;margin:0.25rem 0 0.5rem;">Snapshot ${t.snapshotXid}&#39;s view: sees ${seenText}</div>
+          <div style="display:flex;flex-wrap:wrap;gap:0.4rem;align-items:center;">
+            <input class="viz-input mvcc-value-input" type="text" placeholder="new value" data-xid="${t.xid}" style="width:7rem" />
+            <button class="viz-btn" data-mvcc-action="update" data-xid="${t.xid}">Update</button>
+            <button class="viz-btn" data-mvcc-action="commit" data-xid="${t.xid}">Commit</button>
+            <button class="viz-btn viz-btn-danger" data-mvcc-action="rollback" data-xid="${t.xid}">Rollback</button>
+          </div>
+        </div>`;
+    }).join('');
+  }
+
+  txnPanel.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-mvcc-action]');
+    if (!btn) return;
+    const xid = parseInt(btn.getAttribute('data-xid'), 10);
+    const action = btn.getAttribute('data-mvcc-action');
+    if (action === 'update') {
+      const input = txnPanel.querySelector(`.mvcc-value-input[data-xid="${xid}"]`);
+      const val = input.value.trim();
+      if (!val) { setStatus('Enter a new value first.', 'error'); return; }
+      const res = updateRow(state, xid, val);
+      if (!res.ok) { setStatus(`Txn ${xid}: ${res.reason}`, 'error'); return; }
+      lastCreated = res.version;
+      setStatus(`Txn ${xid} updated the row to '${val}' — old version's xmax is now ${xid}, new version's xmin is ${xid}.`, 'ok');
+      scheduleFlashClear();
+    } else if (action === 'commit') {
+      commitTxn(state, xid);
+      setStatus(`Txn ${xid} committed.`, 'ok');
+    } else if (action === 'rollback') {
+      rollbackTxn(state, xid);
+      setStatus(`Txn ${xid} rolled back — any version it created is discarded and any xmax it set is cleared back to NULL.`, 'ok');
+    }
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="begin"]').addEventListener('click', () => {
+    const res = beginTxn(state);
+    if (!res.ok) { setStatus(res.reason, 'error'); return; }
+    setStatus(`Started txn ${res.txn.xid} — snapshot xid = ${res.txn.xid}.`, 'ok');
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    state = createInitialState();
+    lastCreated = null;
+    clearTimeout(flashTimer);
+    setStatus('Reset — one version (xmin=100, value=\'Alice\'), no active transactions.', '');
+    draw();
+  });
+
+  setStatus('One committed version so far (xmin=100). Begin a transaction, then Update to see MVCC branch the chain.', '');
+  draw();
+})();
+</script>
+
 **Dead tuples:** Old versions accumulate. `VACUUM` marks them as free space. `VACUUM FULL` rewrites the table (locks table, reclaims disk).
 
 ```sql

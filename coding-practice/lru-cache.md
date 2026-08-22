@@ -61,6 +61,7 @@ graph LR
   <div class="tab-buttons">
     <button data-tab="cache-go" class="active">Go</button>
     <button data-tab="cache-py">Python</button>
+    <button data-tab="cache-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="cache-go">
@@ -202,6 +203,92 @@ class LRUCache:
         self._remove(oldest)
         del self._items[oldest.key]</code></pre>
     </div>
+    <div class="tab-panel" data-tab-panel="cache-java">
+      <pre><code class="language-java">import java.util.HashMap;
+import java.util.Map;
+// Idiomatic Java shortcut: `new LinkedHashMap&lt;&gt;(cap, 0.75f, true)` with an
+// overridden removeEldestEntry() gives LRU eviction in ~10 lines. The
+// manual doubly-linked-list + hashmap version below is the interview-
+// expected approach, matching the Go/Python implementations above.
+public class LRUCache {
+    private static class Node {
+        final int key;
+        int value;
+        Node prev;
+        Node next;
+        Node(int key, int value) {
+            this.key = key;
+            this.value = value;
+        }
+    }
+    private final int capacity;
+    private final Map&lt;Integer, Node&gt; items;
+    private final Node head;
+    private final Node tail;
+    /** Creates an LRU cache with the given capacity. Throws if capacity &lt;= 0. */
+    public LRUCache(int capacity) {
+        if (capacity &lt;= 0) {
+            throw new IllegalArgumentException("lru: capacity must be positive");
+        }
+        this.capacity = capacity;
+        this.items = new HashMap&lt;&gt;(capacity);
+        this.head = new Node(0, 0);
+        this.tail = new Node(0, 0);
+        head.next = tail;
+        tail.prev = head;
+    }
+    /** Returns the value for key and marks it most recently used, or null if absent. */
+    public Integer get(int key) {
+        Node node = items.get(key);
+        if (node == null) {
+            return null;
+        }
+        moveToFront(node);
+        return node.value;
+    }
+    /** Inserts or updates key with value, evicting the LRU entry first if full and key is new. */
+    public void put(int key, int value) {
+        Node node = items.get(key);
+        if (node != null) {
+            node.value = value;
+            moveToFront(node);
+            return;
+        }
+        if (items.size() &gt;= capacity) {
+            evictOldest();
+        }
+        node = new Node(key, value);
+        items.put(key, node);
+        pushFront(node);
+    }
+    /** Returns the current number of entries in the cache. */
+    public int size() {
+        return items.size();
+    }
+    private void pushFront(Node node) {
+        node.prev = head;
+        node.next = head.next;
+        head.next.prev = node;
+        head.next = node;
+    }
+    private void remove(Node node) {
+        node.prev.next = node.next;
+        node.next.prev = node.prev;
+    }
+    private void moveToFront(Node node) {
+        remove(node);
+        pushFront(node);
+    }
+    private void evictOldest() {
+        Node oldest = tail.prev;
+        if (oldest == head) {
+            return;
+        }
+        remove(oldest);
+        items.remove(oldest.key);
+    }
+}</code></pre>
+    </div>
   </div>
 </div>
 
@@ -211,6 +298,7 @@ class LRUCache:
   <div class="tab-buttons">
     <button data-tab="tests-go" class="active">Go</button>
     <button data-tab="tests-py">Python</button>
+    <button data-tab="tests-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="tests-go">
@@ -296,6 +384,63 @@ class TestLRUCache(unittest.TestCase):
 if __name__ == "__main__":
     unittest.main()</code></pre>
     </div>
+    <div class="tab-panel" data-tab-panel="tests-java">
+      <pre><code class="language-java">public class LRUCacheTest {
+    public static void main(String[] args) {
+        testBasic();
+        testUpdateExisting();
+        testEvictionOrder();
+        System.out.println("ALL TESTS PASSED");
+    }
+    static void testBasic() {
+        LRUCache cache = new LRUCache(2);
+        cache.put(1, 100);
+        cache.put(2, 200);
+        assertEquals(100, cache.get(1), "Get(1)");
+        // Access to key 1 makes it MRU; key 2 becomes LRU.
+        cache.put(3, 300); // capacity=2, evicts key 2
+        assertNull(cache.get(2), "key 2 should have been evicted");
+        assertEquals(300, cache.get(3), "Get(3)");
+        assertEquals(100, cache.get(1), "Get(1)");
+        System.out.println("PASS testBasic");
+    }
+    static void testUpdateExisting() {
+        LRUCache cache = new LRUCache(2);
+        cache.put(1, 100);
+        cache.put(1, 999); // update, not insert
+        assertEquals(1, cache.size(), "size()");
+        assertEquals(999, cache.get(1), "Get(1)");
+        System.out.println("PASS testUpdateExisting");
+    }
+    static void testEvictionOrder() {
+        LRUCache cache = new LRUCache(3);
+        cache.put(1, 1);
+        cache.put(2, 2);
+        cache.put(3, 3);
+        cache.get(1); // 1 is now MRU; order (MRU-&gt;LRU): 1, 3, 2
+        cache.put(4, 4); // evicts 2 (the actual LRU)
+        assertNull(cache.get(2), "key 2 should have been evicted, not key 1 or 3");
+        assertNotNull(cache.get(1), "key 1 should still be present");
+        assertNotNull(cache.get(3), "key 3 should still be present");
+        System.out.println("PASS testEvictionOrder");
+    }
+    static void assertEquals(int expected, Integer actual, String msg) {
+        if (actual == null || actual != expected) {
+            throw new AssertionError(msg + ": expected " + expected + " but got " + actual);
+        }
+    }
+    static void assertNull(Integer actual, String msg) {
+        if (actual != null) {
+            throw new AssertionError(msg + ": expected null but got " + actual);
+        }
+    }
+    static void assertNotNull(Integer actual, String msg) {
+        if (actual == null) {
+            throw new AssertionError(msg + ": expected non-null value");
+        }
+    }
+}</code></pre>
+    </div>
   </div>
 </div>
 
@@ -332,6 +477,175 @@ The diagram above shows the structure frozen in time. This walks through the sam
   </div>
 </div>
 
+## Try It Yourself: Live LRU Cache
+
+Same capacity-3 cache, same starting point as the walkthrough above (after `Put(1)`, `Put(2)`, `Put(3)`) — except this one's live. Get an existing key to watch it jump to MRU, or insert a new one once it's full to watch the LRU slot get evicted.
+
+<div class="structure-viz" id="lru-live-viz">
+  <svg class="viz-canvas" viewBox="0 0 400 120"></svg>
+  <div class="viz-controls">
+    <input class="viz-input" type="number" placeholder="key" />
+    <button class="viz-btn" data-viz-action="insert">Put</button>
+    <button class="viz-btn" data-viz-action="search">Get</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="delete">Delete</button>
+    <button class="viz-btn" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#1e3a8a"></span> cached key</span>
+    <span><span class="viz-swatch" style="background:#14532d"></span> just inserted</span>
+    <span><span class="viz-swatch" style="background:#78350f"></span> just accessed / promoted</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root0 = document.getElementById('lru-live-viz');
+  const svg = root0.querySelector('.viz-canvas');
+  const input = root0.querySelector('.viz-input');
+  const status = root0.querySelector('.viz-status');
+
+  const CAPACITY = 3;
+  const SLOT_W = 90, SLOT_H = 46, GAP = 16;
+
+  let order, newKey, flashKey, flashTimer;
+
+  function reset() {
+    order = [3, 2, 1]; // MRU -> LRU; matches the walkthrough's step-4 state (put 1,2,3)
+    newKey = null;
+    flashKey = null;
+  }
+
+  function put(key) {
+    const idx = order.indexOf(key);
+    if (idx !== -1) {
+      order.splice(idx, 1);
+      order.unshift(key);
+      newKey = null;
+      flashKey = key;
+      setStatus(`${key} was already cached — a Put on an existing key promotes it to most-recently-used, same as a Get would.`, 'ok');
+      return;
+    }
+    let evicted = null;
+    if (order.length >= CAPACITY) evicted = order.pop();
+    order.unshift(key);
+    newKey = key;
+    flashKey = null;
+    setStatus(
+      evicted !== null
+        ? `Inserted ${key} — cache was full, so the least-recently-used key (${evicted}) was evicted first.`
+        : `Inserted ${key} — room to spare, no eviction needed (${order.length}/${CAPACITY}).`,
+      'ok'
+    );
+  }
+
+  function doGet(key) {
+    const idx = order.indexOf(key);
+    if (idx === -1) { setStatus(`${key} — cache miss.`, 'error'); flashKey = null; newKey = null; return; }
+    order.splice(idx, 1);
+    order.unshift(key);
+    newKey = null;
+    flashKey = key;
+    setStatus(`${key} — cache hit, promoted to most-recently-used.`, 'ok');
+  }
+
+  function doDelete(key) {
+    const idx = order.indexOf(key);
+    if (idx === -1) { setStatus(`${key} isn't cached — nothing to delete.`, 'error'); return; }
+    order.splice(idx, 1);
+    newKey = null;
+    flashKey = null;
+    setStatus(`Removed ${key} from the cache (${order.length}/${CAPACITY} now used).`, 'ok');
+  }
+
+  function scheduleFlashClear() {
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => { newKey = null; flashKey = null; draw(); }, 1600);
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function draw() {
+    const vbW = CAPACITY * (SLOT_W + GAP) + GAP;
+    const vbH = 110;
+    svg.setAttribute('viewBox', `0 0 ${vbW} ${vbH}`);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    for (let i = 0; i < CAPACITY; i++) {
+      const x = GAP + i * (SLOT_W + GAP);
+      const y = 34;
+      const key = order[i];
+      const occupied = key !== undefined;
+      let cls = 'viz-node';
+      if (occupied && key === newKey) cls = 'viz-node-new';
+      else if (occupied && key === flashKey) cls = 'viz-node-highlight';
+      svg.appendChild(el('rect', {
+        x, y, width: SLOT_W, height: SLOT_H, rx: 6,
+        class: occupied ? cls : 'viz-edge',
+        'fill-opacity': occupied ? '1' : '0', 'stroke-dasharray': occupied ? '' : '4,3',
+      }));
+      if (occupied) {
+        const t = el('text', { x: x + SLOT_W / 2, y: y + SLOT_H / 2 });
+        t.textContent = key;
+        svg.appendChild(t);
+      }
+      const label = el('text', { x: x + SLOT_W / 2, y: 16, class: 'viz-label-dim' });
+      label.textContent = i === 0 ? 'MRU' : (i === CAPACITY - 1 ? 'LRU (evict next)' : '');
+      svg.appendChild(label);
+      if (i < CAPACITY - 1) {
+        svg.appendChild(el('line', {
+          x1: x + SLOT_W, y1: y + SLOT_H / 2, x2: x + SLOT_W + GAP, y2: y + SLOT_H / 2, class: 'viz-edge',
+        }));
+      }
+    }
+  }
+
+  root0.querySelector('[data-viz-action="insert"]').addEventListener('click', () => {
+    const v = parseInt(input.value, 10);
+    if (isNaN(v)) { setStatus('Enter a number first.', 'error'); return; }
+    put(v);
+    input.value = '';
+    draw();
+    scheduleFlashClear();
+  });
+
+  root0.querySelector('[data-viz-action="search"]').addEventListener('click', () => {
+    const v = parseInt(input.value, 10);
+    if (isNaN(v)) { setStatus('Enter a number first.', 'error'); return; }
+    doGet(v);
+    draw();
+    scheduleFlashClear();
+  });
+
+  root0.querySelector('[data-viz-action="delete"]').addEventListener('click', () => {
+    const v = parseInt(input.value, 10);
+    if (isNaN(v)) { setStatus('Enter a number first.', 'error'); return; }
+    doDelete(v);
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    reset();
+    setStatus('Reset to the walkthrough’s step-4 state: Put(1), Put(2), Put(3) already applied.', '');
+    draw();
+  });
+
+  reset();
+  setStatus('Loaded at the walkthrough’s step-4 state (Put 1, 2, 3 already applied, cache full) — try Get(1) to see the eviction candidate change, then Put(4) to see the eviction.', '');
+  draw();
+})();
+</script>
+
 ---
 
 ## Complexity Analysis
@@ -366,6 +680,7 @@ Naively wrapping every method in a `sync.Mutex` works but serializes reads unnec
   <div class="tab-buttons">
     <button data-tab="safe-go" class="active">Go</button>
     <button data-tab="safe-py">Python</button>
+    <button data-tab="safe-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="safe-go">
@@ -477,6 +792,76 @@ class SafeLRUCache:
         self._remove(oldest)
         del self._items[oldest.key]</code></pre>
     </div>
+    <div class="tab-panel" data-tab-panel="safe-java">
+      <pre><code class="language-java">import java.util.HashMap;
+import java.util.Map;
+// Reuses the Node type from LRUCache above (same file/package, same as
+// Go's SafeCache reusing `entry` and Python's SafeLRUCache reusing _Node).
+public class SafeLRUCache {
+    // Not a ReadWriteLock: get() mutates list order via moveToFront, so
+    // there is no true read-only path a read lock could safely cover.
+    private final Object lock = new Object();
+    private final int capacity;
+    private final Map&lt;Integer, Node&gt; items;
+    private final Node head;
+    private final Node tail;
+    public SafeLRUCache(int capacity) {
+        if (capacity &lt;= 0) {
+            throw new IllegalArgumentException("lru: capacity must be positive");
+        }
+        this.capacity = capacity;
+        this.items = new HashMap&lt;&gt;(capacity);
+        this.head = new Node(0, 0);
+        this.tail = new Node(0, 0);
+        head.next = tail;
+        tail.prev = head;
+    }
+    public Integer get(int key) {
+        synchronized (lock) {
+            Node node = items.get(key);
+            if (node == null) {
+                return null;
+            }
+            moveToFront(node);
+            return node.value;
+        }
+    }
+    public void put(int key, int value) {
+        synchronized (lock) {
+            Node node = items.get(key);
+            if (node != null) {
+                node.value = value;
+                moveToFront(node);
+                return;
+            }
+            if (items.size() &gt;= capacity) {
+                Node oldest = tail.prev;
+                if (oldest != head) {
+                    remove(oldest);
+                    items.remove(oldest.key);
+                }
+            }
+            node = new Node(key, value);
+            items.put(key, node);
+            pushFront(node);
+        }
+    }
+    private void pushFront(Node node) {
+        node.prev = head;
+        node.next = head.next;
+        head.next.prev = node;
+        head.next = node;
+    }
+    private void remove(Node node) {
+        node.prev.next = node.next;
+        node.next.prev = node.prev;
+    }
+    private void moveToFront(Node node) {
+        remove(node);
+        pushFront(node);
+    }
+}</code></pre>
+    </div>
   </div>
 </div>
 
@@ -518,6 +903,7 @@ Add expiry independent of capacity pressure — an entry can be evicted either f
   <div class="tab-buttons">
     <button data-tab="ttl-go" class="active">Go</button>
     <button data-tab="ttl-py">Python</button>
+    <button data-tab="ttl-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="ttl-go">
@@ -642,6 +1028,92 @@ class TTLCache:
             return
         self._remove(oldest)
         del self._items[oldest.key]</code></pre>
+    </div>
+    <div class="tab-panel" data-tab-panel="ttl-java">
+      <pre><code class="language-java">import java.util.HashMap;
+import java.util.Map;
+// LRU cache with lazy TTL expiry layered on top. An entry is evicted for
+// whichever comes first: being the least-recently-used one when the cache
+// is full, or being past its expireAt the next time anyone calls get() on
+// it.
+public class TTLCache {
+    private static class TTLNode {
+        final int key;
+        int value;
+        long expireAt; // System.nanoTime() timestamp -- monotonic, like Python's time.monotonic()
+        TTLNode prev;
+        TTLNode next;
+        TTLNode(int key, int value, long expireAt) {
+            this.key = key;
+            this.value = value;
+            this.expireAt = expireAt;
+        }
+    }
+    private final int capacity;
+    private final long ttlNanos;
+    private final Map&lt;Integer, TTLNode&gt; items;
+    private final TTLNode head;
+    private final TTLNode tail;
+    public TTLCache(int capacity, long ttlNanos) {
+        this.capacity = capacity;
+        this.ttlNanos = ttlNanos;
+        this.items = new HashMap&lt;&gt;(capacity);
+        this.head = new TTLNode(0, 0, 0);
+        this.tail = new TTLNode(0, 0, 0);
+        head.next = tail;
+        tail.prev = head;
+    }
+    public Integer get(int key) {
+        TTLNode node = items.get(key);
+        if (node == null) {
+            return null;
+        }
+        if (System.nanoTime() &gt; node.expireAt) {
+            remove(node);
+            items.remove(key);
+            return null;
+        }
+        moveToFront(node);
+        return node.value;
+    }
+    public void put(int key, int value) {
+        TTLNode node = items.get(key);
+        if (node != null) {
+            node.value = value;
+            node.expireAt = System.nanoTime() + ttlNanos;
+            moveToFront(node);
+            return;
+        }
+        if (items.size() &gt;= capacity) {
+            evictOldest();
+        }
+        node = new TTLNode(key, value, System.nanoTime() + ttlNanos);
+        items.put(key, node);
+        pushFront(node);
+    }
+    private void pushFront(TTLNode node) {
+        node.prev = head;
+        node.next = head.next;
+        head.next.prev = node;
+        head.next = node;
+    }
+    private void remove(TTLNode node) {
+        node.prev.next = node.next;
+        node.next.prev = node.prev;
+    }
+    private void moveToFront(TTLNode node) {
+        remove(node);
+        pushFront(node);
+    }
+    private void evictOldest() {
+        TTLNode oldest = tail.prev;
+        if (oldest == head) {
+            return;
+        }
+        remove(oldest);
+        items.remove(oldest.key);
+    }
+}</code></pre>
     </div>
   </div>
 </div>

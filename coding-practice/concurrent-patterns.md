@@ -19,6 +19,7 @@ Go gives you two genuinely different mechanisms here. Python's version of this q
   <div class="tab-buttons">
     <button data-tab="counter-go" class="active">Go</button>
     <button data-tab="counter-py">Python</button>
+    <button data-tab="counter-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="counter-go">
@@ -197,6 +198,78 @@ bench(GilAtomicCounter())   # value == expected, but see the note below
 # in Python you need multiprocessing (separate processes, separate GILs)
 # or free-threaded (--disable-gil) builds — not threading.</code></pre>
     </div>
+    <div class="tab-panel" data-tab-panel="counter-java">
+      <pre><code class="language-java">package concurrency;
+import java.util.concurrent.atomic.AtomicLong;
+// SynchronizedCounter protects a long with the built-in monitor lock — the
+// direct equivalent of Go's sync.Mutex.
+class SynchronizedCounter {
+    private long value;
+    public synchronized void inc() {
+        value++;
+    }
+    public synchronized long value() {
+        return value;
+    }
+}
+// AtomicCounter uses AtomicLong — no lock, just a CPU-level atomic
+// instruction (CAS or fetch-and-add depending on architecture), exactly
+// like Go's sync/atomic. Unlike Python, where the honest answer is "no
+// general-purpose lock-free atomic exists, only GIL-protected C-level
+// ops," Java's java.util.concurrent.atomic types are genuinely
+// hardware-atomic — real CAS/fetch-and-add instructions, real parallel
+// threads across real cores, the same guarantee sync/atomic gives Go.
+class AtomicCounter {
+    private final AtomicLong value = new AtomicLong();
+    public void inc() {
+        value.incrementAndGet();
+    }
+    public long value() {
+        return value.get();
+    }
+}</code></pre>
+      <p><strong>Benchmark comparison</strong></p>
+      <pre><code class="language-java">package concurrency;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.CountDownLatch;
+public class CounterBenchmark {
+    static void bench(String name, Runnable inc, java.util.function.LongSupplier value)
+            throws InterruptedException {
+        int nThreads = 50;
+        int increments = 20000;
+        CountDownLatch latch = new CountDownLatch(nThreads);
+        long start = System.nanoTime();
+        List&lt;Thread&gt; threads = new ArrayList&lt;&gt;();
+        for (int i = 0; i &lt; nThreads; i++) {
+            Thread t = new Thread(() -&gt; {
+                for (int j = 0; j &lt; increments; j++) {
+                    inc.run();
+                }
+                latch.countDown();
+            });
+            threads.add(t);
+            t.start();
+        }
+        latch.await();
+        double elapsed = (System.nanoTime() - start) / 1e9;
+        long expected = (long) nThreads * increments;
+        System.out.printf("%s: %.3fs value=%d expected=%d%n",
+            name, elapsed, value.getAsLong(), expected);
+    }
+    public static void main(String[] args) throws InterruptedException {
+        SynchronizedCounter sc = new SynchronizedCounter();
+        bench("SynchronizedCounter", sc::inc, sc::value);
+        AtomicCounter ac = new AtomicCounter();
+        bench("AtomicCounter", ac::inc, ac::value);
+        // Unlike Python's GIL-serialized threading benchmark, these 50
+        // threads really do run in parallel across OS threads/cores here —
+        // AtomicCounter's lock-free increment can show a genuine
+        // throughput edge over SynchronizedCounter under real contention,
+        // not just a correctness difference like in the Python version.
+    }
+}</code></pre>
+    </div>
   </div>
 </div>
 
@@ -241,6 +314,7 @@ bench(GilAtomicCounter())   # value == expected, but see the note below
   <div class="tab-buttons">
     <button data-tab="pool-go" class="active">Go</button>
     <button data-tab="pool-py">Python</button>
+    <button data-tab="pool-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="pool-go">
@@ -427,6 +501,114 @@ for _ in range(20):
     result = pool.results.get()
     _ = result  # consume results as they complete, unordered across workers</code></pre>
     </div>
+    <div class="tab-panel" data-tab-panel="pool-java">
+      <pre><code class="language-java">package concurrency;
+import java.util.ArrayList;
+import java.util.List;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.function.Function;
+record Job(int id, int input) {}
+record Result(int jobId, int output, Exception err) {}
+// WorkerPool processes jobs with a fixed number of worker threads, bounding
+// resource usage regardless of how many jobs are submitted — a direct port
+// of the Go/Python WorkerPool, using BlockingQueue instead of channels.
+//
+// Same API gap as Python's queue.Queue: a Go channel has a built-in closed
+// state that range-over-channel detects automatically. BlockingQueue has no
+// close() at all either, so the fix here is the same sentinel-value trick
+// Python uses — one poison pill per worker.
+class WorkerPool {
+    private final int numWorkers;
+    private final BlockingQueue&lt;Job&gt; jobs;
+    private final BlockingQueue&lt;Result&gt; results;
+    private final List&lt;Thread&gt; workers = new ArrayList&lt;&gt;();
+    private static final Job POISON_PILL = new Job(-1, -1);
+    public WorkerPool(int numWorkers, int queueSize) {
+        this.numWorkers = numWorkers;
+        this.jobs = new ArrayBlockingQueue&lt;&gt;(queueSize);
+        this.results = new ArrayBlockingQueue&lt;&gt;(queueSize);
+    }
+    // start launches the fixed worker threads. Call once before submit().
+    public void start(Function&lt;Job, Integer&gt; process) {
+        for (int i = 0; i &lt; numWorkers; i++) {
+            Thread t = new Thread(() -&gt; worker(process));
+            t.start();
+            workers.add(t);
+        }
+    }
+    private void worker(Function&lt;Job, Integer&gt; process) {
+        try {
+            while (true) {
+                Job job = jobs.take(); // blocks until a job or the poison pill arrives
+                if (job == POISON_PILL) break; // sentinel: no more work, exit
+                try {
+                    int output = process.apply(job);
+                    results.put(new Result(job.id(), output, null));
+                } catch (Exception e) {
+                    results.put(new Result(job.id(), 0, e));
+                }
+            }
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+        }
+    }
+    // submit enqueues a job. Blocks if the queue is full (backpressure).
+    public void submit(Job j) throws InterruptedException {
+        jobs.put(j);
+    }
+    // close signals no more jobs will be submitted, then waits for all
+    // in-flight jobs to finish.
+    public void close() throws InterruptedException {
+        for (int i = 0; i &lt; numWorkers; i++) {
+            jobs.put(POISON_PILL);
+        }
+        for (Thread t : workers) {
+            t.join();
+        }
+    }
+    public BlockingQueue&lt;Result&gt; results() {
+        return results;
+    }
+}
+// Idiomatic alternative for the common case: ThreadPoolExecutor configured
+// with a bounded queue and an explicit rejection policy gives you the same
+// bounded-worker-count guarantee with far less boilerplate, at the cost of
+// losing the explicit Job/Result shapes above — reach for this first unless
+// you need the custom queue semantics (e.g. bounded backpressure on
+// submission itself, which ThreadPoolExecutor's default rejection policy
+// does NOT give you: AbortPolicy throws instead of blocking the caller).
+class ExecutorAlternative {
+    static java.util.concurrent.ThreadPoolExecutor boundedExecutor(int numWorkers, int queueSize) {
+        return new java.util.concurrent.ThreadPoolExecutor(
+            numWorkers, numWorkers,
+            0L, java.util.concurrent.TimeUnit.MILLISECONDS,
+            new ArrayBlockingQueue&lt;&gt;(queueSize),
+            new java.util.concurrent.ThreadPoolExecutor.CallerRunsPolicy());
+    }
+}</code></pre>
+      <p><strong>Usage example</strong></p>
+      <pre><code class="language-java">WorkerPool pool = new WorkerPool(4, 100); // 4 workers, queue capacity 100
+pool.start(job -&gt; job.input() * 2);
+Thread submitter = new Thread(() -&gt; {
+    try {
+        for (int i = 0; i &lt; 20; i++) {
+            pool.submit(new Job(i, i));
+        }
+        pool.close(); // safe to call from a separate thread once all submits are done
+    } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+    }
+});
+submitter.start();
+// No closed-queue signal to range over, so the consumer has to know how
+// many results to expect — here, exactly 20 (one per submitted job).
+for (int i = 0; i &lt; 20; i++) {
+    Result res = pool.results().take();
+    // consume results as they complete, unordered across workers
+}
+submitter.join();</code></pre>
+    </div>
   </div>
 </div>
 
@@ -464,6 +646,7 @@ graph LR
   <div class="tab-buttons">
     <button data-tab="pubsub-go" class="active">Go</button>
     <button data-tab="pubsub-py">Python</button>
+    <button data-tab="pubsub-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="pubsub-go">
@@ -630,6 +813,83 @@ class CallbackPubSub:
 
 asyncio.run(main())</code></pre>
     </div>
+    <div class="tab-panel" data-tab-panel="pubsub-java">
+      <pre><code class="language-java">package concurrency;
+import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+// BlockingQueue-based fan-out, chosen over Flow.SubmissionPublisher because
+// it mirrors Go channel semantics far more directly: a bounded
+// ArrayBlockingQueue per subscriber is the same shape as a buffered Go
+// channel, offer() is a non-blocking send exactly like Go's
+// select/default, and take() is a blocking receive exactly like ranging
+// over a channel. SubmissionPublisher is push-based with its own
+// reactive-streams backpressure protocol (subscribers call request(n),
+// buffer-full behavior is a configurable BufferOverflowStrategy or an
+// exception) — a genuinely different concurrency model, not a
+// line-for-line match for "each subscriber owns a bounded buffer."
+class PubSub {
+    private final Map&lt;String, List&lt;BlockingQueue&lt;String&gt;&gt;&gt; subs = new HashMap&lt;&gt;();
+    private boolean closed = false;
+    private static final String POISON_PILL = "\0__CLOSE__";
+    // subscribe returns a queue that receives all messages published to
+    // topic. bufferSize controls how many messages can queue before
+    // publish drops them for this slow subscriber.
+    public synchronized BlockingQueue&lt;String&gt; subscribe(String topic, int bufferSize) {
+        BlockingQueue&lt;String&gt; q = new ArrayBlockingQueue&lt;&gt;(bufferSize);
+        subs.computeIfAbsent(topic, k -&gt; new ArrayList&lt;&gt;()).add(q);
+        return q;
+    }
+    // publish sends msg to every subscriber of topic. Non-blocking per
+    // subscriber: if a subscriber's buffer is full, that message is
+    // dropped for that subscriber rather than blocking the publisher.
+    public synchronized void publish(String topic, String msg) {
+        if (closed) return;
+        for (BlockingQueue&lt;String&gt; q : subs.getOrDefault(topic, List.of())) {
+            if (!q.offer(msg)) {
+                // subscriber buffer full — drop rather than block the
+                // publisher. A production system would count/log this.
+            }
+        }
+    }
+    // close shuts down the broker, pushing a poison pill to every
+    // subscriber queue so consumers terminate — same sentinel trick as
+    // the worker pool, since BlockingQueue has no closed state either.
+    public synchronized void close() {
+        closed = true;
+        for (List&lt;BlockingQueue&lt;String&gt;&gt; queues : subs.values()) {
+            for (BlockingQueue&lt;String&gt; q : queues) {
+                q.offer(POISON_PILL);
+            }
+        }
+    }
+    static boolean isPoisonPill(String msg) {
+        return POISON_PILL.equals(msg);
+    }
+}</code></pre>
+      <p><strong>Usage example</strong></p>
+      <pre><code class="language-java">PubSub ps = new PubSub();
+BlockingQueue&lt;String&gt; sub1 = ps.subscribe("orders", 10);
+BlockingQueue&lt;String&gt; sub2 = ps.subscribe("orders", 10);
+new Thread(() -&gt; consumeOrders(sub1)).start();
+new Thread(() -&gt; consumeOrders(sub2)).start();
+ps.publish("orders", "order-123-created");
+ps.close();
+static void consumeOrders(BlockingQueue&lt;String&gt; sub) {
+    try {
+        while (true) {
+            String msg = sub.take();
+            if (PubSub.isPoisonPill(msg)) break; // sentinel from close()
+            handleOrderEvent(msg); // handle order event
+        }
+    } catch (InterruptedException e) {
+        Thread.currentThread().interrupt();
+    }
+}</code></pre>
+    </div>
   </div>
 </div>
 
@@ -664,6 +924,7 @@ graph TD
   <div class="tab-buttons">
     <button data-tab="dt-go" class="active">Go</button>
     <button data-tab="dt-py">Python</button>
+    <button data-tab="dt-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="dt-go">
@@ -787,6 +1048,65 @@ throttled_flush = throttle(1.0, flush_metrics)
 for _ in range(1000):
     throttled_flush()  # only fires roughly once per second across the whole loop</code></pre>
     </div>
+    <div class="tab-panel" data-tab-panel="dt-java">
+      <pre><code class="language-java">package concurrency;
+import java.util.concurrent.ScheduledExecutorService;
+import java.util.concurrent.ScheduledFuture;
+import java.util.concurrent.TimeUnit;
+class DebounceThrottle {
+    // Debounce: delays invoking task until waitMs has elapsed since the
+    // *last* call. Repeated calls within the window cancel the pending
+    // schedule and reschedule — only the final call in a burst actually
+    // fires. Built on ScheduledExecutorService instead of Go's
+    // time.AfterFunc, same cancel-and-reschedule semantics.
+    static Runnable debounce(ScheduledExecutorService scheduler, long waitMs, Runnable task) {
+        Object lock = new Object();
+        ScheduledFuture&lt;?&gt;[] pending = new ScheduledFuture&lt;?&gt;[1];
+        return () -&gt; {
+            synchronized (lock) {
+                if (pending[0] != null) {
+                    pending[0].cancel(false);
+                }
+                pending[0] = scheduler.schedule(task, waitMs, TimeUnit.MILLISECONDS);
+            }
+        };
+    }
+    // Throttle: invokes task at most once per intervalMs, regardless of
+    // call frequency, using a nanoTime rate-gate rather than a scheduled
+    // timer — the first call in a window fires immediately; subsequent
+    // calls within the window are dropped.
+    static Runnable throttle(long intervalMs, Runnable task) {
+        long intervalNanos = TimeUnit.MILLISECONDS.toNanos(intervalMs);
+        Object lock = new Object();
+        long[] lastRun = new long[] { Long.MIN_VALUE / 2 };
+        return () -&gt; {
+            synchronized (lock) {
+                long now = System.nanoTime();
+                if (now - lastRun[0] &lt; intervalNanos) {
+                    return; // still within the throttle window — drop this call
+                }
+                lastRun[0] = now;
+            }
+            task.run();
+        };
+    }
+}</code></pre>
+      <p><strong>Usage example</strong></p>
+      <pre><code class="language-java">ScheduledExecutorService scheduler = java.util.concurrent.Executors.newScheduledThreadPool(1);
+Runnable debouncedSearch = DebounceThrottle.debounce(scheduler, 300, () -&gt; {
+    // e.g., fires the search query only after typing pauses for 300ms
+});
+for (String keystroke : new String[] { "g", "go", "gol", "gola", "golang" }) {
+    debouncedSearch.run(); // only the last call actually executes fn, ~300ms after it
+}
+Runnable throttledFlush = DebounceThrottle.throttle(1000, () -&gt; {
+    // e.g., flush a metrics buffer at most once per second even under
+    // a tight loop calling this every microsecond
+});
+for (int i = 0; i &lt; 1000; i++) {
+    throttledFlush.run(); // only fires roughly once per second across the whole loop
+}</code></pre>
+    </div>
   </div>
 </div>
 
@@ -841,6 +1161,7 @@ for _ in range(1000):
   <div class="tab-buttons">
     <button data-tab="leak-buggy-go" class="active">Go</button>
     <button data-tab="leak-buggy-py">Python</button>
+    <button data-tab="leak-buggy-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="leak-buggy-go">
@@ -898,6 +1219,45 @@ def fetch_with_timeout_buggy(timeout: float, work):
     # to exit — Go's runtime has no such rule, the process exits when
     # main() returns regardless of live goroutines.</code></pre>
     </div>
+    <div class="tab-panel" data-tab-panel="leak-buggy-java">
+      <pre><code class="language-java">package concurrency;
+import java.util.concurrent.Callable;
+import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+class LeakyFetch {
+    // BUGGY: leaks a non-daemon thread on every call where the caller
+    // times out before the worker finishes and hands off its result.
+    // SynchronousQueue is a zero-capacity rendezvous — put() blocks until
+    // another thread take()s/poll()s, exactly mirroring Go's unbuffered
+    // channel send semantics.
+    static int fetchWithTimeoutBuggy(long timeoutMs, Callable&lt;Integer&gt; work) throws Exception {
+        SynchronousQueue&lt;Integer&gt; resultCh = new SynchronousQueue&lt;&gt;();
+        Thread t = new Thread(() -&gt; {
+            try {
+                int result = work.call();
+                resultCh.put(result); // BLOCKS FOREVER if nobody ever takes
+            } catch (Exception ignored) {
+                // work() itself failed, or the thread was interrupted
+            }
+        });
+        t.start(); // non-daemon by default — keeps the JVM alive if leaked
+        Integer result = resultCh.poll(timeoutMs, TimeUnit.MILLISECONDS);
+        if (result == null) {
+            throw new TimeoutException("timed out");
+            // The thread above is now leaked: it will eventually finish
+            // work(), then block forever on resultCh.put(result), because
+            // nothing will ever poll()/take() from resultCh again. Worse
+            // than Go here: Thread defaults to non-daemon, so a leaked
+            // thread that never finishes keeps the whole JVM process alive
+            // past the point where main() returns — Go's runtime has no
+            // such rule, the process exits when main() returns regardless
+            // of live goroutines.
+        }
+        return result;
+    }
+}</code></pre>
+    </div>
   </div>
 </div>
 
@@ -913,6 +1273,7 @@ Python's equivalent for the same before/after comparison is `threading.active_co
   <div class="tab-buttons">
     <button data-tab="leak-test-go" class="active">Go</button>
     <button data-tab="leak-test-py">Python</button>
+    <button data-tab="leak-test-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="leak-test-go">
@@ -961,6 +1322,38 @@ def test_leak_demonstration():
         print("leak not reliably reproduced in this run — timing dependent, "
               "see fixed version below")</code></pre>
     </div>
+    <div class="tab-panel" data-tab-panel="leak-test-java">
+      <pre><code class="language-java">package concurrency;
+public class LeakDemonstrationTest {
+    public static void main(String[] args) throws InterruptedException {
+        int before = Thread.activeCount();
+        for (int i = 0; i &lt; 100; i++) {
+            try {
+                LeakyFetch.fetchWithTimeoutBuggy(10, () -&gt; {
+                    Thread.sleep(50); // always slower than the timeout
+                    return 42;
+                });
+            } catch (Exception ignored) {
+                // expected: TimeoutException
+            }
+        }
+        Thread.sleep(100); // let any leaked threads finish their sleep
+        int after = Thread.activeCount();
+        System.out.println("threads before=" + before + " after=" + after);
+        if (after - before &lt; 50) {
+            System.out.println("leak not reliably reproduced in this run — "
+                + "timing dependent, see fixed version below");
+        }
+        // NOTE: unlike a Go test binary (exits regardless of leaked
+        // goroutines), this main() never actually returns control to the
+        // shell — the ~100 leaked, non-daemon threads above are still
+        // parked on resultCh.put(result) and keep the JVM alive forever.
+        // That hang IS the leak, demonstrated live rather than just
+        // logged; killing the process is the only way out, exactly the
+        // "worse than Go" case called out above.
+    }
+}</code></pre>
+    </div>
   </div>
 </div>
 
@@ -985,6 +1378,7 @@ sequenceDiagram
   <div class="tab-buttons">
     <button data-tab="leak-fixed-go" class="active">Go</button>
     <button data-tab="leak-fixed-py">Python</button>
+    <button data-tab="leak-fixed-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="leak-fixed-go">
@@ -1040,6 +1434,54 @@ def fetch_with_timeout_pooled(timeout: float, work):
         # doesn't stop you from trying (ctx cancellation below is the
         # correct, cooperative way to actually do it).</code></pre>
     </div>
+    <div class="tab-panel" data-tab-panel="leak-fixed-java">
+      <pre><code class="language-java">package concurrency;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.Callable;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+class FixedFetch {
+    // FIXED: a buffered queue of capacity 1 means the worker thread's
+    // offer() never blocks, even if nobody ever reads the result. The
+    // thread always completes and exits, so it can be garbage collected —
+    // the same fix shape as Go's buffered channel.
+    static int fetchWithTimeoutFixed(long timeoutMs, Callable&lt;Integer&gt; work) throws Exception {
+        BlockingQueue&lt;Integer&gt; resultCh = new ArrayBlockingQueue&lt;&gt;(1);
+        Thread t = new Thread(() -&gt; {
+            try {
+                int result = work.call();
+                resultCh.offer(result); // always succeeds immediately, buffer absorbs it
+            } catch (Exception ignored) {
+            }
+        });
+        t.start();
+        Integer result = resultCh.poll(timeoutMs, TimeUnit.MILLISECONDS);
+        if (result == null) {
+            throw new TimeoutException("timed out");
+            // Thread is NOT leaked: it will complete work(), offer into the
+            // buffer (succeeds instantly, capacity=1), then exit normally.
+        }
+        return result;
+    }
+    // Bounded — caps how many threads can ever exist, unlike a fresh
+    // Thread per call above. Mirrors Python's ThreadPoolExecutor fix.
+    private static final ExecutorService pool = Executors.newFixedThreadPool(50);
+    static int fetchWithTimeoutPooled(long timeoutMs, Callable&lt;Integer&gt; work) throws Exception {
+        Future&lt;Integer&gt; future = pool.submit(work);
+        try {
+            return future.get(timeoutMs, TimeUnit.MILLISECONDS);
+        } catch (TimeoutException e) {
+            future.cancel(false); // returns false here — a running task can't
+                                   // be force-stopped, only one not yet started
+            throw e;
+        }
+    }
+}</code></pre>
+    </div>
   </div>
 </div>
 
@@ -1051,6 +1493,7 @@ Python has no direct "make the channel buffered" fix, because the buggy version'
   <div class="tab-buttons">
     <button data-tab="leak-ctx-go" class="active">Go</button>
     <button data-tab="leak-ctx-py">Python</button>
+    <button data-tab="leak-ctx-java">Java</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="leak-ctx-go">
@@ -1137,6 +1580,80 @@ async def fetch_fixed_asyncio(timeout, work):
         return await asyncio.wait_for(work(), timeout=timeout)
     except asyncio.TimeoutError:
         return "timed out"  # work()'s task was already cancelled for us</code></pre>
+    </div>
+    <div class="tab-panel" data-tab-panel="leak-ctx-java">
+      <pre><code class="language-java">package concurrency;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.BlockingQueue;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.concurrent.TimeUnit;
+import java.util.concurrent.TimeoutException;
+interface InterruptibleWork {
+    int run() throws InterruptedException;
+}
+class CancellableFetch {
+    // BETTER: propagate cancellation into work() itself via
+    // Thread.interrupt() — Java's built-in cooperative cancellation
+    // signal — so wasted CPU/IO actually stops instead of just not
+    // leaking memory. work() must check Thread.interrupted() (or let a
+    // blocking call like Thread.sleep throw InterruptedException)
+    // periodically on its own; nothing forces it to stop. Same
+    // cooperative contract as Go's ctx.Done() and Python's
+    // threading.Event, though Java's version is a language-level signal
+    // rather than a hand-rolled flag — this cooperative check is not just
+    // the *preferred* way to cancel a Java thread, it is the *only* way:
+    // Java has no forced-stop for a running thread either (Thread.stop()
+    // exists but has been deprecated for removal since it can leave
+    // shared state corrupted mid-update).
+    static int fetchWithCancellation(long timeoutMs, InterruptibleWork work) throws Exception {
+        BlockingQueue&lt;Object&gt; resultCh = new ArrayBlockingQueue&lt;&gt;(1);
+        Thread t = new Thread(() -&gt; {
+            try {
+                int result = work.run();
+                resultCh.offer(result);
+            } catch (InterruptedException e) {
+                // interrupted during cancellation — exit quietly
+            } catch (Exception e) {
+                resultCh.offer(e);
+            }
+        });
+        t.start();
+        Object result = resultCh.poll(timeoutMs, TimeUnit.MILLISECONDS);
+        if (result == null) {
+            t.interrupt(); // ask work() to stop — it must check this itself
+            throw new TimeoutException("timed out");
+        }
+        if (result instanceof Exception) {
+            throw (Exception) result;
+        }
+        return (Integer) result;
+    }
+}
+class ExecutorLeakExample {
+    // BUGGY: an ExecutorService created but never shutdown() keeps its
+    // non-daemon worker threads alive for the life of the JVM — the
+    // executor-flavored version of the same bug class. Unlike a single
+    // leaked Thread, this can keep dozens of pool threads (and the JVM
+    // process) alive indefinitely even after every submitted task
+    // finishes.
+    static final ExecutorService leakyPool = Executors.newFixedThreadPool(4); // never shutdown — leak
+    static void fetchBuggyExecutor(Runnable work) {
+        leakyPool.submit(work); // fire-and-forget, executor itself is never shutdown
+    }
+    // FIXED: shutdown() (or shutdownNow() for cancellation) releases the
+    // pool's threads once work completes, letting the JVM exit normally.
+    static int fetchFixedExecutor(long timeoutMs, java.util.concurrent.Callable&lt;Integer&gt; work) throws Exception {
+        ExecutorService pool = Executors.newFixedThreadPool(4);
+        try {
+            Future&lt;Integer&gt; f = pool.submit(work);
+            return f.get(timeoutMs, TimeUnit.MILLISECONDS);
+        } finally {
+            pool.shutdown(); // or shutdownNow() to interrupt in-flight tasks
+        }
+    }
+}</code></pre>
     </div>
   </div>
 </div>

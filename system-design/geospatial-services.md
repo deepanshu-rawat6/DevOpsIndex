@@ -229,6 +229,249 @@ class QuadNode:
   <div class="quiz-a" hidden>No — that's the entire design. A node only subdivides once it holds more than the threshold number of points. Ocean has almost no points, so it stops subdividing after one or two splits and stays a large leaf; downtown keeps blowing past the threshold at every level, so it keeps splitting into much smaller leaves. Leaf size tracking inversely with point density is the adaptive behavior a quadtree is built to provide, unlike a geohash's uniform grid.</div>
 </div>
 
+Try it live: the same split-at-4 rule running over a bounded 200×200 plane instead of lat/lng. Insert points and watch a leaf split into its 4 quadrants the moment it crosses the threshold — dense clusters carve themselves into many small cells while empty space stays one large leaf, exactly like the ocean-vs-downtown picture above. "Query nearby" walks the tree, only descending into a quadrant whose bounding box could possibly intersect the query circle, then checks real distance on whatever points survive that pruning — the same two-phase idea (cheap bounding check, then exact check) as the "square vs. circle" problem from section 1.
+
+<div class="structure-viz" id="quadtree-live-viz">
+  <svg class="viz-canvas" viewBox="0 0 220 220"></svg>
+  <div class="viz-controls">
+    <input class="viz-input viz-input-x" type="number" placeholder="x (0-200)" />
+    <input class="viz-input viz-input-y" type="number" placeholder="y (0-200)" />
+    <input class="viz-input viz-input-r" type="number" placeholder="radius" />
+    <button class="viz-btn" data-viz-action="insert">Insert</button>
+    <button class="viz-btn" data-viz-action="query">Query nearby</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#1e3a8a"></span> point</span>
+    <span><span class="viz-swatch" style="background:#14532d"></span> just inserted</span>
+    <span><span class="viz-swatch" style="background:#78350f"></span> matched the last query</span>
+    <span><span class="viz-swatch" style="background:#334155"></span> cell boundary (leaf depth = however far that region subdivided)</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root0 = document.getElementById('quadtree-live-viz');
+  const svg = root0.querySelector('.viz-canvas');
+  const xInput = root0.querySelector('.viz-input-x');
+  const yInput = root0.querySelector('.viz-input-y');
+  const rInput = root0.querySelector('.viz-input-r');
+  const status = root0.querySelector('.viz-status');
+
+  const BOUNDS = { x0: 0, y0: 0, x1: 200, y1: 200 };
+  const MAX_POINTS_PER_NODE = 4;
+  const MAX_DEPTH = 20; // guards against runaway recursion on duplicate coordinates
+  const PAD = 10;
+
+  let root, lastInserted, lastQuery, highlighted;
+
+  function makeRoot() {
+    return { x0: BOUNDS.x0, y0: BOUNDS.y0, x1: BOUNDS.x1, y1: BOUNDS.y1, points: [], children: null, depth: 0 };
+  }
+
+  // 0=NW, 1=NE, 2=SW, 3=SE. A point exactly on the midpoint line goes to
+  // the "greater-or-equal" (east/south) quadrant -- the consistent tie-break.
+  function quadrantIndex(node, x, y) {
+    const midx = (node.x0 + node.x1) / 2;
+    const midy = (node.y0 + node.y1) / 2;
+    const east = x >= midx ? 1 : 0;
+    const south = y >= midy ? 1 : 0;
+    return south * 2 + east;
+  }
+
+  function makeChildren(node) {
+    const midx = (node.x0 + node.x1) / 2;
+    const midy = (node.y0 + node.y1) / 2;
+    const d = node.depth + 1;
+    node.children = [
+      { x0: node.x0, y0: node.y0, x1: midx, y1: midy, points: [], children: null, depth: d },
+      { x0: midx, y0: node.y0, x1: node.x1, y1: midy, points: [], children: null, depth: d },
+      { x0: node.x0, y0: midy, x1: midx, y1: node.y1, points: [], children: null, depth: d },
+      { x0: midx, y0: midy, x1: node.x1, y1: node.y1, points: [], children: null, depth: d },
+    ];
+  }
+
+  function split(node) {
+    const pts = node.points;
+    makeChildren(node);
+    node.points = [];
+    for (const p of pts) insertPoint(node, p);
+  }
+
+  function insertPoint(node, pt) {
+    if (node.children) {
+      insertPoint(node.children[quadrantIndex(node, pt.x, pt.y)], pt);
+      return;
+    }
+    node.points.push(pt);
+    if (node.points.length > MAX_POINTS_PER_NODE && node.depth < MAX_DEPTH) {
+      split(node);
+    }
+  }
+
+  function insert(x, y) {
+    const pt = { x, y };
+    insertPoint(root, pt);
+    return pt;
+  }
+
+  function circleIntersectsBox(cx, cy, r, x0, y0, x1, y1) {
+    const nx = Math.max(x0, Math.min(cx, x1));
+    const ny = Math.max(y0, Math.min(cy, y1));
+    const dx = cx - nx;
+    const dy = cy - ny;
+    return dx * dx + dy * dy <= r * r;
+  }
+
+  function query(cx, cy, r) {
+    const results = [];
+    (function walk(node) {
+      if (!circleIntersectsBox(cx, cy, r, node.x0, node.y0, node.x1, node.y1)) return;
+      if (node.children) {
+        node.children.forEach(walk);
+        return;
+      }
+      for (const p of node.points) {
+        const dx = p.x - cx;
+        const dy = p.y - cy;
+        if (dx * dx + dy * dy <= r * r) results.push(p);
+      }
+    })(root);
+    return results;
+  }
+
+  function allNodes() {
+    const out = [];
+    (function walk(node) {
+      out.push(node);
+      if (node.children) node.children.forEach(walk);
+    })(root);
+    return out;
+  }
+
+  function allLeaves() {
+    return allNodes().filter((n) => !n.children);
+  }
+
+  function countPoints() {
+    return allLeaves().reduce((sum, leaf) => sum + leaf.points.length, 0);
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function draw() {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    // the grid of cell boundaries: one rect per leaf, at whatever depth
+    // that region's recursion actually reached
+    allLeaves().forEach((leaf) => {
+      svg.appendChild(
+        el('rect', {
+          x: PAD + leaf.x0,
+          y: PAD + leaf.y0,
+          width: leaf.x1 - leaf.x0,
+          height: leaf.y1 - leaf.y0,
+          class: 'viz-edge',
+        })
+      );
+    });
+
+    // the last query, drawn as a dashed circle so it's clear which points
+    // it's meant to be checking against
+    if (lastQuery) {
+      svg.appendChild(
+        el('circle', {
+          cx: PAD + lastQuery.x,
+          cy: PAD + lastQuery.y,
+          r: lastQuery.r,
+          class: 'viz-edge',
+          'stroke-dasharray': '3,3',
+        })
+      );
+    }
+
+    allLeaves().forEach((leaf) => {
+      leaf.points.forEach((p) => {
+        let cls = 'viz-node';
+        if (highlighted && highlighted.has(p)) cls = 'viz-node-highlight';
+        else if (lastInserted === p) cls = 'viz-node-new';
+        svg.appendChild(el('circle', { cx: PAD + p.x, cy: PAD + p.y, r: 2.4, class: cls }));
+      });
+    });
+  }
+
+  function parseCoord(input, label) {
+    const v = parseFloat(input.value);
+    if (isNaN(v) || v < BOUNDS.x0 || v > BOUNDS.x1) {
+      setStatus(`Enter a valid ${label} between 0 and 200.`, 'error');
+      return null;
+    }
+    return v;
+  }
+
+  root0.querySelector('[data-viz-action="insert"]').addEventListener('click', () => {
+    const x = parseCoord(xInput, 'x');
+    if (x === null) return;
+    const y = parseCoord(yInput, 'y');
+    if (y === null) return;
+    const leavesBefore = allLeaves().length;
+    const pt = insert(x, y);
+    const leavesAfter = allLeaves().length;
+    lastInserted = pt;
+    lastQuery = null;
+    highlighted = null;
+    const splitMsg =
+      leavesAfter > leavesBefore
+        ? ` — that pushed a cell over ${MAX_POINTS_PER_NODE} points, so it split into 4 quadrants.`
+        : '';
+    setStatus(`Inserted (${x}, ${y})${splitMsg}`, 'ok');
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="query"]').addEventListener('click', () => {
+    const x = parseCoord(xInput, 'x');
+    if (x === null) return;
+    const y = parseCoord(yInput, 'y');
+    if (y === null) return;
+    const r = parseFloat(rInput.value);
+    if (isNaN(r) || r <= 0) {
+      setStatus('Enter a positive radius.', 'error');
+      return;
+    }
+    const results = query(x, y, r);
+    highlighted = new Set(results);
+    lastQuery = { x, y, r };
+    lastInserted = null;
+    setStatus(`Found ${results.length} point(s) within ${r} units of (${x}, ${y}).`, 'ok');
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    root = makeRoot();
+    lastInserted = null;
+    lastQuery = null;
+    highlighted = null;
+    setStatus('Reset to an empty tree.', '');
+    draw();
+  });
+
+  root = makeRoot();
+  setStatus('Empty tree — insert a few points, then try "Query nearby".', '');
+  draw();
+})();
+</script>
+
 ---
 
 ## 4. S2 Geometry — Google's Cube-Projected Alternative

@@ -41,6 +41,11 @@
 .prose pre { position: relative; background: #1e293b; border: 1px solid #334155; border-radius: 0.5rem; }
 .prose code:not(pre code) { background: #1e293b; padding: 0.2em 0.4em; border-radius: 0.25rem; font-size: 0.85em; color: #e2e8f0; }
 
+/* highlight.js (vs2015 theme, loaded in BaseLayout's <head>) draws its own
+   dark card background — kill it so the token colors sit on top of the
+   existing .prose pre card instead of a second, mismatched box. */
+.prose pre code.hljs { background: transparent; padding: 0; }
+
 /* ── Copy button ────────────────────────────────────────────── */
 .copy-btn {
   position: absolute;
@@ -227,3 +232,67 @@ pre:hover .copy-btn { opacity: 1; }
 .toggle-switch .toggle-panel.active { display: block; animation: stepper-fade 0.2s ease; }
 .toggle-switch .toggle-panel > *:first-child { margin-top: 0; }
 .toggle-switch .toggle-panel > *:last-child { margin-bottom: 0; }
+
+/* ── Structure visualizer (live insert/delete/search simulators) ──
+   See website/COMPONENTS.md — unlike the components above, this one has
+   no shared JS wiring in BaseLayout.astro. Each instance is fully
+   self-contained: a `.structure-viz` markup block plus a sibling
+   top-level <script> (never nested inside the div — see COMPONENTS.md's
+   rule on why) that implements that specific structure's logic and draws
+   into the .viz-canvas SVG using the classes below for a consistent look. */
+.structure-viz {
+  margin: 1.5rem 0;
+  padding: 1rem;
+  border: 1px solid #334155;
+  border-radius: 0.5rem;
+  background: rgba(15, 23, 42, 0.6);
+}
+.structure-viz .viz-canvas {
+  width: 100%;
+  height: auto;
+  display: block;
+  background: #0f172a;
+  border: 1px solid #1e293b;
+  border-radius: 0.375rem;
+}
+.structure-viz .viz-canvas .viz-node { fill: #1e3a8a; stroke: #60a5fa; stroke-width: 1.5; }
+.structure-viz .viz-canvas .viz-node-new { fill: #14532d; stroke: #4ade80; stroke-width: 2; }
+.structure-viz .viz-canvas .viz-node-highlight { fill: #78350f; stroke: #fbbf24; stroke-width: 2; }
+.structure-viz .viz-canvas .viz-node-removing { fill: #7f1d1d; stroke: #f87171; stroke-width: 2; opacity: 0.6; }
+.structure-viz .viz-canvas .viz-edge { stroke: #475569; stroke-width: 1.5; fill: none; }
+.structure-viz .viz-canvas .viz-edge-active { stroke: #60a5fa; stroke-width: 2; }
+.structure-viz .viz-canvas text { fill: #e2e8f0; font-size: 12px; font-family: ui-monospace, "SF Mono", Menlo, monospace; text-anchor: middle; dominant-baseline: middle; pointer-events: none; }
+.structure-viz .viz-canvas text.viz-label-dim { fill: #64748b; font-size: 10px; }
+.structure-viz .viz-controls { display: flex; flex-wrap: wrap; align-items: center; gap: 0.5rem; margin-top: 0.75rem; }
+.structure-viz .viz-input {
+  width: 6rem;
+  padding: 0.35rem 0.6rem;
+  font-size: 0.82rem;
+  font-family: ui-monospace, monospace;
+  color: #e2e8f0;
+  background: #1e293b;
+  border: 1px solid #475569;
+  border-radius: 0.375rem;
+}
+.structure-viz .viz-input:focus { outline: none; border-color: #60a5fa; }
+.structure-viz .viz-btn {
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.4rem 0.9rem;
+  border-radius: 0.375rem;
+  border: 1px solid #475569;
+  background: #1e293b;
+  color: #cbd5e1;
+  cursor: pointer;
+  transition: background 0.15s, color 0.15s, border-color 0.15s;
+}
+.structure-viz .viz-btn:hover:not(:disabled) { background: #334155; color: #f1f5f9; border-color: #60a5fa; }
+.structure-viz .viz-btn:disabled { opacity: 0.4; cursor: default; }
+.structure-viz .viz-btn.viz-btn-danger { border-color: #7f1d1d; color: #fca5a5; }
+.structure-viz .viz-btn.viz-btn-danger:hover:not(:disabled) { background: #7f1d1d; color: #fecaca; border-color: #f87171; }
+.structure-viz .viz-status { margin-top: 0.6rem; min-height: 1.3em; font-size: 0.78rem; color: #94a3b8; }
+.structure-viz .viz-status.viz-status-ok { color: #86efac; }
+.structure-viz .viz-status.viz-status-error { color: #fca5a5; }
+.structure-viz .viz-legend { margin-top: 0.5rem; display: flex; flex-wrap: wrap; gap: 0.9rem; font-size: 0.72rem; color: #64748b; }
+.structure-viz .viz-legend span { display: inline-flex; align-items: center; gap: 0.3rem; }
+.structure-viz .viz-legend .viz-swatch { width: 0.6rem; height: 0.6rem; border-radius: 0.15rem; display: inline-block; }

@@ -1,5 +1,12 @@
 # Performance Debugging Guide
 
+Each section below closes with a quick knowledge check — track how many you've cleared as you go:
+
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ## 1. The USE Method
 
 For every resource: **Utilization**, **Saturation**, **Errors**.
@@ -41,6 +48,81 @@ graph TD
     MEM --> S2[Saturation:<br/>vmstat si/so swap]
     MEM --> E2[Errors:<br/>OOM kills dmesg]
 ```
+
+Walk the method one dimension at a time, for a single resource (CPU here):
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Check Utilization.</strong> <code>mpstat</code> / <code>top</code> %cpu. Per the
+      formula above (<code>busy_time / total_time</code>), aim for &lt; 70% sustained &mdash; but
+      utilization alone never proves a bottleneck.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Check Saturation.</strong> <code>vmstat r</code> (run queue). The formula's
+      threshold is stricter than utilization's: <em>any</em> queue length or wait time &gt; 0 is
+      already a signal, not just a high one.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Check Errors.</strong> Machine-check errors via <code>dmesg</code>. A resource can
+      be fully utilized and still not be erroring &mdash; this dimension catches degradation the
+      other two can't see.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Conclude.</strong> Only call CPU the bottleneck once all three line up. 90%
+      utilization with a run queue of 0 and no machine-check errors is a busy CPU, not
+      necessarily a saturated one.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+The table above lists U/S/E signals per resource type — flip between them here:
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="cpu-bound" class="active">CPU-bound</button>
+    <button data-toggle-opt="mem-bound">Memory-bound</button>
+    <button data-toggle-opt="disk-bound">Disk-bound</button>
+    <button data-toggle-opt="net-bound">Network-bound</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="cpu-bound">
+    <strong>Utilization:</strong> <code>mpstat</code>/<code>top</code> %cpu.
+    <strong>Saturation:</strong> run-queue (<code>vmstat r</code>).
+    <strong>Errors:</strong> machine-check errors.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="mem-bound">
+    <strong>Utilization:</strong> <code>free -m</code> used/total.
+    <strong>Saturation:</strong> swap-in rate (<code>vmstat si/so</code>).
+    <strong>Errors:</strong> OOM kills (<code>dmesg</code>).
+  </div>
+  <div class="toggle-panel" data-toggle-panel="disk-bound">
+    <strong>Utilization:</strong> <code>iostat %util</code>.
+    <strong>Saturation:</strong> await / queue depth.
+    <strong>Errors:</strong> <code>iostat</code> err fields.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="net-bound">
+    <strong>Utilization:</strong> <code>sar -n DEV</code> %ifutil.
+    <strong>Saturation:</strong> drops (<code>netstat -s</code>).
+    <strong>Errors:</strong> <code>ip -s link</code> errors.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A CPU sits at 95% utilization but <code>vmstat</code>'s run-queue column (<code>r</code>) stays at 0. Per the USE method, is the CPU saturated?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No. Utilization and saturation are measured independently &mdash; saturation is queue length
+    or wait time, and the formula treats <em>any</em> value &gt; 0 as the signal. A CPU can be
+    fully busy (95% utilization) with nothing queued behind it, which means it's busy but not yet
+    saturated. Only a nonzero run queue would establish saturation.
+  </div>
+</div>
 
 ---
 
@@ -96,6 +178,18 @@ Prometheus alert rules:
   expr: histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m])) > 1.0
   for: 5m
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">Per the table, what do RED's three signals measure, and which Prometheus function is needed to compute the "Duration" one at the 99th percentile?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    Rate = requests per second, Errors = error rate (4xx/5xx), Duration = latency percentiles.
+    Duration is the one that needs <code>histogram_quantile</code> &mdash;
+    <code>histogram_quantile(0.99, rate(http_request_duration_seconds_bucket[5m]))</code> &mdash;
+    because a percentile can't be read directly off a counter or gauge; it has to be derived from
+    a histogram's buckets.
+  </div>
+</div>
 
 ---
 
@@ -156,6 +250,87 @@ active/s  passive/s  iseg/s  oseg/s  | atmptf/s  estres/s  retrans/s
 
 ### `top`
 - **Look for**: Overall CPU summary, top processes by CPU and MEM. `wa%` for I/O wait. Press `1` for per-CPU view.
+
+The order matters — each command narrows down where to look next:
+
+```mermaid
+flowchart LR
+    A["uptime<br/>load average"] --> B["dmesg | tail -20<br/>OOM / disk / kernel errors"]
+    B --> C["vmstat 1<br/>run queue, swap, CPU split"]
+    C --> D["mpstat -P ALL 1<br/>per-CPU balance"]
+    D --> E["pidstat 1<br/>per-process CPU / wait"]
+    E --> F["iostat -xz 1<br/>disk util, await"]
+    F --> G["free -m<br/>memory pressure"]
+    G --> H["sar -n DEV 1<br/>network utilization"]
+    H --> I["sar -n TCP,ETCP 1<br/>retransmits"]
+    I --> J["top<br/>overall summary"]
+```
+
+Step through the same sequence, one command at a time:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. uptime.</strong> Read the load-average trend. Rising = saturation building.
+      Values above the CPU count mean run-queue saturation.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. dmesg | tail -20.</strong> Scan for OOM kills, disk I/O errors, NIC resets, or
+      kernel panics &mdash; anything the kernel already flagged before you started looking.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. vmstat 1.</strong> <code>r</code> above the CPU count means CPU saturation.
+      <code>si/so</code> above 0 means memory pressure. <code>wa</code> above 5% means a disk
+      bottleneck.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. mpstat -P ALL 1.</strong> Look for a single CPU pinned at 100% (a
+      single-threaded bottleneck) versus imbalanced usage across cores.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. pidstat 1.</strong> Identify which process is actually consuming the CPU;
+      <code>%wait</code> shows off-CPU blocked time.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. iostat -xz 1.</strong> <code>%util</code> above 60% means disk saturation.
+      <code>await</code> above 10ms is notable; compare <code>r_await</code> vs
+      <code>w_await</code> to separate read from write latency.
+    </div>
+    <div class="stepper-panel">
+      <strong>7. free -m.</strong> <code>available</code> near 0 means memory pressure;
+      <code>swap used</code> &gt; 0 means the system is already swapping.
+    </div>
+    <div class="stepper-panel">
+      <strong>8. sar -n DEV 1.</strong> Watch <code>%ifutil</code> on network interfaces for
+      packets/s approaching the NIC limit.
+    </div>
+    <div class="stepper-panel">
+      <strong>9. sar -n TCP,ETCP 1.</strong> <code>retrans/s</code> &gt; 0 means congestion or
+      packet loss; <code>atmptf/s</code> counts failed TCP connection attempts.
+    </div>
+    <div class="stepper-panel">
+      <strong>10. top.</strong> Close with the overall CPU summary and top processes by CPU/MEM;
+      confirm what the previous nine commands pointed to.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">In <code>vmstat 1</code>'s output, both the <code>r</code> column and the <code>wa</code> column can be nonzero at the same time. What does each one actually indicate?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    <code>r</code> (run queue) above the CPU count signals CPU saturation &mdash; processes
+    waiting for a CPU to run on. <code>wa</code> (I/O wait) above 5% signals a disk bottleneck
+    &mdash; CPUs sitting idle waiting on I/O to complete. They can both be elevated at once, but
+    they point at two different resources.
+  </div>
+</div>
 
 ---
 
@@ -267,6 +442,16 @@ go tool pprof -http=:8080 cpu.prof
 - Use `top10` in pprof CLI to see cumulative vs flat time.
 - `flat` = time in function itself. `cum` = time including callees.
 
+<div class="quiz-card">
+  <p class="quiz-q">In a Go pprof flame graph, function A is drawn left of function B at the same stack depth. Does that mean A ran before B?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No. The x-axis is alphabetical order, not time &mdash; width is what's meaningful (% of total
+    samples). The y-axis is call-stack depth, with the leaf frame (where the CPU was actually
+    spending time) at the top.
+  </div>
+</div>
+
 ---
 
 ## 5. bpftrace One-Liners
@@ -294,6 +479,36 @@ tracepoint:sched:sched_switch /@start[next->pid]/ {
   @offcpu_us[kstack] = hist((nsecs - @start[next->pid]) / 1000);
   delete(@start[next->pid]); }'
 ```
+
+Sections 3-5 all answer overlapping questions with different tools. Same question, three ways:
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="os-tools" class="active">OS tools (Sec. 3)</button>
+    <button data-tab="pprof-tool">Go pprof (Sec. 4)</button>
+    <button data-tab="bpftrace-tool">bpftrace (Sec. 5)</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="os-tools">
+      <strong>"Why is CPU high?"</strong> <code>mpstat -P ALL 1</code> shows whether one core is
+      pinned or usage is spread out; <code>vmstat 1</code>'s <code>r</code> column shows run-queue
+      saturation; <code>pidstat 1</code> narrows it to a process. Fast, zero code changes, works
+      on any box with <code>sysstat</code> installed &mdash; but it can't tell you which function.
+    </div>
+    <div class="tab-panel" data-tab-panel="pprof-tool">
+      <strong>"Which function?"</strong> A CPU profile
+      (<code>go tool pprof http://localhost:6060/debug/pprof/profile?seconds=30</code>) plus a
+      flame graph shows the exact hot function inside the process &mdash; not just "the box is
+      busy," but where in the code the time goes.
+    </div>
+    <div class="tab-panel" data-tab-panel="bpftrace-tool">
+      <strong>"Where is it blocked?"</strong> The off-CPU one-liner above hashes blocked time by
+      kernel stack via <code>sched_switch</code> tracepoints &mdash; it answers "where is the
+      process waiting," which an on-CPU pprof profile can't, since a blocked goroutine isn't
+      on-CPU at all.
+    </div>
+  </div>
+</div>
 
 ---
 
@@ -367,6 +582,41 @@ Common leak patterns:
 - Ticker/Timer never stopped
 - goroutine waiting on context that's never cancelled
 
+The three application-level failure modes above, side by side:
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="pool-stress" class="active">Conn pool</button>
+    <button data-toggle-opt="gc-stress">GC pressure</button>
+    <button data-toggle-opt="goroutine-stress">Goroutine leak</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="pool-stress">
+    <strong>Signs:</strong> <code>WaitDuration</code> growing, timeouts acquiring a connection,
+    <code>InUse</code> == <code>MaxOpenConnections</code>.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="gc-stress">
+    <strong>Signs:</strong> pause time &gt; 1ms, <code>NumGC</code> &gt; 10/sec, heap oscillates
+    wildly. Fix: reduce allocations (<code>sync.Pool</code>, pre-allocate slices), or raise
+    <code>GOGC</code> (default 100 = GC when heap doubles).
+  </div>
+  <div class="toggle-panel" data-toggle-panel="goroutine-stress">
+    <strong>Signs:</strong> the total in <code>/debug/pprof/goroutine?debug=1</code> keeps
+    growing across samples. Usual causes: an unpaired channel send/receive, an
+    <code>http.Client</code> without a timeout, an unstopped ticker/timer, or a context that's
+    never cancelled.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">What three conditions, together, indicate connection-pool saturation per this guide?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    <code>WaitDuration</code> growing, timeouts acquiring connections, and
+    <code>InUse</code> equal to <code>MaxOpenConnections</code> &mdash; every connection is
+    checked out and new callers are queuing for one.
+  </div>
+</div>
+
 ---
 
 ## Debugging Decision Flow
@@ -391,3 +641,56 @@ flowchart TD
     Q7 -->|Yes| NET[sar + bpftrace<br/>TCP retransmits]
     Q7 -->|No| POOL[Check conn pool<br/>db.Stats()]
 ```
+
+Walk the same tree one fork at a time, latency branch first, then throughput:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Symptom reported.</strong> First fork: is it high latency or low throughput? The
+      two branches below reuse the tools from Sections 3-6.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Latency &mdash; is CPU high?</strong> Yes: capture a CPU pprof profile and read
+      the flame graph (Section 4) to find the hot function.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Latency &mdash; CPU not high, is I/O wait high?</strong> Yes: reach for
+      <code>iostat</code> plus the bpftrace disk-latency histogram (Sections 3 and 5).
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Latency &mdash; I/O not high, are goroutines growing?</strong> Yes: run a
+      goroutine pprof for leak detection (Section 6). No: fall back to a block/mutex pprof for
+      contention (Section 4).
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Throughput &mdash; is the error rate high?</strong> Yes: check logs for error
+      details, using the RED method's error signal (Section 2) to confirm it first.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Throughput &mdash; errors not high, is memory growing?</strong> Yes: take a heap
+      pprof with <code>alloc_space</code> (Section 4).
+    </div>
+    <div class="stepper-panel">
+      <strong>7. Throughput &mdash; memory not growing, any network issues?</strong> Yes:
+      <code>sar</code> plus the bpftrace TCP-retransmit one-liner (Sections 3 and 5). No: check
+      the connection pool via <code>db.Stats()</code> (Section 6).
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Throughput is low, the error rate is <em>not</em> high, and memory is <em>not</em> growing either. Per the flow, what do you check next, and then what if that's also clean?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    Check for network issues (<code>sar</code> + bpftrace TCP retransmits). If that's clean too,
+    the flow's last fallback is the connection pool &mdash; check <code>db.Stats()</code> for
+    saturation.
+  </div>
+</div>
