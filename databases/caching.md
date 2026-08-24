@@ -306,6 +306,221 @@ graph LR
   <div class="quiz-a" hidden>Write-behind fits — it acks the client immediately and flushes to the DB asynchronously in batches, trading some crash-safety for speed. Write-through is the wrong choice here: it deliberately pays cache latency + DB latency on every write specifically to guarantee zero data loss, which is the opposite tradeoff from "fastest writes, some loss is fine."</div>
 </div>
 
+### Live Demo: Cache vs DB, Same Two Operations, Three Strategies
+
+Pick a strategy below, then Read/Write a key and watch what actually happens to the cache and the DB — they diverge only on the write path. Reads behave identically everywhere: a hit returns from cache, a miss falls through to the DB and repopulates the cache.
+
+<div class="toggle-switch" id="caching-strategy-toggle">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="aside" class="active">Cache-Aside</button>
+    <button data-toggle-opt="through">Write-Through</button>
+    <button data-toggle-opt="back">Write-Behind</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="aside">
+    Writes go straight to the DB; the cache entry is <strong>invalidated</strong>, not updated. The next read repopulates it from the DB.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="through">
+    Writes update cache and DB in the <strong>same synchronous operation</strong> — both are consistent immediately.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="back">
+    Writes land in <strong>cache only</strong>; the DB update is queued and applied later by a flush — fast, but not yet durable.
+  </div>
+</div>
+
+<div class="structure-viz" id="caching-strategy-demo">
+  <svg class="viz-canvas" viewBox="0 0 640 270"></svg>
+  <div class="viz-controls">
+    <input class="viz-input" id="csd-key" type="text" placeholder="key" />
+    <input class="viz-input" id="csd-value" type="text" placeholder="value" />
+    <button class="viz-btn" data-viz-action="read">Read</button>
+    <button class="viz-btn" data-viz-action="write">Write</button>
+    <button class="viz-btn" data-viz-action="flush">Flush Queue</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const toggleRoot = document.getElementById('caching-strategy-toggle');
+  const root = document.getElementById('caching-strategy-demo');
+  const svg = root.querySelector('.viz-canvas');
+  const status = root.querySelector('.viz-status');
+  const keyInput = root.querySelector('#csd-key');
+  const valueInput = root.querySelector('#csd-value');
+  const flushBtn = root.querySelector('[data-viz-action="flush"]');
+
+  let cache = {};
+  let db = {};
+  let writeBehindQueue = []; // [{key, value}]
+
+  function has(obj, key) {
+    return Object.prototype.hasOwnProperty.call(obj, key);
+  }
+
+  function currentStrategy() {
+    const active = toggleRoot.querySelector('.toggle-buttons button.active');
+    return active ? active.dataset.toggleOpt : 'aside';
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function doRead(key) {
+    if (has(cache, key)) {
+      return { narrate: `cache hit — returned '${key}' from cache` };
+    }
+    if (has(db, key)) {
+      cache[key] = db[key];
+      return { narrate: 'cache miss — read from DB, populated cache' };
+    }
+    return { narrate: `cache miss — '${key}' not found in DB either`, notFound: true };
+  }
+
+  function doWrite(key, value) {
+    const strategy = currentStrategy();
+    if (strategy === 'aside') {
+      db[key] = value;
+      delete cache[key];
+      return { narrate: 'wrote to DB, invalidated cache entry (not updated) — next read will repopulate it' };
+    }
+    if (strategy === 'through') {
+      cache[key] = value;
+      db[key] = value;
+      return { narrate: 'wrote to cache and DB synchronously — both consistent immediately' };
+    }
+    cache[key] = value;
+    writeBehindQueue.push({ key: key, value: value });
+    return {
+      narrate:
+        'wrote to cache only — DB update queued, not yet durable. If the cache node crashes right now, this write is lost.',
+    };
+  }
+
+  function doFlush() {
+    const n = writeBehindQueue.length;
+    writeBehindQueue.forEach(function (q) { db[q.key] = q.value; });
+    writeBehindQueue = [];
+    return { narrate: `flushed ${n} queued writes to DB`, count: n };
+  }
+
+  function doReset() {
+    cache = {};
+    db = {};
+    writeBehindQueue = [];
+  }
+
+  function drawBox(x, y, w, h, title, entries) {
+    svg.appendChild(el('rect', { x: x, y: y, width: w, height: h, rx: 8, class: 'viz-edge' }));
+    const label = el('text', { x: x + w / 2, y: y - 10, class: 'viz-label-dim' });
+    label.textContent = title;
+    svg.appendChild(label);
+
+    const rowH = 28;
+    const maxRows = Math.max(1, Math.floor((h - 14) / rowH));
+    const shown = entries.slice(0, maxRows);
+    shown.forEach(function (pair, i) {
+      const ry = y + 10 + i * rowH;
+      svg.appendChild(el('rect', {
+        x: x + 12, y: ry, width: w - 24, height: rowH - 6, rx: 5, class: 'viz-node',
+      }));
+      const t = el('text', { x: x + w / 2, y: ry + (rowH - 6) / 2 });
+      t.textContent = `${pair[0]}: ${pair[1]}`;
+      svg.appendChild(t);
+    });
+    if (entries.length === 0) {
+      const t = el('text', { x: x + w / 2, y: y + 30, class: 'viz-label-dim' });
+      t.textContent = '(empty)';
+      svg.appendChild(t);
+    } else if (entries.length > maxRows) {
+      const t = el('text', { x: x + w / 2, y: y + 10 + maxRows * rowH, class: 'viz-label-dim' });
+      t.textContent = `+${entries.length - maxRows} more`;
+      svg.appendChild(t);
+    }
+  }
+
+  function draw() {
+    svg.innerHTML = '';
+    const strategy = currentStrategy();
+    const cacheEntries = Object.keys(cache).map(function (k) { return [k, cache[k]]; });
+    const dbEntries = Object.keys(db).map(function (k) { return [k, db[k]]; });
+
+    if (strategy === 'back') {
+      svg.setAttribute('viewBox', '0 0 640 400');
+      drawBox(20, 40, 280, 210, 'CACHE', cacheEntries);
+      drawBox(340, 40, 280, 210, 'DATABASE', dbEntries);
+      const qEntries = writeBehindQueue.map(function (q) { return [q.key, q.value]; });
+      drawBox(20, 300, 600, 90, 'WRITE-BEHIND QUEUE (pending, not yet durable)', qEntries);
+    } else {
+      svg.setAttribute('viewBox', '0 0 640 270');
+      drawBox(20, 40, 280, 210, 'CACHE', cacheEntries);
+      drawBox(340, 40, 280, 210, 'DATABASE', dbEntries);
+    }
+
+    flushBtn.disabled = strategy !== 'back';
+  }
+
+  root.querySelector('[data-viz-action="read"]').addEventListener('click', function () {
+    const key = keyInput.value.trim();
+    if (!key) {
+      status.textContent = 'Enter a key first.';
+      status.className = 'viz-status viz-status-error';
+      return;
+    }
+    const result = doRead(key);
+    status.textContent = `[${currentStrategy()}] ${result.narrate}`;
+    status.className = 'viz-status ' + (result.notFound ? '' : 'viz-status-ok');
+    draw();
+  });
+
+  root.querySelector('[data-viz-action="write"]').addEventListener('click', function () {
+    const key = keyInput.value.trim();
+    const value = valueInput.value.trim();
+    if (!key || !value) {
+      status.textContent = 'Enter both a key and a value first.';
+      status.className = 'viz-status viz-status-error';
+      return;
+    }
+    const result = doWrite(key, value);
+    status.textContent = `[${currentStrategy()}] ${result.narrate}`;
+    status.className = 'viz-status viz-status-ok';
+    valueInput.value = '';
+    draw();
+  });
+
+  flushBtn.addEventListener('click', function () {
+    if (currentStrategy() !== 'back') {
+      status.textContent = 'Flush only applies in write-back mode — the other two strategies never leave a queue.';
+      status.className = 'viz-status viz-status-error';
+      return;
+    }
+    const result = doFlush();
+    status.textContent = result.narrate;
+    status.className = 'viz-status viz-status-ok';
+    draw();
+  });
+
+  root.querySelector('[data-viz-action="reset"]').addEventListener('click', function () {
+    doReset();
+    status.textContent = 'Reset — cache, DB, and queue all cleared.';
+    status.className = 'viz-status';
+    draw();
+  });
+
+  toggleRoot.querySelectorAll('.toggle-buttons button').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      setTimeout(draw, 0);
+    });
+  });
+
+  draw();
+})();
+</script>
+
 ---
 
 ## 8. Eviction Policies
