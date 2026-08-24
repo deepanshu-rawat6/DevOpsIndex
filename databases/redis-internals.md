@@ -595,7 +595,7 @@ sequenceDiagram
     MASTER-->>REPLICA: buffered commands accumulated during transfer
     Note over REPLICA: Apply buffered commands — now caught up
 
-    Note over MASTER,BACKLOG,REPLICA: Steady state — ongoing replication
+    Note over MASTER,REPLICA: Steady state — ongoing replication
     MASTER->>BACKLOG: append every write (bounded — oldest entries roll off)
     MASTER->>REPLICA: stream command (same format as AOF)
     REPLICA->>REPLICA: apply command, advance replication offset
@@ -913,6 +913,186 @@ Consequence: a key's TTL can expire but the key still occupies memory until acce
   <button class="quiz-reveal">Reveal answer</button>
   <div class="quiz-a" hidden>Eventually, yes — the active expiry cycle runs independently of maxmemory-policy, sampling random keys every 100ms and deleting any it finds expired (looping faster if more than 25% of a sample was expired). It's not instant or exhaustive, though: a key that never gets randomly sampled and is never accessed can lag behind for a while, still counting against memory in the meantime.</div>
 </div>
+
+### Try It Yourself: Lazy vs Active Expiry
+
+Set a key with a short TTL (try 3 seconds), then leave it alone — watch its row turn red once the deadline passes ("expired, not yet swept"), and watch it disappear a moment later when the active-expiry cycle's next sweep catches it, with nobody ever calling Get. Or set one and hit "Get" on it right after the deadline to see the lazy path delete it on access instead. Either way the key eventually goes; which mechanism gets there first is basically a race against the 1-second sweep clock.
+
+<div class="structure-viz" id="redis-expiry-viz">
+  <svg class="viz-canvas" viewBox="0 0 640 220"></svg>
+  <div class="viz-controls">
+    <input class="viz-input" type="text" placeholder="key" />
+    <input class="viz-input" type="number" placeholder="TTL seconds (blank = none)" min="0" step="1" />
+    <button class="viz-btn" data-viz-action="insert">Set key</button>
+    <button class="viz-btn" data-viz-action="search">Get</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root = document.getElementById('redis-expiry-viz');
+  const svg = root.querySelector('.viz-canvas');
+  const status = root.querySelector('.viz-status');
+  const keyInput = root.querySelectorAll('.viz-input')[0];
+  const ttlInput = root.querySelectorAll('.viz-input')[1];
+
+  const SAMPLE_SIZE = 5; // real Redis samples 20 and adaptively re-loops if
+  // >25% of the sample was expired; this demo flattens that to a single
+  // "sample up to 5" pass per tick to keep the animation easy to follow.
+
+  let keys; // Map: key -> { value, expiresAt: ms|null }
+  let tickTimer;
+
+  function reset() {
+    keys = new Map();
+  }
+
+  function isEntryExpired(entry, now) {
+    return entry.expiresAt !== null && now >= entry.expiresAt;
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function insertKey() {
+    const key = keyInput.value.trim();
+    if (!key) { setStatus('Enter a key first.', 'error'); return; }
+    const ttlRaw = ttlInput.value.trim();
+    const now = Date.now();
+    const hasTtl = ttlRaw !== '';
+    const expiresAt = hasTtl ? now + Number(ttlRaw) * 1000 : null;
+    keys.set(key, { value: 'v' + Math.floor(Math.random() * 1000), expiresAt });
+    keyInput.value = '';
+    ttlInput.value = '';
+    setStatus(
+      hasTtl
+        ? `Set "${key}" with a ${ttlRaw}s TTL.`
+        : `Set "${key}" with no TTL — it never expires on its own.`,
+      'ok'
+    );
+    draw();
+  }
+
+  function getKey() {
+    const key = keyInput.value.trim();
+    if (!key) { setStatus('Enter a key first.', 'error'); return; }
+    const now = Date.now();
+    if (!keys.has(key)) {
+      setStatus(`"${key}" — miss (no such key).`, 'error');
+      draw();
+      return;
+    }
+    const entry = keys.get(key);
+    if (isEntryExpired(entry, now)) {
+      keys.delete(key);
+      setStatus(`"${key}" — expired (found on access — lazily deleted just now).`, 'error');
+    } else {
+      setStatus(`"${key}" — hit: ${entry.value}.`, 'ok');
+    }
+    draw();
+  }
+
+  // Active-expiry cycle: runs on its own every tick, independent of any Get.
+  // This is what eventually reclaims a key nobody ever reads again.
+  function activeSweep() {
+    const now = Date.now();
+    const withTtl = [];
+    for (const [k, e] of keys.entries()) {
+      if (e.expiresAt !== null) withTtl.push(k);
+    }
+    const pool = withTtl.slice();
+    const sampled = [];
+    const n = Math.min(SAMPLE_SIZE, pool.length);
+    for (let i = 0; i < n; i++) {
+      const idx = Math.floor(Math.random() * pool.length);
+      sampled.push(pool[idx]);
+      pool.splice(idx, 1);
+    }
+    let removed = 0;
+    for (const k of sampled) {
+      const entry = keys.get(k);
+      if (entry && isEntryExpired(entry, now)) {
+        keys.delete(k);
+        removed++;
+      }
+    }
+    if (removed > 0) {
+      setStatus(`Active expiry cycle: sampled ${sampled.length} key(s), removed ${removed} expired one(s).`, '');
+    }
+  }
+
+  function fmtTtl(entry, now) {
+    if (entry.expiresAt === null) return 'no TTL';
+    const remainMs = entry.expiresAt - now;
+    if (remainMs <= 0) return 'expired, not yet swept';
+    return (remainMs / 1000).toFixed(1) + 's left';
+  }
+
+  function draw() {
+    svg.setAttribute('viewBox', '0 0 640 220');
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    const now = Date.now();
+    const rows = Array.from(keys.entries());
+
+    if (rows.length === 0) {
+      const t = el('text', { x: 320, y: 100, class: 'viz-label-dim', 'text-anchor': 'middle' });
+      t.textContent = 'No keys yet — set one above.';
+      svg.appendChild(t);
+      return;
+    }
+
+    const rowH = 34, startY = 24;
+    rows.forEach(([key, entry], i) => {
+      const y = startY + i * rowH;
+      const expiredNotSwept = isEntryExpired(entry, now);
+
+      const box = el('rect', {
+        x: 20, y: y - 14, width: 600, height: rowH - 8, rx: 6,
+        class: expiredNotSwept ? 'viz-node-removing' : 'viz-node',
+      });
+      svg.appendChild(box);
+
+      const keyLabel = el('text', { x: 36, y: y + 4, 'text-anchor': 'start' });
+      keyLabel.textContent = `${key} = ${entry.value}`;
+      svg.appendChild(keyLabel);
+
+      const ttlLabel = el('text', { x: 590, y: y + 4, 'text-anchor': 'end', class: 'viz-label-dim' });
+      ttlLabel.textContent = expiredNotSwept ? 'expired, not yet swept' : fmtTtl(entry, now);
+      svg.appendChild(ttlLabel);
+    });
+
+    const footnote = el('text', { x: 20, y: startY + rows.length * rowH + 14, class: 'viz-label-dim', 'text-anchor': 'start' });
+    footnote.textContent = 'Red row = logically expired but still physically present until lazy Get or the active sweep removes it.';
+    svg.appendChild(footnote);
+  }
+
+  root.querySelector('[data-viz-action="insert"]').addEventListener('click', insertKey);
+  root.querySelector('[data-viz-action="search"]').addEventListener('click', getKey);
+  root.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    reset();
+    setStatus('Reset — all keys cleared.', '');
+    draw();
+  });
+
+  reset();
+  setStatus('Set a key with a short TTL (e.g. 3s), then leave it alone and watch it get swept by the active expiry cycle — or hit "Get" on an expired key to see lazy expiry catch it instead.', '');
+  draw();
+
+  clearInterval(tickTimer);
+  tickTimer = setInterval(() => { activeSweep(); draw(); }, 1000);
+})();
+</script>
 
 ---
 

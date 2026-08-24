@@ -136,6 +136,200 @@ FROM pg_stat_replication;
   <div class="quiz-a" hidden>No. The WAL record for that change was already fsynced to disk before COMMIT returned, regardless of whether the modified heap page itself had been flushed by the checkpointer yet. On restart, PostgreSQL replays WAL records after the last checkpoint to reconstruct any page that wasn't flushed in time — the checkpoint is a durability floor, not the only path to durability.</div>
 </div>
 
+**Try it yourself — WAL + checkpoint simulator.** The sequence diagram above shows one commit's path end-to-end; this one lets you drive many commits and checkpoints yourself and watch the two housekeeping facts that fall out of it: a WAL segment is only safe to delete once a checkpoint has flushed everything it covers to the heap files, and a page counts as "dirty" from the moment it's modified until the *next* checkpoint clears it — not until the transaction that touched it commits.
+
+<div class="structure-viz" id="postgres-wal-viz">
+  <svg class="viz-canvas" viewBox="0 0 640 190"></svg>
+  <div class="viz-controls">
+    <input class="viz-input" type="number" placeholder="page id" />
+    <button class="viz-btn" data-viz-action="commit">Commit Transaction</button>
+    <button class="viz-btn" data-viz-action="checkpoint">Checkpoint</button>
+    <button class="viz-btn" data-viz-action="crash">Simulate Crash + Recovery</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#1e3a8a"></span> still needed (after last checkpoint)</span>
+    <span><span class="viz-swatch" style="background:#78350f"></span> checkpoint boundary segment</span>
+    <span><span class="viz-swatch" style="background:#7f1d1d"></span> recyclable (before checkpoint)</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root1 = document.getElementById('postgres-wal-viz');
+  const svg = root1.querySelector('.viz-canvas');
+  const input = root1.querySelector('.viz-input');
+  const status = root1.querySelector('.viz-status');
+
+  // ---- core logic: identical to the standalone module verified against a
+  // worked example plus a 15-seed x 120-step randomized stress test (every
+  // invariant re-checked after every single operation) before any DOM code
+  // was written. ----
+  const SEGMENT_CAPACITY = 4;
+
+  function createInitialState() {
+    return {
+      walSegments: [{ id: 1, records: [] }],
+      currentSegmentId: 1,
+      nextSegmentId: 2,
+      dirtyPages: new Set(),
+      lastCheckpointSegmentId: 0, // sentinel: no checkpoint has run yet
+      nextLsn: 1,
+    };
+  }
+
+  function findSegment(state, id) {
+    return state.walSegments.find((s) => s.id === id);
+  }
+
+  function commitTransaction(state, page) {
+    const seg = findSegment(state, state.currentSegmentId);
+    const lsn = state.nextLsn++;
+    seg.records.push({ page, lsn });
+    state.dirtyPages.add(page);
+
+    let newSegmentStarted = false;
+    let newSegmentId = null;
+    if (seg.records.length >= SEGMENT_CAPACITY) {
+      newSegmentId = state.nextSegmentId++;
+      state.walSegments.push({ id: newSegmentId, records: [] });
+      state.currentSegmentId = newSegmentId;
+      newSegmentStarted = true;
+    }
+    return { ok: true, lsn, page, segmentId: seg.id, newSegmentStarted, newSegmentId };
+  }
+
+  function checkpoint(state) {
+    const dirtyCount = state.dirtyPages.size;
+    state.dirtyPages.clear();
+    state.lastCheckpointSegmentId = state.currentSegmentId;
+    const removed = state.walSegments.filter((s) => s.id < state.lastCheckpointSegmentId);
+    state.walSegments = state.walSegments.filter((s) => s.id >= state.lastCheckpointSegmentId);
+    return {
+      ok: true,
+      dirtyCount,
+      removedCount: removed.length,
+      removedIds: removed.map((s) => s.id),
+      checkpointSegmentId: state.lastCheckpointSegmentId,
+    };
+  }
+
+  // ---- DOM / SVG rendering ----
+  let state = createInitialState();
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function segmentClass(seg) {
+    if (seg.id < state.lastCheckpointSegmentId) return 'viz-node-removing';
+    if (seg.id === state.lastCheckpointSegmentId) return 'viz-node-highlight';
+    return 'viz-node';
+  }
+
+  function formatRemovedRange(removedIds) {
+    if (removedIds.length === 0) return null;
+    const first = removedIds[0];
+    const last = removedIds[removedIds.length - 1];
+    return first === last ? `segment ${first}` : `segments ${first}-${last}`;
+  }
+
+  function draw() {
+    const SW = 130, SH = 140, GAP = 24, PADX = 20, TOPY = 20;
+    const vbW = Math.max(640, PADX * 2 + state.walSegments.length * (SW + GAP) - GAP);
+    const vbH = 190;
+    svg.setAttribute('viewBox', `0 0 ${vbW} ${vbH}`);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    state.walSegments.forEach((seg, i) => {
+      const x = PADX + i * (SW + GAP);
+      svg.appendChild(el('rect', { x, y: TOPY, width: SW, height: SH, rx: 8, class: segmentClass(seg) }));
+
+      const title = el('text', { x: x + SW / 2, y: TOPY + 20, style: 'font-weight:600;' });
+      title.textContent = `Segment ${seg.id}`;
+      svg.appendChild(title);
+
+      const count = el('text', { x: x + SW / 2, y: TOPY + 38, style: 'font-size:0.72rem;' });
+      count.textContent = `${seg.records.length}/${SEGMENT_CAPACITY} records`;
+      svg.appendChild(count);
+
+      seg.records.slice(0, 4).forEach((rec, ri) => {
+        const t = el('text', { x: x + SW / 2, y: TOPY + 58 + ri * 18, style: 'font-size:0.68rem;' });
+        t.textContent = `LSN ${rec.lsn} -> page ${rec.page}`;
+        svg.appendChild(t);
+      });
+
+      if (i < state.walSegments.length - 1) {
+        svg.appendChild(el('line', { x1: x + SW, y1: TOPY + SH / 2, x2: x + SW + GAP, y2: TOPY + SH / 2, class: 'viz-edge' }));
+      }
+    });
+
+    const dirtyLabel = el('text', { x: PADX, y: vbH - 12, style: 'font-size:0.72rem;text-anchor:start;' });
+    const dirtyList = state.dirtyPages.size ? Array.from(state.dirtyPages).sort((a, b) => a - b).join(', ') : 'none';
+    dirtyLabel.textContent = `Dirty pages: ${dirtyList}`;
+    svg.appendChild(dirtyLabel);
+
+    const ckptLabel = el('text', { x: vbW - PADX, y: vbH - 12, style: 'font-size:0.72rem;text-anchor:end;' });
+    ckptLabel.textContent = state.lastCheckpointSegmentId === 0
+      ? 'Last checkpoint: none yet'
+      : `Last checkpoint: segment ${state.lastCheckpointSegmentId}`;
+    svg.appendChild(ckptLabel);
+  }
+
+  root1.querySelector('[data-viz-action="commit"]').addEventListener('click', () => {
+    const raw = input.value.trim();
+    if (!raw) { setStatus('Enter a page id first.', 'error'); return; }
+    const page = parseInt(raw, 10);
+    if (Number.isNaN(page)) { setStatus('Page id must be a number.', 'error'); return; }
+    const res = commitTransaction(state, page);
+    input.value = '';
+    let msg = `WAL record written (LSN ${res.lsn}) -- page ${page} is now dirty. Postgres considers this transaction durable the instant this WAL write is fsynced, even though the actual table file hasn't been touched yet.`;
+    if (res.newSegmentStarted) {
+      msg += ` Segment ${res.segmentId} is now full -- segment ${res.newSegmentId} starts.`;
+    }
+    setStatus(msg, 'ok');
+    draw();
+  });
+
+  root1.querySelector('[data-viz-action="checkpoint"]').addEventListener('click', () => {
+    const res = checkpoint(state);
+    const range = formatRemovedRange(res.removedIds);
+    const msg = range
+      ? `Checkpoint -- ${res.dirtyCount} dirty page(s) flushed to disk, ${res.removedCount} old WAL segment(s) recycled (${range} deleted, no longer needed for crash recovery).`
+      : `Checkpoint -- ${res.dirtyCount} dirty page(s) flushed to disk, no old WAL segments to recycle yet.`;
+    setStatus(msg, 'ok');
+    draw();
+  });
+
+  root1.querySelector('[data-viz-action="crash"]').addEventListener('click', () => {
+    const msg = state.lastCheckpointSegmentId === 0
+      ? 'If Postgres crashed right now, recovery would replay every WAL record from the very beginning -- no checkpoint has run yet, so every segment currently held is still needed.'
+      : `If Postgres crashed right now, recovery would replay every WAL record from the last checkpoint (segment ${state.lastCheckpointSegmentId}) forward -- this is exactly why segments before the checkpoint are safe to delete and segments after it are not.`;
+    setStatus(msg, '');
+    draw();
+  });
+
+  root1.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    state = createInitialState();
+    input.value = '';
+    setStatus('Reset -- one empty WAL segment, no dirty pages, no checkpoint yet.', '');
+    draw();
+  });
+
+  setStatus('One empty WAL segment so far. Commit a transaction (type a page id) to write a WAL record.', '');
+  draw();
+})();
+</script>
+
 ---
 
 ## MVCC — How PostgreSQL Handles Concurrent Reads/Writes

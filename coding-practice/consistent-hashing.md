@@ -24,7 +24,7 @@ Consistent hashing places both nodes and keys on a fixed hash ring (e.g., `[0, 2
 
 ```mermaid
 graph TD
-    subgraph Ring["Hash Ring [0, 2^32)"]
+    subgraph Ring["Hash Ring — 0 to 2^32"]
         N1["Node A @ pos 1000"]
         N2["Node B @ pos 4000"]
         N3["Node C @ pos 8000"]

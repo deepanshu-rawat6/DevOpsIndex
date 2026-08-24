@@ -160,7 +160,7 @@ sequenceDiagram
     end
 
     rect rgb(39, 116, 96)
-    Note over C,S,P: Phase 3 — push and execute, the agentless part
+    Note over C,P: Phase 3 — push and execute, the agentless part
     C->>S: exec, run /usr/bin/python3 /tmp/.ansible/tmp/anstmp_XXXX/module.py
     S->>P: Fork python process
     P->>P: Run module logic (check state, make change)

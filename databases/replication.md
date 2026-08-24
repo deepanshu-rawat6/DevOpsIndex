@@ -92,6 +92,253 @@ sequenceDiagram
   <div class="quiz-a" hidden>Only that one replica has acknowledged <em>receipt</em> of the write — not that it has been applied. RPO is near-zero because the data already exists on a second node's relay log, but that's a weaker guarantee than full sync, where the replica confirms both received and applied before the primary ACKs the client.</div>
 </div>
 
+### Try It Yourself: Live Replication Lag
+
+The diagram above shows the write path once. This one's live — flip between sync and async, hammer the Write button, and watch the offsets either stay glued together or drift apart. Async's queue is exactly the window of acknowledged-but-not-yet-durable-on-a-second-node writes that a "Kill Master" would expose as gone.
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-mode-btn="sync" class="active state-ok">Sync</button>
+    <button data-mode-btn="async" class="state-warn">Async</button>
+  </div>
+</div>
+
+<div class="structure-viz" id="replication-lag-viz">
+  <svg class="viz-canvas" viewBox="0 0 620 170"></svg>
+  <div class="viz-controls">
+    <button class="viz-btn" data-viz-action="write">Write</button>
+    <button class="viz-btn" data-viz-action="tick">Replica Tick</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="kill">Kill Master</button>
+    <button class="viz-btn" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root = document.getElementById('replication-lag-viz');
+  const svg = root.querySelector('.viz-canvas');
+  const status = root.querySelector('.viz-status');
+  const modeButtons = document.querySelectorAll('[data-mode-btn]');
+
+  // --- Core logic (state machine) -----------------------------------
+  // Mirrors databases/replication.md section 2: master offset increments
+  // per write; the replica trails behind via a pending delay queue in
+  // async mode, and is forced to match instantly (0 lag) in sync mode.
+  function makeState() {
+    return {
+      mode: 'sync',
+      masterOffset: 0,
+      replicaOffset: 0,
+      replicaDelayQueue: [],
+      masterBlocked: false,
+    };
+  }
+
+  let state = makeState();
+
+  function lag() {
+    return state.masterOffset - state.replicaOffset;
+  }
+
+  function doWrite() {
+    state.masterOffset++;
+    if (state.mode === 'async') {
+      state.replicaDelayQueue.push(state.masterOffset);
+      return `Write acknowledged to the client immediately. Replica will apply it after its lag catches up — currently ${state.replicaDelayQueue.length} writes behind.`;
+    }
+    state.masterBlocked = true;
+    state.replicaOffset = state.masterOffset;
+    state.masterBlocked = false;
+    return `Write blocked until replica confirmed — replica caught up instantly (0 lag), write now acknowledged. This is the latency cost of synchronous replication: every write pays the round-trip.`;
+  }
+
+  function doTick() {
+    if (state.mode !== 'async') {
+      return `Replica Tick only has an effect in async mode — replica is already caught up by construction in sync mode.`;
+    }
+    if (state.replicaDelayQueue.length === 0) {
+      return `No pending writes queued — replica is already caught up.`;
+    }
+    const offset = state.replicaDelayQueue.shift();
+    state.replicaOffset = offset;
+    return `Replica applied 1 queued write — ${state.replicaDelayQueue.length} remaining, offset now caught up to ${offset}.`;
+  }
+
+  function doKill() {
+    const gap = state.masterOffset - state.replicaOffset;
+    if (gap <= 0) {
+      return `If master died right now: replica is at offset ${state.replicaOffset}, master was at offset ${state.masterOffset}. No gap — the replica has everything the master acknowledged. In sync mode this gap is always 0 by construction.`;
+    }
+    return `If master died right now: replica is at offset ${state.replicaOffset}, master was at offset ${state.masterOffset}. In async mode, the (${state.masterOffset} - ${state.replicaOffset} = ${gap}) most recent writes that were already acknowledged to clients are GONE if this replica gets promoted. In sync mode, this gap is always 0 by construction.`;
+  }
+
+  function doSetMode(newMode) {
+    if (newMode === state.mode) return `Already in ${newMode} mode.`;
+    let msg;
+    if (newMode === 'sync' && state.replicaDelayQueue.length > 0) {
+      // Force-flush on switch to sync so the zero-lag guarantee holds
+      // the instant sync mode is entered.
+      const flushed = state.replicaDelayQueue.length;
+      state.replicaOffset = state.masterOffset;
+      state.replicaDelayQueue = [];
+      msg = `Switching to sync mode force-flushed ${flushed} queued write(s) — replica jumps straight to offset ${state.replicaOffset} so the zero-lag guarantee holds immediately.`;
+    } else {
+      msg = `Switched to ${newMode} mode.`;
+    }
+    state.mode = newMode;
+    return msg;
+  }
+
+  function doReset() {
+    state = makeState();
+    return 'Reset.';
+  }
+
+  // --- Rendering -------------------------------------------------------
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function draw() {
+    svg.innerHTML = '';
+
+    const masterX = 120, replicaX = 480, cy = 60, r = 34;
+
+    // Master node
+    const mCircle = document.createElementNS(svgNS, 'circle');
+    mCircle.setAttribute('cx', masterX);
+    mCircle.setAttribute('cy', cy);
+    mCircle.setAttribute('r', r);
+    mCircle.setAttribute('class', state.masterBlocked ? 'viz-node viz-node-highlight' : 'viz-node');
+    svg.appendChild(mCircle);
+
+    const mLabel = document.createElementNS(svgNS, 'text');
+    mLabel.setAttribute('x', masterX);
+    mLabel.setAttribute('y', cy - 6);
+    mLabel.textContent = 'Master';
+    svg.appendChild(mLabel);
+
+    const mOffset = document.createElementNS(svgNS, 'text');
+    mOffset.setAttribute('x', masterX);
+    mOffset.setAttribute('y', cy + 14);
+    mOffset.textContent = 'offset ' + state.masterOffset;
+    svg.appendChild(mOffset);
+
+    // Replica node
+    const rCircle = document.createElementNS(svgNS, 'circle');
+    rCircle.setAttribute('cx', replicaX);
+    rCircle.setAttribute('cy', cy);
+    rCircle.setAttribute('r', r);
+    rCircle.setAttribute('class', 'viz-node');
+    svg.appendChild(rCircle);
+
+    const rLabel = document.createElementNS(svgNS, 'text');
+    rLabel.setAttribute('x', replicaX);
+    rLabel.setAttribute('y', cy - 6);
+    rLabel.textContent = 'Replica';
+    svg.appendChild(rLabel);
+
+    const rOffset = document.createElementNS(svgNS, 'text');
+    rOffset.setAttribute('x', replicaX);
+    rOffset.setAttribute('y', cy + 14);
+    rOffset.textContent = 'offset ' + state.replicaOffset;
+    svg.appendChild(rOffset);
+
+    // Edge between them
+    const edge = document.createElementNS(svgNS, 'line');
+    edge.setAttribute('x1', masterX + r);
+    edge.setAttribute('y1', cy);
+    edge.setAttribute('x2', replicaX - r);
+    edge.setAttribute('y2', cy);
+    edge.setAttribute('class', lag() > 0 ? 'viz-edge' : 'viz-edge-active');
+    svg.appendChild(edge);
+
+    // Lag readout, centered above the edge
+    const lagText = document.createElementNS(svgNS, 'text');
+    lagText.setAttribute('x', (masterX + replicaX) / 2);
+    lagText.setAttribute('y', cy - 20);
+    lagText.setAttribute('class', lag() > 0 ? 'viz-node-highlight' : '');
+    lagText.textContent = 'lag = ' + lag();
+    svg.appendChild(lagText);
+
+    // Pending queue, shown as a row of boxes under the edge (async only)
+    if (state.mode === 'async' && state.replicaDelayQueue.length > 0) {
+      const boxSize = 24, boxGap = 8;
+      const totalWidth = state.replicaDelayQueue.length * boxSize + (state.replicaDelayQueue.length - 1) * boxGap;
+      const startX = (masterX + replicaX) / 2 - totalWidth / 2;
+      const boxY = cy + 30;
+
+      state.replicaDelayQueue.forEach((offset, i) => {
+        const x = startX + i * (boxSize + boxGap);
+        const box = document.createElementNS(svgNS, 'rect');
+        box.setAttribute('x', x);
+        box.setAttribute('y', boxY);
+        box.setAttribute('width', boxSize);
+        box.setAttribute('height', boxSize);
+        box.setAttribute('rx', 4);
+        box.setAttribute('class', i === 0 ? 'viz-node-new' : 'viz-node');
+        svg.appendChild(box);
+
+        const boxLabel = document.createElementNS(svgNS, 'text');
+        boxLabel.setAttribute('x', x + boxSize / 2);
+        boxLabel.setAttribute('y', boxY + boxSize / 2 + 4);
+        boxLabel.textContent = offset;
+        svg.appendChild(boxLabel);
+      });
+
+      const queueLabel = document.createElementNS(svgNS, 'text');
+      queueLabel.setAttribute('x', (masterX + replicaX) / 2);
+      queueLabel.setAttribute('y', boxY + boxSize + 18);
+      queueLabel.textContent = 'pending queue (' + state.replicaDelayQueue.length + ')';
+      svg.appendChild(queueLabel);
+    }
+
+    // Mode buttons active state
+    modeButtons.forEach((btn) => {
+      btn.classList.toggle('active', btn.dataset.modeBtn === state.mode);
+    });
+  }
+
+  // --- Wiring ------------------------------------------------------------
+  modeButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      const msg = doSetMode(btn.dataset.modeBtn);
+      setStatus(msg, 'ok');
+      draw();
+    });
+  });
+
+  root.querySelector('[data-viz-action="write"]').addEventListener('click', () => {
+    const msg = doWrite();
+    setStatus(msg, 'ok');
+    draw();
+  });
+
+  root.querySelector('[data-viz-action="tick"]').addEventListener('click', () => {
+    const msg = doTick();
+    setStatus(msg, state.mode !== 'async' ? 'error' : 'ok');
+    draw();
+  });
+
+  root.querySelector('[data-viz-action="kill"]').addEventListener('click', () => {
+    const msg = doKill();
+    setStatus(msg, lag() > 0 ? 'error' : 'ok');
+    draw();
+  });
+
+  root.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    const msg = doReset();
+    setStatus(msg, '');
+    draw();
+  });
+
+  draw();
+})();
+</script>
+
 ---
 
 ## 3. Physical vs Logical Replication

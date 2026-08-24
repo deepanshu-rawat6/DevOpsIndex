@@ -1,5 +1,10 @@
 # Go context.Context — Cancellation, Deadlines, and Propagation
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## Context Tree / Propagation Model
@@ -39,6 +44,12 @@ cancel1() // cancels ctx1 AND ctx2 (and any children of ctx2)
 fmt.Println(ctx2.Err()) // context.Canceled — inherited from parent
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">What happens to child contexts when a parent context is cancelled — and can a child's cancellation propagate upward to the parent?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>When a parent context is cancelled (by explicit <code>cancel()</code>, timeout, or deadline), the Go runtime closes the Done channel on <em>every</em> descendant in the subtree — children, grandchildren, etc. — simultaneously. This cascade is automatic and does not require any action from the child. However, cancellation is strictly one-directional: cancelling a child has <em>no</em> effect on its parent or any sibling contexts. A child's deadline is also capped by its parent's — a <code>WithTimeout(parent, 10s)</code> where <code>parent</code> already has a 5s deadline will fire at 5s, not 10s.</div>
+</div>
+
 ---
 
 ## WithCancel / WithTimeout / WithDeadline
@@ -71,6 +82,24 @@ defer cancel()
 ```
 
 **Always call `cancel()`, even on success.** Every `WithCancel`/`WithTimeout`/`WithDeadline` starts an internal goroutine or timer that only stops when `cancel()` runs or the parent is cancelled — skipping `defer cancel()` leaks that resource until the parent context (possibly `Background()`, i.e. never) is cancelled.
+
+<div class="quiz-card">
+  <p class="quiz-q">What is the difference between <code>context.WithTimeout</code> and <code>context.WithDeadline</code>? When would you use each?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>WithTimeout(parent, d)</code> cancels after a <em>relative</em> duration from now; <code>WithDeadline(parent, t)</code> cancels at an <em>absolute</em> wall-clock time. <code>WithTimeout</code> is implemented as <code>WithDeadline(parent, time.Now().Add(d))</code> — identical mechanics, different ergonomics. Use <code>WithTimeout</code> when you know "this call gets 3 seconds." Use <code>WithDeadline</code> when you're propagating an upstream deadline ("the client gave us until T, so our downstream call must also finish by T").</div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">When does <code>ctx.Err()</code> return <code>context.DeadlineExceeded</code> vs <code>context.Canceled</code>?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>ctx.Err()</code> returns <code>context.DeadlineExceeded</code> when the context expired because a timeout or deadline fired automatically. It returns <code>context.Canceled</code> when an explicit <code>cancel()</code> call triggered the cancellation (including a cancel propagated from a parent). If you call <code>cancel()</code> before the deadline fires, you get <code>Canceled</code>, not <code>DeadlineExceeded</code> — the explicit cancel wins. Both mean the context is done; the distinction tells you <em>why</em> it ended, which matters for logging, metrics, and deciding whether to retry.</div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Why must the <code>cancel</code> function returned by <code>WithCancel</code>/<code>WithTimeout</code>/<code>WithDeadline</code> always be called — even if the timeout fires on its own?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Each <code>With*</code> call registers the new context as a child of its parent, which involves allocating internal state (a channel, timer for timeouts, and a reference in the parent's child list). Calling <code>cancel()</code> releases all of this: it closes the Done channel, stops the timer, and removes the child entry from the parent. If <code>cancel()</code> is never called, these resources stay alive until the <em>parent</em> context is cancelled — which may be <code>context.Background()</code>, meaning never. On the success path (no timeout), the timer never fires and the internal goroutine/timer resource leaks for the process lifetime. <code>defer cancel()</code> is cheap and ensures cleanup regardless of exit path.</div>
+</div>
 
 ---
 
@@ -130,6 +159,12 @@ func handler(w http.ResponseWriter, r *http.Request) {
 
 **Rule:** if removing the value from context would break correctness (not just observability/tracing), it belongs in the function signature instead.
 
+<div class="quiz-card">
+  <p class="quiz-q">What does <code>ctx.Value(key)</code> retrieve, and why should the key be an unexported custom type rather than a plain string?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>ctx.Value(key)</code> walks up the context tree from the current context to the root, comparing each node's key using <code>==</code>. It returns the value associated with the first matching key, or <code>nil</code> if none is found. The return type is <code>any</code>, requiring a type assertion to use. <br><br>If string keys are used (<code>"userID"</code>), any two packages using the same string key will silently collide — one package's <code>ctx.Value("userID")</code> would return the value set by the other package's middleware. An unexported custom type (<code>type ctxKey int; const requestIDKey ctxKey = iota</code>) prevents this: since the type is unexported, no other package can even construct a value of that type to use as a key — the key is only accessible via the package's own accessor functions, making collisions structurally impossible.</div>
+</div>
+
 ---
 
 ## Cancellation Propagation Through Goroutine Trees
@@ -152,6 +187,35 @@ sequenceDiagram
     G1->>G1: sees ctx.Done(), cleans up, returns
     G2->>G2: sees ctx.Done(), cleans up, returns
 ```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Parent creates context with deadline.</strong> <code>ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)</code> — a new context node is registered in the context tree with a timer that fires at T+2s.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Context passed to child via function argument.</strong> <code>go worker(ctx, id)</code> — the same context pointer is shared; no copy of the deadline is made. The child sees the exact same expiry.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Child goroutine selects on <code>ctx.Done()</code>.</strong> Inside the worker, <code>select { case &lt;-ctx.Done(): return }</code> — the goroutine parks, waiting for the Done channel to close. Meanwhile other work proceeds normally.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Parent deadline fires at T+2s.</strong> The internal timer goroutine calls <code>cancel()</code> automatically. This closes the Done channel on <code>ctx</code> and sets <code>ctx.Err()</code> to <code>context.DeadlineExceeded</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. All derived contexts' Done channels close simultaneously.</strong> Any child or grandchild context derived from this one also has its Done channel closed — the cancellation cascades down the entire subtree, but never upward to the parent.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Child goroutine unblocks and exits cleanly.</strong> The worker's <code>select</code> case on <code>&lt;-ctx.Done()</code> fires. It reads <code>ctx.Err()</code> to distinguish timeout from explicit cancel, logs the reason, and returns — no goroutine leak.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 Closing the `Done()` channel is a broadcast — every goroutine holding that context (or any context derived from it) observes it in the same instant. There's no ordering guarantee for which goroutine notices first, but all of them eventually do.
 
@@ -179,6 +243,12 @@ func main() {
     time.Sleep(100 * time.Millisecond) // give workers time to print their stop message
 }
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">Why should <code>context.Background()</code> only be used at the top level of a program (e.g., <code>main</code>, test setup, or HTTP handler root)?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>context.Background()</code> is a root context that is never cancelled, has no deadline, and carries no values. If you create it deep inside a call stack (e.g., inside a helper function that should respect the caller's timeout), you break the cancellation chain: the caller's context deadline or cancel signal will not propagate into any child contexts derived from your new <code>Background()</code>. The whole point of threading <code>context.Context</code> through function arguments is to allow a single cancellation at the top to flow down to every I/O or blocking operation. Using <code>Background()</code> below the top level silently opts out of that contract. Use <code>context.TODO()</code> as a temporary placeholder during refactoring to signal intent to wire up a real context later.</div>
+</div>
 
 ---
 
@@ -254,6 +324,12 @@ func main() {
 
 **Why this matters operationally:** without `errgroup.WithContext`, a failed goroutine in a fan-out just returns an error while its siblings keep running to completion — wasting downstream calls, DB connections, and time. `WithContext` turns "one failure" into "stop everything else immediately."
 
+<div class="quiz-card">
+  <p class="quiz-q">In <code>errgroup.WithContext</code>, what context is passed to goroutines launched via <code>g.Go(...)</code>, and what happens to it when one goroutine returns a non-nil error?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>errgroup.WithContext(parent)</code> creates a derived context (<code>ctx</code>) and an internal cancel function. All goroutines launched via <code>g.Go</code> should use this derived <code>ctx</code> (not the original parent) for their I/O calls. When any goroutine returns a non-nil error, <code>errgroup</code> immediately calls the internal cancel function — closing <code>ctx.Done()</code> for all sibling goroutines simultaneously. Siblings that are blocked in context-aware calls (HTTP requests, DB queries using <code>NewRequestWithContext</code>) will be interrupted. <code>g.Wait()</code> blocks until all goroutines return, then returns the first non-nil error. This pattern ensures that a single failure stops wasted work across all siblings.</div>
+</div>
+
 ### errgroup with Limited Concurrency (Go 1.24+ / recent x/sync)
 
 ```go
@@ -315,6 +391,12 @@ http.HandleFunc("/report", withTimeout(reportHandler, 10*time.Second))
 ```
 
 `http.TimeoutHandler` does something similar built-in, but writes a fallback response on timeout — useful for guaranteeing a response even if the handler ignores `ctx.Done()`.
+
+<div class="quiz-card">
+  <p class="quiz-q">In an HTTP handler, when does <code>r.Context()</code> get cancelled automatically — and why does this matter for downstream calls like DB queries?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>r.Context()</code> is cancelled by the <code>net/http</code> server when the client disconnects — the TCP connection closes, the client times out, or a load balancer severs the connection. This is detected server-side and the Done channel closes automatically without any extra code. This matters because if you pass <code>r.Context()</code> (or a child of it) into every downstream call — <code>db.QueryRowContext(ctx, ...)</code>, <code>http.NewRequestWithContext(ctx, ...)</code>, etc. — those operations will abort as soon as the client is gone. Without context propagation, a handler might finish a 5-second DB query after the client has already moved on, wasting DB connections and CPU. With it, the query is cancelled server-side the moment it becomes pointless.</div>
+</div>
 
 ---
 
@@ -391,6 +473,12 @@ func fetch(url string) {
 go vet ./...
 # ./main.go:12:2: the cancel function returned by context.WithTimeout should be called, not discarded, to avoid a context leak
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">Why is storing a <code>context.Context</code> in a struct field almost always wrong — what specific problem does it create?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>A <code>context.Context</code> is meant to represent the lifetime of a single <em>operation</em> or <em>request</em> — not the lifetime of an object. When stored in a struct at construction time, the context becomes "stale": it reflects the cancellation state at the moment the struct was created, not the current caller's request. A later call to a method on that struct will use the wrong context — it may already be cancelled (from a previous request), or it will never be cancelled (because it was <code>context.Background()</code> at construction). The correct pattern is to accept <code>ctx context.Context</code> as the first argument of every method that does I/O, so the calling goroutine can control cancellation per-call.</div>
+</div>
 
 ---
 
@@ -502,6 +590,12 @@ func main() {
 - Per-message context is derived from the loop's `ctx` — a shutdown signal cancels in-flight message processing too, not just future deliveries.
 - `context.DeadlineExceeded` (message-specific timeout) and `context.Canceled` (process shutdown) are handled differently: both requeue, but only the timeout case is a "this message specifically is slow" signal versus "we're shutting down."
 - A generic processing error nacks **without** requeue — requeueing a poison message that always fails causes an infinite redelivery loop; that's what a dead-letter exchange/queue is for in production.
+
+<div class="quiz-card">
+  <p class="quiz-q">In the queue consumer pattern, why is <code>context.DeadlineExceeded</code> handled differently from <code>context.Canceled</code> even though both result in a nack+requeue?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>context.DeadlineExceeded</code> means this specific message exceeded its per-message timeout — the message itself might be slow, or the downstream service is degraded. Requeuing it is appropriate (another consumer or a later attempt might process it faster), but it's a signal about <em>that message's</em> processing time and should be logged/metered separately. <code>context.Canceled</code> (here triggered by SIGTERM/SIGINT) means the <em>process</em> is shutting down, not that the message is bad — the message was simply caught mid-flight and should be requeued for another instance to pick up. Distinguishing them lets you build separate alerting: rising <code>DeadlineExceeded</code> nacks indicate processing slowdowns; <code>Canceled</code> nacks are expected during rolling deployments and should not page anyone.</div>
+</div>
 
 ---
 

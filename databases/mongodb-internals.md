@@ -179,6 +179,281 @@ graph TD
   <div class="quiz-a" hidden>It succeeds — primary + arbiter is 2 of 3 votes, a majority, so w:"majority" is satisfied without the secondary. But "acknowledged" isn't the same as "safely durable on a second copy": the arbiter holds no data, so this write exists only on the primary. If the primary crashes before the secondary reconnects and catches up, that write is lost. This exact gap is the tradeoff of PSA vs. PSS.</div>
 </div>
 
+### Try It Yourself: Live PSA Election
+
+This is a different election model than the Raft demo elsewhere in this repo
+([replication.md](replication.md)) — worth being precise about the
+difference rather than treating "leader election" as one interchangeable
+mechanic. Raft's demo picks whichever node happens to time out first and
+wins purely on term number and majority; the first candidate to campaign
+wins as long as its log qualifies. MongoDB's election is **priority-weighted**:
+each member has a configured `priority` (default 1, arbiters always 0), a
+member only calls an election after missing heartbeats for
+`electionTimeoutMillis` (default 10s), and a higher-priority secondary that
+is otherwise healthy can trigger its own election and take over from a
+lower-priority primary even with no failure at all — a "priority takeover,"
+not just a race to time out first. The demo below models that, plus the PSA
+topology's specific risk: an **arbiter** votes but holds no data and can
+never itself become primary.
+
+Default topology is PSA: `P1` (priority 1, data), `S1` (priority 1, data,
+starts as PRIMARY), `A1` (arbiter — priority 0, no data). Click any node to
+kill or revive it, use "Kill Primary" to force a failover, or add a
+differently-prioritized secondary and watch it take over. Majority here is
+computed against the full configured voting membership (not just currently
+up nodes) — this is what makes the risk case below possible: kill the
+arbiter, then kill either remaining data node, and the cluster has only 1
+of 3 votes left and cannot elect anyone.
+
+<div class="structure-viz" id="mongo-election-viz">
+  <svg class="viz-canvas" viewBox="0 0 640 170"></svg>
+  <div class="viz-controls">
+    <button class="viz-btn viz-btn-danger" data-viz-action="kill-primary">Kill Primary</button>
+    <input class="viz-input" type="text" placeholder="node name" data-viz-field="name" style="width:6rem" />
+    <input class="viz-input" type="number" placeholder="priority" data-viz-field="priority" style="width:5rem" />
+    <button class="viz-btn" data-viz-action="add">Add Node</button>
+    <button class="viz-btn" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#14532d"></span> Primary</span>
+    <span><span class="viz-swatch" style="background:#1e3a8a"></span> Secondary (up)</span>
+    <span><span class="viz-swatch" style="background:#7f1d1d"></span> Down</span>
+    <span><span class="viz-swatch" style="background:#f39c12"></span> Arbiter (diamond, no data)</span>
+    <span>Click any node box to kill/revive it.</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root0 = document.getElementById('mongo-election-viz');
+  const svg = root0.querySelector('.viz-canvas');
+  const status = root0.querySelector('.viz-status');
+  const nameField = root0.querySelector('[data-viz-field="name"]');
+  const priorityField = root0.querySelector('[data-viz-field="priority"]');
+
+  let nodes;
+
+  // ---- Core election logic (no DOM) --------------------------------------
+  // Mirrors this section's own narration: priority-weighted election (the
+  // highest-priority ELIGIBLE data-bearing node wins, not just any majority
+  // winner), majority computed over ALL configured voting members (alive or
+  // not — this is what makes the PSA risk below possible), and the arbiter
+  // can vote but can never itself become primary.
+
+  function makeInitialNodes() {
+    return [
+      { id: 'P1', priority: 1, hasData: true, isArbiter: false, alive: true, isPrimary: false },
+      { id: 'S1', priority: 1, hasData: true, isArbiter: false, alive: true, isPrimary: true },
+      { id: 'A1', priority: 0, hasData: false, isArbiter: true, alive: true, isPrimary: false },
+    ];
+  }
+
+  function eligibleCandidates(list) {
+    return list.filter((n) => n.hasData && n.alive);
+  }
+
+  function pickCandidate(eligible) {
+    if (!eligible.length) return null;
+    return eligible.slice().sort((a, b) => b.priority - a.priority || a.id.localeCompare(b.id))[0];
+  }
+
+  function majorityNeeded(list) {
+    return Math.floor(list.length / 2) + 1;
+  }
+
+  function evaluate(list) {
+    const total = list.length;
+    const majority = majorityNeeded(list);
+    const aliveCount = list.filter((n) => n.alive).length;
+    const eligible = eligibleCandidates(list);
+    const messages = [];
+
+    if (eligible.length === 0) {
+      list.forEach((n) => { n.isPrimary = false; });
+      messages.push('No data-bearing node is up — no eligible candidate, no primary.');
+      return { messages, primaryId: null };
+    }
+
+    messages.push('Eligible: ' + eligible.map((n) => n.id + ' (priority ' + n.priority + ')').join(', ') + '.');
+
+    if (aliveCount < majority) {
+      list.forEach((n) => { n.isPrimary = false; });
+      let m = 'Only ' + aliveCount + ' voter(s) alive (need ' + majority + ' for majority of ' + total + ') — cluster cannot elect a primary.';
+      const arbiter = list.find((n) => n.isArbiter);
+      if (arbiter && !arbiter.alive) {
+        m += ' This is the PSA topology risk this file describes: losing the arbiter plus one data node loses you majority entirely.';
+      }
+      messages.push(m);
+      return { messages, primaryId: null };
+    }
+
+    const current = list.find((n) => n.isPrimary && n.alive && n.hasData);
+    let candidate;
+    let isTakeover = false;
+
+    if (current) {
+      const outranking = eligible.filter((n) => n.priority > current.priority);
+      if (outranking.length === 0) {
+        messages.push(current.id + ' remains PRIMARY (' + aliveCount + '/' + total + ' votes available).');
+        return { messages, primaryId: current.id };
+      }
+      candidate = pickCandidate(outranking);
+      isTakeover = true;
+    } else {
+      candidate = pickCandidate(eligible);
+    }
+
+    const arbiter = list.find((n) => n.isArbiter);
+    if (arbiter && arbiter.alive && candidate.id !== arbiter.id) {
+      messages.push('Arbiter ' + arbiter.id + ' votes for ' + candidate.id + '.');
+    }
+    list.forEach((n) => { n.isPrimary = n.id === candidate.id; });
+    if (isTakeover) {
+      messages.push(candidate.id + ' (priority ' + candidate.priority + ') outranks current primary ' + current.id + ' (priority ' + current.priority + ') — priority takeover. ' + candidate.id + ' has ' + aliveCount + '/' + total + ' votes, majority reached, ' + candidate.id + ' becomes PRIMARY.');
+    } else {
+      messages.push(candidate.id + ' has ' + aliveCount + '/' + total + ' votes — majority reached, ' + candidate.id + ' becomes PRIMARY.');
+    }
+    return { messages, primaryId: candidate.id };
+  }
+
+  function killPrimaryAction(list) {
+    const primary = list.find((n) => n.isPrimary && n.alive);
+    if (!primary) {
+      return { messages: ['No primary is currently alive — nothing to kill.'], ok: false };
+    }
+    primary.alive = false;
+    primary.isPrimary = false;
+    const msgs = [primary.id + ' (Primary) down.'];
+    const res = evaluate(list);
+    return { messages: msgs.concat(res.messages), ok: res.primaryId !== null };
+  }
+
+  function toggleNodeAction(list, id) {
+    const node = list.find((n) => n.id === id);
+    if (!node) return { messages: ['No node named ' + id + '.'], ok: false };
+    node.alive = !node.alive;
+    if (!node.alive) node.isPrimary = false;
+    const msgs = [node.id + (node.isArbiter ? ' (arbiter)' : '') + ' ' + (node.alive ? 'revived' : 'killed') + '.'];
+    const res = evaluate(list);
+    return { messages: msgs.concat(res.messages), ok: res.primaryId !== null };
+  }
+
+  function addNodeAction(list, name, priority) {
+    if (!name || !/^[A-Za-z0-9_-]+$/.test(name)) {
+      return { messages: ['Enter a valid node name (letters, digits, -, _).'], ok: false };
+    }
+    if (list.some((n) => n.id === name)) {
+      return { messages: ['A node named ' + name + ' already exists.'], ok: false };
+    }
+    if (!Number.isFinite(priority) || priority < 0) {
+      return { messages: ['Priority must be a non-negative number.'], ok: false };
+    }
+    list.push({ id: name, priority: priority, hasData: true, isArbiter: false, alive: true, isPrimary: false });
+    const msgs = [name + ' added as secondary (priority ' + priority + ', data-bearing).'];
+    const res = evaluate(list);
+    return { messages: msgs.concat(res.messages), ok: res.primaryId !== null };
+  }
+
+  // ---- Rendering -----------------------------------------------------------
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function text(x, y, str, cls) {
+    const t = el('text', cls ? { x: x, y: y, class: cls } : { x: x, y: y });
+    t.textContent = str;
+    return t;
+  }
+
+  function draw() {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    const n = nodes.length;
+    const boxW = Math.max(80, Math.min(120, Math.floor((640 - (n + 1) * 16) / n)));
+    const boxH = 100;
+    const gap = Math.floor((640 - n * boxW) / (n + 1));
+    const y = 30;
+
+    nodes.forEach((node, i) => {
+      const x = gap + i * (boxW + gap);
+      const cx = x + boxW / 2;
+      const cy = y + boxH / 2;
+
+      let cls = 'viz-node';
+      if (!node.alive) cls = 'viz-node-removing';
+      else if (node.isPrimary) cls = 'viz-node-new';
+
+      const g = el('g', { style: 'cursor:pointer' });
+      g.addEventListener('click', () => {
+        const res = toggleNodeAction(nodes, node.id);
+        setStatus(res.messages.join(' '), res.ok ? 'ok' : (res.messages.join(' ').indexOf('cannot elect') >= 0 ? 'error' : 'ok'));
+        draw();
+      });
+
+      if (node.isArbiter) {
+        const points = [
+          [cx, y],
+          [x + boxW, cy],
+          [cx, y + boxH],
+          [x, cy],
+        ].map((p) => p[0] + ',' + p[1]).join(' ');
+        g.appendChild(el('polygon', { points: points, class: cls }));
+      } else {
+        g.appendChild(el('rect', { x: x, y: y, width: boxW, height: boxH, rx: 8, class: cls }));
+      }
+
+      g.appendChild(text(cx, cy - 26, node.id));
+      if (node.isArbiter) {
+        g.appendChild(text(cx, cy - 8, 'ARBITER', 'viz-label-dim'));
+        g.appendChild(text(cx, cy + 6, 'no data', 'viz-label-dim'));
+      } else {
+        g.appendChild(text(cx, cy - 8, 'priority ' + node.priority, 'viz-label-dim'));
+      }
+      g.appendChild(text(cx, cy + 24, !node.alive ? 'DOWN' : (node.isPrimary ? 'PRIMARY' : 'secondary')));
+
+      svg.appendChild(g);
+    });
+  }
+
+  root0.querySelector('[data-viz-action="kill-primary"]').addEventListener('click', () => {
+    const res = killPrimaryAction(nodes);
+    const joined = res.messages.join(' ');
+    setStatus(joined, res.ok ? 'ok' : 'error');
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="add"]').addEventListener('click', () => {
+    const name = nameField.value.trim();
+    const priority = parseInt(priorityField.value, 10);
+    const res = addNodeAction(nodes, name, priority);
+    const joined = res.messages.join(' ');
+    const failed = /Enter a valid|already exists|must be a non-negative/.test(joined);
+    setStatus(joined, failed ? 'error' : (res.ok ? 'ok' : 'error'));
+    if (!failed) { nameField.value = ''; priorityField.value = ''; }
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    nodes = makeInitialNodes();
+    setStatus('Reset to the default PSA set: P1 (priority 1), S1 (priority 1, PRIMARY), A1 (arbiter, no data).', '');
+    draw();
+  });
+
+  nodes = makeInitialNodes();
+  setStatus('PSA set loaded: P1 (priority 1), S1 (priority 1, PRIMARY), A1 (arbiter, no data, votes but never becomes primary). Click a node to kill/revive it, or use Kill Primary to force a failover.', '');
+  draw();
+})();
+</script>
+
 ### Rollback on rejoin
 
 If the old primary had writes that were never replicated to any secondary before it crashed, and a new primary was elected and continued accepting new writes, the two oplogs have diverged. When the old primary rejoins as a secondary, MongoDB **rolls back** its un-replicated writes — moving them out to a rollback directory as BSON files rather than silently discarding them — so it can resync onto the new primary's oplog history.

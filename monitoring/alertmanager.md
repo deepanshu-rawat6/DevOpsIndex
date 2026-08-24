@@ -36,7 +36,7 @@ An alert transitions through states based on the `for:` duration in the rule and
 stateDiagram-v2
     [*] --> Inactive: rule not firing
     Inactive --> Pending: condition true
-    Pending --> Firing: for: duration met
+    Pending --> Firing: for-duration met
     Pending --> Inactive: condition false
     Firing --> Resolved: condition false
     Resolved --> [*]

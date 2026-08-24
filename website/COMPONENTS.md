@@ -151,6 +151,14 @@ reflow, don't highlight, and read worse on mobile — convert them to Mermaid
 than a couple of boxes and arrows. Keep ASCII only for genuinely
 character-grid content (byte layouts, terminal output).
 
+**`Note over` only takes two participants, not a list.** `Note over A,B,C: text`
+fails to parse ("Expecting 'TXT', got ','") — Mermaid's sequence-diagram grammar
+reads exactly one comma as the A,B pair marking the *span*'s left and right
+edge, not a literal list of who the note covers. To span a note across three
+or more participants, name only the leftmost and rightmost: `Note over A,C:
+text` still visually spans over B sitting between them — you don't need to
+(and can't) list every participant in between.
+
 **Never put a literal `;` inside a sequenceDiagram message or Note.** Mermaid's
 sequence-diagram grammar treats `;` as a statement separator (it's how you
 chain multiple arrows on one line), not as literal text — so
@@ -164,6 +172,24 @@ incompatibilities (`<br>` → `<br/>`, bare `{}`/`[]` labels containing special
 chars get quoted, `rx:` stripped from `classDef`) — write normal Mermaid and
 don't hand-roll workarounds for those specific cases **when using a ` ```mermaid `
 fence** (i.e. anywhere outside an interactive component).
+
+**Don't put a literal `"..."` inside a label that's already `"quoted"`.**
+`fixMermaid()`'s auto-quote step scans for `[bracket]`/`{brace}` content and
+wraps it in quotes if it contains special characters — but its scan doesn't
+understand nesting, so a label like `["Hash Ring [0, 2^32)"]` (a bracket
+containing a bracket-and-paren-looking substring) gets a SECOND, wrong
+quoting pass applied to the inner text, producing broken output
+(`["Hash Ring ["0, 2^32)""]`) that fails to parse. If a label needs to
+describe something bracket/paren-shaped (a range, a regex, a function call),
+rephrase it without the literal characters (`"Hash Ring — 0 to 2^32"`
+instead of `"Hash Ring [0, 2^32)"`) rather than relying on quoting to save it.
+
+**Don't use backslash-escaped quotes (`\"`) inside a label to represent an
+inner string.** Mermaid doesn't support that escaping — `["...{__name__=~\".+\"}..."]`
+parses as if the label ends at the first `\"`, and everything after becomes
+trailing garbage that breaks the diagram. This comes up often when a node
+label quotes a PromQL/regex snippet containing its own string literals — use
+single quotes for the inner string instead: `["...{__name__=~'.+'}..."]`.
 
 **Exception — Mermaid inside a stepper/toggle/tab panel:** remark treats an
 HTML block as raw and passes its contents straight through, so a ` ```mermaid `

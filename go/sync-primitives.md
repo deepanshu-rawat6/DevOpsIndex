@@ -2,6 +2,11 @@
 
 Concurrency correctness tools for backend/infra engineers: `sync.Mutex`, `sync.RWMutex`, `sync.Once`, `sync.Pool`, `sync.WaitGroup`, `errgroup`, `sync.Map`, and `atomic`. When to reach for a mutex vs a channel.
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ---
 
 ## Mental Model
@@ -28,6 +33,12 @@ reuse short-lived objects, cut GC pressure"]:::orange
 ```
 
 **Go proverb:** "Don't communicate by sharing memory; share memory by communicating." Channels are the idiomatic default. Mutexes are for protecting state that must live in one place (caches, counters, config). Reach for the simplest tool that makes the data race go away — verify with `go test -race`.
+
+<div class="quiz-card">
+  <p class="quiz-q">What happens if you call <code>Lock()</code> on a <code>sync.Mutex</code> that is already locked by the <em>same</em> goroutine?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The goroutine deadlocks immediately — it blocks on its own lock and can never call <code>Unlock()</code> to release it. Go mutexes are <em>not</em> reentrant (unlike Java's synchronized or C++ recursive_mutex). The runtime will detect this as a deadlock only if all other goroutines are also blocked (<code>fatal error: all goroutines are asleep - deadlock!</code>). If other goroutines are still running, the goroutine just leaks forever. The fix is to either restructure to avoid re-acquiring the same lock, extract an unlocked helper function, or — if reentrancy is genuinely needed — use a separate design (e.g., a goroutine-owned state machine pattern).</div>
+</div>
 
 ---
 
@@ -92,7 +103,26 @@ func BenchmarkRWMutexRead(b *testing.B) {
 | Write-heavy (>30% writes) | `Mutex` wins or ties | `RWMutex` writer starvation avoidance adds overhead with no read-parallelism payoff |
 | Very short critical section (single map read, few ns) | `Mutex` can win even at moderate read ratios | Lock/unlock overhead dominates over actual work; `RWMutex`'s extra atomics aren't amortized |
 
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="mutex" class="active state-ok">sync.Mutex</button>
+    <button data-toggle-opt="rwmutex" class="state-warn">sync.RWMutex</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="mutex">
+    <strong>Use sync.Mutex when:</strong> you have mixed read/write access, or when reads are infrequent or very short (single map lookup, counter increment). Mutex is simpler to reason about, has lower per-call overhead (no reader-count bookkeeping), and is never wrong — just occasionally suboptimal for read-heavy workloads. It's also the right choice for any struct where <code>Get</code> mutates internal state (e.g., LRU recency ordering on access).
+  </div>
+  <div class="toggle-panel" data-toggle-panel="rwmutex">
+    <strong>Use sync.RWMutex when:</strong> reads heavily outnumber writes AND the critical section does non-trivial work (map iteration, JSON marshal, computation — not a single field read). RWMutex allows N concurrent readers, which pays off at GOMAXPROCS &gt; 1. Caveat: a waiting writer blocks all new readers (writer-starvation prevention), so write latency increases under heavy read load. Never use RWMutex before profiling confirms read contention is the bottleneck.
+  </div>
+</div>
+
 **Rule of thumb:** default to `Mutex`. Switch to `RWMutex` only after profiling shows read contention is the bottleneck AND the critical section does non-trivial work (JSON marshal, map iteration, computation) — not a single map lookup. Run `go test -bench=. -cpu=1,4,8` to see how the crossover point shifts with core count.
+
+<div class="quiz-card">
+  <p class="quiz-q">Can multiple goroutines hold an <code>RLock</code> on a <code>sync.RWMutex</code> at the same time? What happens when a writer is waiting to acquire the write lock?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Yes — multiple goroutines can hold <code>RLock</code> simultaneously; that's the entire point of <code>RWMutex</code>. However, once a goroutine calls <code>Lock()</code> to acquire the write lock, Go blocks all <em>new</em> <code>RLock()</code> callers immediately, even if there are no current readers. The writer then waits for all existing readers to call <code>RUnlock()</code>. This "writer blocks new readers" rule prevents writer starvation (a scenario where a constant stream of new readers would starve the writer indefinitely). The tradeoff: under heavy read load, a write request increases read latency for all subsequent callers until the write completes.</div>
+</div>
 
 ---
 
@@ -136,6 +166,12 @@ func loadConfigFromDisk(path string) (*AppConfig, error) {
 
 **Gotcha:** if `loadConfigFromDisk` fails, `cfgOnce.Do` still marks itself as "done" — the function will never run again, and every subsequent call returns the cached error forever. If retryable initialization is needed, don't use `sync.Once` for the failure path — wrap with your own retry/reset logic, or use `golang.org/x/sync/singleflight` if you want deduped-but-retryable calls.
 
+<div class="quiz-card">
+  <p class="quiz-q">What happens if the function passed to <code>sync.Once.Do()</code> panics — does the <code>Once</code> consider itself "done"?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Yes — if the function panics, <code>sync.Once</code> still marks itself as done. The panic propagates to the calling goroutine (and can be recovered there), but the internal "done" flag is set before the function executes. This means subsequent calls to <code>Do()</code> are no-ops — the panicking function will never run again. This is the same problem as a failing initialization: the error (or panic) is effectively permanent for the lifetime of the <code>Once</code>. If you need "retry until success" semantics, you need your own mechanism (a mutex + boolean flag, or <code>singleflight</code> for deduped concurrent attempts).</div>
+</div>
+
 ---
 
 ## sync.Pool — Object Reuse to Reduce GC Pressure
@@ -174,6 +210,12 @@ func renderHandler(w http.ResponseWriter, r *http.Request) {
 - Never `Put` an object that's still referenced elsewhere (use-after-return-to-pool is a live data race).
 - Don't pool objects with wildly varying sizes — a pool that occasionally returns a 10MB buffer for a 1KB request wastes memory. Consider bucketed pools (small/medium/large) if size variance is high.
 - `sync.Pool` is not for connection pools, worker pools, or anything with lifecycle semantics (open/close, health checks) — those need explicit pool management (`database/sql`, custom worker pools).
+
+<div class="quiz-card">
+  <p class="quiz-q">What happens to objects stored in a <code>sync.Pool</code> during a GC cycle — and why does this make Pool unsafe for items that hold OS resources?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The GC is permitted to evict <em>all</em> objects from a <code>sync.Pool</code> at any GC cycle — the pool provides no guarantees about how long an object will live between a <code>Put</code> and a subsequent <code>Get</code>. This is by design: the pool is a cache to reduce allocation pressure, not a reliable object store. For items holding OS resources (file descriptors, network connections, database connections), eviction without closing is a resource leak — the GC collects the Go object but the OS resource (fd, socket) stays open until the finalizer runs (if one exists) or the process exits. For these, use an explicit pool with lifecycle management (<code>database/sql</code>'s connection pool, a channel-based worker pool with <code>defer conn.Close()</code>).</div>
+</div>
 
 ---
 
@@ -233,6 +275,12 @@ func correct(urls []string) {
 ```
 
 **Rule:** always call `Add` in the same goroutine that will eventually call `Wait`, and always before the `go` statement that spawns the worker. `Done` (i.e. `Add(-1)`) is fine inside the goroutine via `defer`.
+
+<div class="quiz-card">
+  <p class="quiz-q">Why must <code>wg.Add(1)</code> be called <em>before</em> the <code>go func()</code> statement rather than as the first line inside the goroutine?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>There is a race between goroutine scheduling and <code>wg.Wait()</code>. If <code>Add(1)</code> is called inside the goroutine, the main goroutine might reach <code>wg.Wait()</code> before the new goroutine is scheduled and calls <code>Add(1)</code>. At that moment the counter is 0, so <code>Wait()</code> returns immediately — before the goroutine has started, let alone finished. Worse, if the goroutine does call <code>Add(1)</code> after <code>Wait()</code> has already returned and the WaitGroup is being reused, you get a panic: "sync: WaitGroup is reused before previous Wait has returned." Calling <code>Add</code> in the spawning goroutine, synchronously before <code>go</code>, establishes a happens-before relationship: the goroutine is guaranteed to be counted before <code>Wait()</code> could return.</div>
+</div>
 
 ---
 
@@ -305,6 +353,12 @@ _ = g.Wait()
 
 **When to use `errgroup` over raw `WaitGroup`:** any time "if one fails, stop the rest and return the error" is the desired semantics — which is most fan-out I/O in backend services (parallel downstream calls, parallel file uploads, parallel shard queries).
 
+<div class="quiz-card">
+  <p class="quiz-q">What is <code>errgroup.SetLimit(n)</code> for, and what does <code>g.Go()</code> do when the limit is already reached?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>SetLimit(n)</code> caps the number of goroutines that <code>errgroup</code> runs concurrently. When you call <code>g.Go(f)</code> and <code>n</code> goroutines are already in flight, <code>g.Go</code> <em>blocks</em> the calling goroutine until one of the running goroutines finishes (and the slot is freed). This gives you a bounded fan-out with the same error-propagation semantics — useful when fanning out over thousands of items against a rate-limited API or a fixed connection pool. Without <code>SetLimit</code>, every <code>g.Go</code> spawns immediately, potentially overwhelming downstream services. The limit does <em>not</em> change cancellation behavior: the first error still cancels the shared context and all in-flight goroutines see it.</div>
+</div>
+
 ---
 
 ## sync.Map — When It's Actually Appropriate
@@ -340,6 +394,12 @@ func Lookup(name string) (reflect.Type, bool) {
 | Uncertain / default choice | `map` + `RWMutex` — simpler to reason about, easier to profile, works well in the vast majority of services |
 
 **In practice:** most backend services should default to `map` + `RWMutex`. Reach for `sync.Map` only after profiling shows lock contention on a write-once-read-often structure specifically.
+
+<div class="quiz-card">
+  <p class="quiz-q"><code>sync.Map</code> is optimized for two specific access patterns. What are they — and why does it degrade under write-heavy workloads on shared keys?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>sync.Map</code> is optimized for: (1) entries written once and read many times (stable key sets), and (2) goroutines accessing largely disjoint key sets with low cross-goroutine key contention. Internally, it maintains two maps: a read-only "clean" map accessed without locks, and a "dirty" map protected by a mutex for new writes. On a read miss from the clean map, it falls through to the dirty map under a lock and eventually promotes the dirty map to clean (copying all entries). Under write-heavy workloads on shared keys, this promotion happens frequently, requiring a full copy under a mutex — worse than a plain <code>map + RWMutex</code> in both latency and memory. It also has no <code>Len()</code> method and no atomic multi-key operations.</div>
+</div>
 
 ---
 
@@ -402,6 +462,12 @@ func (cb *CircuitBreaker) TryOpen() bool {
 | Lock-free single-writer-wins semantics (leader election flag, breaker state) | `atomic.CompareAndSwap` |
 | Building a new data structure (lock-free queue, etc.) | Don't — use existing library (`container/list` + mutex, or a proven lock-free library). Hand-rolled lock-free structures are a common source of subtle bugs. |
 
+<div class="quiz-card">
+  <p class="quiz-q">When is <code>atomic.CompareAndSwap</code> more appropriate than a mutex — and what makes it safe to use without a lock?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>CompareAndSwap(addr, old, new)</code> atomically reads the value at <code>addr</code>, checks it equals <code>old</code>, and if so writes <code>new</code> — all as a single CPU instruction (CMPXCHG on x86). No goroutine scheduling or lock acquisition is involved, making it faster than a mutex for single-value state transitions. It's appropriate when: (1) you need "exactly one goroutine wins a race" semantics (circuit breaker transitioning closed→open, leader election flag), and (2) the operation involves only a single memory location. It fails (returns false) if another goroutine changed the value concurrently, so callers typically loop until success or give up. It's <em>not</em> appropriate when multiple related fields must be updated consistently — for that, you need a mutex to get a consistent joint view across all fields.</div>
+</div>
+
 ---
 
 ## Mutex vs Channel — Decision Table
@@ -421,6 +487,12 @@ Both eliminate data races. The choice is about what the data represents, not raw
 | Idiomatic Go guidance | Use when protecting a piece of *state* | Use when coordinating goroutine *behavior/flow* |
 
 **Practical heuristic:** if you're protecting a struct's fields so multiple goroutines can safely call methods on it concurrently — mutex. If you're building a pipeline, worker pool, or need one goroutine to signal/hand off to another — channel. Many production systems use both: a mutex-protected cache *inside* a service, with channels used to fan work out to that service's workers.
+
+<div class="quiz-card">
+  <p class="quiz-q">Why are channels the better choice for backpressure and cancellation, while mutexes are better for in-place shared state? Give a concrete example of each.</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Channels model <em>ownership transfer</em> and <em>communication</em>: a buffered channel blocks the producer when full — that IS backpressure, requiring no extra logic. A <code>select</code> with <code>ctx.Done()</code> or <code>time.After</code> is native to channels. Example: a worker pool where jobs flow through a channel; when all workers are busy, the producer blocks on send, naturally throttling intake. Mutexes model <em>shared state</em>: a cache where many goroutines read and occasionally write a map needs all readers to see the same memory at the same time — passing ownership through a channel every time would be wasteful. Example: a rate limiter struct with an atomic counter or RWMutex-protected token bucket. Mixing both is common: a mutex-protected in-memory cache served by goroutines that receive requests via channels.</div>
+</div>
 
 ---
 
@@ -563,6 +635,12 @@ wg.Wait()
 ```bash
 go test -race ./cache/...
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">In the LRU cache implementation, why does <code>Get</code> take the exclusive write lock (<code>mu.Lock()</code>) rather than the read lock (<code>mu.RLock()</code>), even though it's conceptually a "read" operation?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Classic LRU semantics require moving the accessed entry to the front of the recency list on every <code>Get</code> — this mutates the doubly linked list (<code>ll.MoveToFront(elem)</code>). Even though no value changes, the internal data structure is modified. Holding an <code>RLock</code> only guarantees other readers won't see a write; it provides no protection against concurrent writers mutating the list while multiple readers also call <code>MoveToFront</code> — that's a data race. The implementation is explicit about this tradeoff and notes that <code>RWMutex</code> still benefits other truly read-only methods like <code>Peek</code> and <code>Len</code>, while keeping the door open for a "peek without recency update" API that genuinely benefits from read parallelism.</div>
+</div>
 
 ---
 

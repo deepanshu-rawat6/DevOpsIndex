@@ -2,6 +2,11 @@
 
 ---
 
+<div class="quiz-progress" data-quiz-progress>
+  <span class="quiz-progress-label">0/0 checks</span>
+  <span class="quiz-progress-bar"><span class="quiz-progress-fill"></span></span>
+</div>
+
 ## Goroutine Leaks
 
 A goroutine leak happens when a goroutine blocks forever and is never garbage collected — it sits in memory for the life of the process, holding its stack and anything it references.
@@ -35,6 +40,29 @@ func leak3(ctx context.Context) {
 
 // LEAK 4: unbuffered channel writer outlives its only reader (e.g. reader hit an early return/panic)
 ```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Send with no receiver.</strong> An unbuffered channel send blocks until a goroutine is ready to receive. If no receiver ever starts — or has already returned — the sender goroutine parks forever, holding its stack and any captured variables (including the channel itself, preventing GC).
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Goroutine outlives its reader.</strong> A worker sends N results but the caller only reads one and returns. The worker blocks on its second send; the caller is gone. The channel cannot be GC'd because the stuck goroutine still holds a reference to it.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Forgotten context cancel.</strong> <code>context.WithCancel</code> returns a cancel function that <em>must</em> be called to close the internal Done channel. If discarded (<code>ctx, _ = context.WithCancel(...)</code>), any goroutine blocking on <code>&lt;-ctx.Done()</code> never wakes up — and the parent context must also be cancelled for the goroutine to ever exit.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Unbuffered writer outlives its only reader.</strong> If the single reader exits early (panic, deadline, early return), the writer blocks on its next send indefinitely. Fix: pass a <code>done</code> channel or a <code>context.Context</code> so the writer can detect the reader is gone and bail out.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
 
 ### Detection via pprof
 
@@ -76,6 +104,12 @@ prometheus.NewGaugeFunc(prometheus.GaugeOpts{
     Name: "goroutines_count",
 }, func() float64 { return float64(runtime.NumGoroutine()) })
 ```
+
+<div class="quiz-card">
+  <p class="quiz-q">A goroutine is blocked on a channel send. The function that created the channel has already returned and the variable is out of scope. Why is the goroutine still alive and why isn't the channel GC'd?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The goroutine itself holds a reference to the channel on its stack — the GC traces live goroutine stacks as roots. As long as the goroutine exists (even if it's permanently blocked), the channel is reachable and cannot be collected. The goroutine itself also can't be collected because Go's GC does not collect goroutines — only the garbage collector handles memory, and the scheduler handles goroutines. A blocked goroutine just sits in the run queue consuming its minimum 2–8 KB stack forever.</div>
+</div>
 
 ---
 
@@ -170,6 +204,12 @@ func main() {
 - `results` closed only after `wg.Wait()` confirms all workers finished — closing too early panics on in-flight sends.
 - `ctx` threaded through so cancellation stops workers mid-flight, not just between jobs.
 
+<div class="quiz-card">
+  <p class="quiz-q">Why is it unsafe to close <code>results</code> from the producer goroutine (the one that calls <code>close(jobs)</code>) rather than from the goroutine that waits on <code>wg.Wait()</code>?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The producer closes <code>jobs</code> once all jobs are sent — but at that instant the workers are still running and actively sending into <code>results</code>. Closing <code>results</code> there would race with in-flight sends, causing a panic: "send on closed channel." <code>wg.Wait()</code> provides the happens-before guarantee that all workers have finished their last <code>results &lt;-</code> send before <code>close(results)</code> executes. The separate goroutine (<code>go func() { wg.Wait(); close(results) }()</code>) is needed because <code>wg.Wait()</code> is a blocking call — if placed in the main flow before <code>for r := range results</code>, it would deadlock (no one draining <code>results</code> while workers try to send).</div>
+</div>
+
 ---
 
 ## Fan-Out / Fan-In Pattern
@@ -230,6 +270,12 @@ func main() {
 }
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">Why does <code>fanIn</code> close <code>merged</code> inside a separate goroutine (<code>go func() { wg.Wait(); close(merged) }()</code>) rather than directly after the range-over-cs loops?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Each input channel is drained in its own goroutine (the ones calling <code>wg.Done()</code>). If <code>close(merged)</code> were called directly after launching those goroutines, it would execute before any of them finish — closing the channel while they're still sending into it, causing a "send on closed channel" panic. The separate goroutine blocks on <code>wg.Wait()</code>, which only unblocks after all per-input goroutines have called <code>wg.Done()</code> (i.e., drained their input channel), guaranteeing no more sends will happen before the close.</div>
+</div>
+
 ---
 
 ## Pipeline Pattern
@@ -282,6 +328,12 @@ func main() {
 
 Each stage owns closing its own output channel — this is what lets the next stage's `range` terminate cleanly, cascading shutdown through the whole pipeline.
 
+<div class="quiz-card">
+  <p class="quiz-q">Why does each pipeline stage own the close of its own output channel instead of letting the consumer close it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Only the sender knows when it's done sending — the consumer has no way to know whether additional values are coming. If the consumer closed the channel, the producer's next send would panic with "send on closed channel." By having each stage close its own output once it has finished reading all input (via <code>defer close(out)</code>), the close is coupled to the exact moment the last send is complete. This also lets the downstream stage use <code>for v := range in</code> — the range loop exits cleanly when the channel is closed, propagating shutdown automatically through the entire chain without any extra coordination.</div>
+</div>
+
 ---
 
 ## Done-Channel Cancellation Pattern
@@ -325,6 +377,12 @@ func main() {
 
 `context.Context` is the standard replacement for this today — it adds deadlines, values, and a tree structure on top of the same closed-channel broadcast idea (`ctx.Done()` is exactly this pattern).
 
+<div class="quiz-card">
+  <p class="quiz-q">What does <code>close(done chan struct{})</code> do that sending a value into <code>done</code> cannot? Why does this matter when you have multiple goroutines waiting on the same signal?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Closing a channel is a <em>broadcast</em> — every goroutine blocked on <code>&lt;-done</code> wakes up simultaneously and receives the zero value. A send (<code>done &lt;- struct{}{}</code>) only unblocks <em>one</em> goroutine. If you have N worker goroutines all waiting on <code>&lt;-done</code> and you send N values, only the right goroutines get the signal if none miss a send — but with a close, all N see it regardless of order. Closing is also idempotent in terms of receivers: multiple <code>select</code> cases on the same closed channel always proceed immediately with the zero value.</div>
+</div>
+
 ---
 
 ## Select with Timeout and Default
@@ -360,6 +418,12 @@ for {
 }
 ```
 
+<div class="quiz-card">
+  <p class="quiz-q">What is the difference between <code>select { case &lt;-time.After(d): }</code> and <code>select { default: }</code> — when would each block, and when is each appropriate?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>time.After(d)</code> creates a timer channel that fires after duration <code>d</code>. Until that timer fires, the case is not ready — so if <code>ch</code> has no value, the goroutine sleeps for up to <code>d</code> before the timeout case proceeds. It is appropriate when you want to wait a bounded time for a value. <code>default</code> is never blocking — it executes immediately if no other case is ready. It is appropriate when you want a non-blocking check ("is there a value right now?") and continuing without one is fine. Using <code>default</code> in a tight loop is a busy-spin; using <code>time.After</code> in a tight loop leaks timers on every iteration (use <code>time.NewTimer</code> + reset instead).</div>
+</div>
+
 ---
 
 ## Common Channel Gotchas
@@ -386,6 +450,12 @@ func main() {
 ```
 
 The Go runtime detects this specific case (every goroutine blocked, none runnable) and crashes the whole process rather than hanging silently — but it can only detect *global* deadlock. A leak where 999 goroutines are healthy and 1 is stuck forever produces no such error; that's why pprof monitoring matters more than relying on deadlock detection.
+
+<div class="quiz-card">
+  <p class="quiz-q">What does the Go runtime do when ALL goroutines are asleep vs when only SOME goroutines are stuck forever?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>When <em>all</em> goroutines are simultaneously blocked (nothing runnable in the entire program), the Go runtime detects this global deadlock and immediately crashes with <code>fatal error: all goroutines are asleep - deadlock!</code>. This is a best-effort safety net — it can only fire when there is literally no runnable goroutine left. When <em>some</em> goroutines are stuck but others continue running (a partial/local deadlock), the runtime has no way to distinguish "expected long wait" from "stuck forever" — it stays silent and the leaked goroutines accumulate undetected. This is why goroutine count metrics and pprof are essential; you cannot rely on runtime deadlock detection for production leak detection.</div>
+</div>
 
 ---
 
@@ -491,6 +561,12 @@ func main() {
 2. Producer's `select` sees `ctx.Done()`, stops sending new jobs, closes `jobs`.
 3. Workers finish any in-flight `processJob` (which itself respects `ctx.Done()` for jobs mid-sleep), then exit their `range jobs` loop as it closes.
 4. `wg.Wait()` unblocks once all workers exit → `results` closed → main's `range results` loop ends.
+
+<div class="quiz-card">
+  <p class="quiz-q">Why does the producer close <code>jobs</code> (not <code>results</code>), and why does a <em>separate</em> goroutine close <code>results</code> after <code>wg.Wait()</code>?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The producer is the only sender into <code>jobs</code> — it owns that channel and closes it once all work is enqueued. Workers range over <code>jobs</code>, so the close is the signal that no more jobs will arrive. Workers are the senders into <code>results</code>; the producer never writes to <code>results</code>, so it cannot close it. <code>wg.Wait()</code> must run in a separate goroutine because it's a blocking call — if it ran in the main goroutine <em>before</em> <code>for r := range results</code>, main would block at <code>wg.Wait()</code> with no one reading from <code>results</code>, while workers block trying to send — a deadlock. The separate goroutine lets main drain <code>results</code> concurrently while workers finish and <code>wg.Wait()</code> proceeds independently.</div>
+</div>
 
 ---
 
@@ -613,6 +689,12 @@ go func() {
 ```
 
 **Rule:** `sync.Mutex` for simple protected state, `sync.Map` only for read-heavy/append-mostly workloads with disjoint keys, channel-owned state when it fits the pipeline naturally. Never guess — always run `-race` in CI.
+
+<div class="quiz-card">
+  <p class="quiz-q">When does Go's runtime detect "concurrent map writes" and panic — and when does a data race on a map cause silent corruption instead?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Go's map implementation has a built-in write-concurrency detector (a flag set during writes, checked on each map operation). When two goroutines write concurrently, the second goroutine to enter typically detects the flag and calls <code>fatal error: concurrent map writes</code> — this is a hard crash, not a recoverable panic. However, this detection is not guaranteed: it's a best-effort check, not a memory barrier. A concurrent read+write (not write+write) can produce silent corruption — the reader sees a partially-updated internal state, which can manifest as wrong values, infinite loops in hash table traversal, or a crash elsewhere entirely. The race detector (<code>-race</code>) catches both cases precisely because it instruments every memory access, not just map writes. The runtime crash on concurrent writes is Go being helpful, but the real fix is proper synchronization — <code>sync.Mutex</code>, <code>sync.RWMutex</code>, <code>sync.Map</code>, or channel-owned state.</div>
+</div>
 
 ---
 

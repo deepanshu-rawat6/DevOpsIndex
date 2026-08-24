@@ -231,6 +231,170 @@ graph LR
     R5["record<br/>no key"] -->|round robin| P2["Partition 2"]
 ```
 
+**Try it yourself** — a 6-partition topic, same rule as above. Type a key and hit Produce: the same key always lands in the same partition, every time. Leave the key blank and Produce spreads records round-robin instead. Or skip the rule entirely with the manual override, the same thing the Produce dialog's explicit-partition-number field does.
+
+<div class="structure-viz" id="kafka-produce-demo">
+  <svg class="viz-canvas" viewBox="0 0 840 200"></svg>
+  <div class="viz-controls">
+    <input class="viz-input" id="produce-key-input" type="text" placeholder="key (optional)" />
+    <input class="viz-input" id="produce-value-input" type="text" placeholder="value (optional)" />
+    <button class="viz-btn" data-viz-action="produce">Produce</button>
+    <input class="viz-input" id="produce-manual-input" type="number" min="0" max="5" placeholder="partition #" />
+    <button class="viz-btn" data-viz-action="manual">Produce to partition N</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#1e3a8a"></span> partition, last 5 records</span>
+    <span><span class="viz-swatch" style="background:#14532d"></span> just received this record</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root = document.getElementById('kafka-produce-demo');
+  const svg = root.querySelector('.viz-canvas');
+  const keyInput = root.querySelector('#produce-key-input');
+  const valueInput = root.querySelector('#produce-value-input');
+  const manualInput = root.querySelector('#produce-manual-input');
+  const status = root.querySelector('.viz-status');
+
+  const NUM_PARTITIONS = 6;
+  const BOX_W = 120, BOX_H = 150, GAP = 12, TOP = 30;
+  const START_X = (840 - (NUM_PARTITIONS * BOX_W + (NUM_PARTITIONS - 1) * GAP)) / 2;
+
+  let partitions, rrCounter, justHit, flashTimer;
+
+  function reset() {
+    partitions = Array.from({ length: NUM_PARTITIONS }, () => []);
+    rrCounter = 0;
+    justHit = null;
+  }
+
+  function hashStr(s) {
+    let h = 2166136261;
+    for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
+    return Math.abs(h);
+  }
+
+  function pushRecord(idx, record) {
+    const list = partitions[idx];
+    list.push(record);
+    if (list.length > 5) list.shift();
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function scheduleFlashClear() {
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => { justHit = null; draw(); }, 2200);
+  }
+
+  function boxX(i) { return START_X + i * (BOX_W + GAP); }
+
+  function truncate(s, max) {
+    return s.length > max ? s.slice(0, max - 1) + '…' : s;
+  }
+
+  function draw() {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    for (let i = 0; i < NUM_PARTITIONS; i++) {
+      const x = boxX(i);
+      const isHit = justHit === i;
+      svg.appendChild(el('rect', {
+        x, y: TOP, width: BOX_W, height: BOX_H, rx: 6,
+        class: isHit ? 'viz-node-new' : 'viz-node',
+      }));
+
+      const header = el('text', { x: x + BOX_W / 2, y: TOP + 18 });
+      header.textContent = `Partition ${i}`;
+      svg.appendChild(header);
+
+      const records = partitions[i];
+      if (records.length === 0) {
+        const t = el('text', { x: x + BOX_W / 2, y: TOP + BOX_H / 2 + 6, class: 'viz-label-dim' });
+        t.textContent = '(empty)';
+        svg.appendChild(t);
+      } else {
+        records.forEach((r, j) => {
+          const label = r.key ? `${r.key}${r.value ? '=' + r.value : ''}` : '(no key)';
+          const t = el('text', { x: x + BOX_W / 2, y: TOP + 40 + j * 18, class: 'viz-label-dim' });
+          t.textContent = truncate(label, 16);
+          svg.appendChild(t);
+        });
+      }
+    }
+  }
+
+  function narrateAuto(key, partitionIdx) {
+    if (key) {
+      setStatus(`key '${key}' hashes to partition ${partitionIdx} — every record with this exact key always lands here, preserving per-key ordering.`, 'ok');
+    } else {
+      setStatus(`no key — round-robin assigned partition ${partitionIdx} (sticky-ish batching in a real cluster, simplified to plain round-robin here).`, 'ok');
+    }
+  }
+
+  root.querySelector('[data-viz-action="produce"]').addEventListener('click', () => {
+    const key = keyInput.value.trim();
+    const value = valueInput.value.trim();
+    let partitionIdx;
+    if (key) {
+      partitionIdx = hashStr(key) % NUM_PARTITIONS;
+    } else {
+      partitionIdx = rrCounter;
+      rrCounter = (rrCounter + 1) % NUM_PARTITIONS;
+    }
+    pushRecord(partitionIdx, { key: key || null, value: value || null });
+    justHit = partitionIdx;
+    keyInput.value = '';
+    valueInput.value = '';
+    narrateAuto(key, partitionIdx);
+    draw();
+    scheduleFlashClear();
+  });
+
+  root.querySelector('[data-viz-action="manual"]').addEventListener('click', () => {
+    const raw = manualInput.value.trim();
+    if (raw === '') { setStatus('Enter a partition number (0-5) to override to first.', 'error'); return; }
+    const target = Number(raw);
+    if (!Number.isInteger(target) || target < 0 || target >= NUM_PARTITIONS) {
+      setStatus(`Partition must be an integer between 0 and ${NUM_PARTITIONS - 1}.`, 'error');
+      return;
+    }
+    const key = keyInput.value.trim();
+    const value = valueInput.value.trim();
+    pushRecord(target, { key: key || null, value: value || null, manual: true });
+    justHit = target;
+    keyInput.value = '';
+    valueInput.value = '';
+    setStatus(`manual override — landed in partition ${target} regardless of key.`, 'ok');
+    draw();
+    scheduleFlashClear();
+  });
+
+  root.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    reset();
+    setStatus('Reset. All partitions cleared, round-robin counter back to 0.', '');
+    draw();
+  });
+
+  reset();
+  setStatus('Type a key and hit Produce — same key always lands in the same partition. Leave the key blank for round-robin. Or force a partition with the override control.', '');
+  draw();
+})();
+</script>
+
 **acks / min.insync.replicas** — How sure a producer wants to be before considering a write "done." `acks=all` plus `min.insync.replicas=2` means: don't tell the producer it succeeded until at least 2 replicas have the record. This is the other half of the durability story — replication factor says how many copies *can* exist; `min.insync.replicas` says how many *must* confirm before a write counts.
 
 <div class="tab-group">

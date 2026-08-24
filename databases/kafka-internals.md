@@ -225,6 +225,251 @@ graph TD
   <div class="quiz-a" hidden>The High Watermark only advances once ALL ISR replicas have the data, not just the leader. Offsets past the HW are written to the leader's log (reflected in its LEO) but aren't yet confirmed by every ISR replica — they're uncommitted and could vanish if the leader crashes before the others catch up, so consumers aren't allowed to see them yet.</div>
 </div>
 
+### Try It Yourself: Live ISR Simulator
+
+Same idea as the diagram above, but live: one partition, 1 leader + 2 followers. Produce records, stall a follower to simulate it falling behind, and watch exactly when it gets dropped from the ISR — and what `acks=all` is actually blocked on at each step, versus `acks=1`. Non-stalled followers catch up to the leader instantly here (a simplification of real async replication lag) — the part worth watching closely is what happens to a *stalled* one.
+
+<div class="structure-viz" id="kafka-isr-viz">
+  <svg class="viz-canvas" viewBox="0 0 620 230"></svg>
+  <div class="viz-controls">
+    <button class="viz-btn" data-viz-action="acks-1">acks=1</button>
+    <button class="viz-btn" data-viz-action="acks-all">acks=all</button>
+    <button class="viz-btn" data-viz-action="produce">Produce</button>
+    <button class="viz-btn" data-viz-action="stall-f1">Stall F1</button>
+    <button class="viz-btn" data-viz-action="stall-f2">Stall F2</button>
+    <button class="viz-btn" data-viz-action="unstall-f1">Unstall F1</button>
+    <button class="viz-btn" data-viz-action="unstall-f2">Unstall F2</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#1e3a8a"></span> in ISR, caught up</span>
+    <span><span class="viz-swatch" style="background:#78350f"></span> in ISR, stalled and lagging (under threshold)</span>
+    <span><span class="viz-swatch" style="background:#7f1d1d"></span> dropped from ISR</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root0 = document.getElementById('kafka-isr-viz');
+  const svg = root0.querySelector('.viz-canvas');
+  const status = root0.querySelector('.viz-status');
+  const acks1Btn = root0.querySelector('[data-viz-action="acks-1"]');
+  const acksAllBtn = root0.querySelector('[data-viz-action="acks-all"]');
+
+  const LAG_THRESHOLD = 3;
+  let leaderOffset, followers, isr, acksMode;
+
+  function reset() {
+    leaderOffset = 0;
+    followers = [
+      { id: 'F1', offset: 0, stalled: false },
+      { id: 'F2', offset: 0, stalled: false },
+    ];
+    // ISR membership tracked for followers only -- the leader is always
+    // implicitly in the ISR and can never be removed from it.
+    isr = new Set(['F1', 'F2']);
+    acksMode = 'all';
+  }
+
+  function getFollower(id) { return followers.find((f) => f.id === id); }
+  function lagOf(f) { return leaderOffset - f.offset; }
+
+  // Core algorithm: leaderOffset advances, every non-stalled follower
+  // catches up instantly (a deliberate simplification of real async
+  // replication lag, since the interesting behavior here is about
+  // STALLED followers specifically), a fully-caught-up follower rejoins
+  // the ISR, and a stalled follower whose lag exceeds LAG_THRESHOLD is
+  // dropped from it.
+  function produce() {
+    leaderOffset++;
+    for (const f of followers) {
+      if (!f.stalled) f.offset = leaderOffset;
+    }
+
+    const events = [];
+    for (const f of followers) {
+      if (f.offset === leaderOffset && !isr.has(f.id)) {
+        isr.add(f.id);
+        events.push({ type: 'rejoin', id: f.id });
+      }
+    }
+    for (const f of followers) {
+      const lag = lagOf(f);
+      if (f.stalled && lag > LAG_THRESHOLD && isr.has(f.id)) {
+        isr.delete(f.id);
+        events.push({ type: 'drop', id: f.id, lag });
+      }
+    }
+
+    // What acks=all is waiting on is evaluated against the ISR as it
+    // stands AFTER this produce's rejoin/drop adjustments -- a follower
+    // dropped by this very call is, by definition, no longer "currently
+    // in the ISR", so acks=all stops waiting on it starting with this
+    // call's own result.
+    let waitingOn = [];
+    if (acksMode === 'all') {
+      for (const id of isr) {
+        const f = getFollower(id);
+        if (f.offset !== leaderOffset) waitingOn.push(id);
+      }
+    }
+    return { events, waitingOn, completed: acksMode === 'all' ? waitingOn.length === 0 : true };
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function styleModeButtons() {
+    [[acks1Btn, acksMode === '1'], [acksAllBtn, acksMode === 'all']].forEach(([btn, active]) => {
+      if (active) {
+        btn.style.background = '#1d4ed8';
+        btn.style.color = '#fff';
+        btn.style.borderColor = '#1d4ed8';
+      } else {
+        btn.style.background = '';
+        btn.style.color = '';
+        btn.style.borderColor = '';
+      }
+    });
+  }
+
+  function draw() {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    const leaderBox = { x: 220, y: 20, w: 180, h: 64 };
+    const f1Box = { x: 30, y: 140, w: 250, h: 80 };
+    const f2Box = { x: 340, y: 140, w: 250, h: 80 };
+    const leaderCx = leaderBox.x + leaderBox.w / 2;
+    const leaderBottom = leaderBox.y + leaderBox.h;
+
+    // Replication edges: highlighted while in ISR, dim/dashed once dropped.
+    [[f1Box, isr.has('F1')], [f2Box, isr.has('F2')]].forEach(([box, inIsr]) => {
+      const cx = box.x + box.w / 2;
+      svg.appendChild(el('line', {
+        x1: leaderCx, y1: leaderBottom, x2: cx, y2: box.y,
+        class: inIsr ? 'viz-edge-active' : 'viz-edge',
+        'stroke-dasharray': inIsr ? '' : '5,4',
+      }));
+    });
+
+    // Leader box.
+    svg.appendChild(el('rect', { x: leaderBox.x, y: leaderBox.y, width: leaderBox.w, height: leaderBox.h, rx: 8, class: 'viz-node' }));
+    const leaderLabel = el('text', { x: leaderCx, y: leaderBox.y + 20, class: 'viz-label-dim' });
+    leaderLabel.textContent = 'Leader (always in ISR)';
+    svg.appendChild(leaderLabel);
+    const leaderText = el('text', { x: leaderCx, y: leaderBox.y + 44 });
+    leaderText.textContent = `offset: ${leaderOffset}`;
+    svg.appendChild(leaderText);
+
+    // Follower boxes.
+    [['F1', f1Box], ['F2', f2Box]].forEach(([id, box]) => {
+      const f = getFollower(id);
+      const inIsr = isr.has(id);
+      const lag = lagOf(f);
+      let cls = 'viz-node';
+      if (!inIsr) cls = 'viz-node-removing';
+      else if (f.stalled && lag > 0) cls = 'viz-node-highlight';
+      const cx = box.x + box.w / 2;
+      svg.appendChild(el('rect', { x: box.x, y: box.y, width: box.w, height: box.h, rx: 8, class: cls }));
+      const idLabel = el('text', { x: cx, y: box.y + 18, class: 'viz-label-dim' });
+      idLabel.textContent = `${id}${f.stalled ? ' (stalled)' : ''}`;
+      svg.appendChild(idLabel);
+      const offsetText = el('text', { x: cx, y: box.y + 40 });
+      offsetText.textContent = `offset: ${f.offset}  (lag: ${lag})`;
+      svg.appendChild(offsetText);
+      const statusText = el('text', { x: cx, y: box.y + 62 });
+      statusText.textContent = inIsr ? 'IN ISR' : 'OUT OF ISR';
+      svg.appendChild(statusText);
+    });
+  }
+
+  function narrateProduce(result) {
+    const parts = [`Produce -> leader offset ${leaderOffset}.`];
+    result.events.forEach((ev) => {
+      if (ev.type === 'drop') {
+        parts.push(`${ev.id} fell ${ev.lag} records behind -- dropped from ISR. acks=all no longer waits for it; replication factor effectively down to ${1 + isr.size}.`);
+      } else if (ev.type === 'rejoin') {
+        parts.push(`${ev.id} caught up -- rejoined ISR.`);
+      }
+    });
+    if (acksMode === 'all') {
+      if (result.waitingOn.length === 0) {
+        parts.push(`acks=all: every replica currently in the ISR (leader${[...isr].map((id) => ' + ' + id).join('')}) has confirmed offset ${leaderOffset}. Producer ack sent.`);
+      } else {
+        parts.push(`acks=all: still waiting on ${result.waitingOn.join(', ')} (stalled, hasn't fetched offset ${leaderOffset} yet) -- producer ack is blocked until it catches up or gets dropped from the ISR.`);
+      }
+    } else {
+      parts.push('acks=1: leader write alone is enough -- producer ack sent immediately, without waiting on either follower.');
+    }
+    setStatus(parts.join(' '), result.waitingOn.length > 0 ? 'error' : 'ok');
+  }
+
+  root0.querySelector('[data-viz-action="produce"]').addEventListener('click', () => {
+    const result = produce();
+    narrateProduce(result);
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="stall-f1"]').addEventListener('click', () => {
+    getFollower('F1').stalled = true;
+    setStatus('F1 stalled -- it will stop catching up on subsequent produces and fall behind the leader.', '');
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="stall-f2"]').addEventListener('click', () => {
+    getFollower('F2').stalled = true;
+    setStatus('F2 stalled -- it will stop catching up on subsequent produces and fall behind the leader.', '');
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="unstall-f1"]').addEventListener('click', () => {
+    getFollower('F1').stalled = false;
+    setStatus('F1 unstalled -- it will resume catching up on the next Produce.', '');
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="unstall-f2"]').addEventListener('click', () => {
+    getFollower('F2').stalled = false;
+    setStatus('F2 unstalled -- it will resume catching up on the next Produce.', '');
+    draw();
+  });
+
+  acks1Btn.addEventListener('click', () => {
+    acksMode = '1';
+    styleModeButtons();
+    setStatus('Mode set to acks=1 -- Produce now completes on the leader write alone.', '');
+  });
+
+  acksAllBtn.addEventListener('click', () => {
+    acksMode = 'all';
+    styleModeButtons();
+    setStatus('Mode set to acks=all -- Produce now waits for every currently-in-ISR replica.', '');
+  });
+
+  root0.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    reset();
+    styleModeButtons();
+    setStatus('Reset -- 1 leader + 2 followers, both in ISR, all offsets 0.', '');
+    draw();
+  });
+
+  reset();
+  styleModeButtons();
+  setStatus('Loaded with acks=all. Try Produce a few times, then Stall F1 and keep producing to watch its lag grow past the threshold and drop it from the ISR.', '');
+  draw();
+})();
+</script>
+
 ---
 
 ## Log Compaction

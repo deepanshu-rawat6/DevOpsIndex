@@ -45,6 +45,206 @@ The buffer pool is where reads and writes actually happen — data and index pag
   <div class="quiz-a" hidden>The redo log — the change was already written (and fsynced, under innodb_flush_log_at_trx_commit=1) there before commit returned, so crash recovery replays it into the data file even though the buffer pool page itself never reached disk. Rolling back a different, uncommitted transaction is a completely separate mechanism: it uses the undo log's before-image of the row, not the redo log's forward-only change record.</div>
 </div>
 
+The diagram labels the eviction policy "LRU with young/old sublists" almost in passing, but that's not the same structure as the plain LRU cache walked through in `coding-practice/lru-cache.md` — the difference is deliberate, not incidental. A single doubly-linked-list LRU has a real bug for a database's most common workload: a one-off `SELECT * FROM huge_table` full scan reads millions of pages exactly once, and a plain LRU would shove every single one of those reads straight to the MRU end, evicting whatever was genuinely hot from repeated real queries in the process — one scan, entire working set gone. InnoDB's fix is to split the LRU list into two sublists instead of one flat list: an OLD sublist (`innodb_old_blocks_pct`, default 37% — roughly 3/8 of the pool) and a YOUNG sublist (the remaining ~5/8). A newly read page always lands at the *head of the OLD sublist*, never the young one, so a scan floods and churns the old sublist while never touching a page that's already proven itself with a second access. Only a repeat access promotes a page from OLD to YOUNG. (Real InnoDB also makes a page wait `innodb_old_blocks_time` milliseconds before that promotion counts, specifically to stop a tight scan loop from re-reading the same page twice in a row and promoting it by accident — the demo below skips that timer for simplicity and just promotes on the second distinct access.)
+
+<div class="structure-viz" id="innodb-buffer-pool-viz">
+  <svg class="viz-canvas" viewBox="0 0 600 150"></svg>
+  <div class="viz-controls">
+    <input class="viz-input" type="number" placeholder="page id" />
+    <button class="viz-btn" data-viz-action="access">Access Page</button>
+    <button class="viz-btn" data-viz-action="scan">Simulate Full Table Scan</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#1e3a8a"></span> young sublist — protected</span>
+    <span><span class="viz-swatch" style="background:#78350f"></span> old sublist — vulnerable to a scan</span>
+    <span><span class="viz-swatch" style="background:#14532d"></span> just inserted / just promoted</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root0 = document.getElementById('innodb-buffer-pool-viz');
+  const svg = root0.querySelector('.viz-canvas');
+  const input = root0.querySelector('.viz-input');
+  const status = root0.querySelector('.viz-status');
+
+  const CAPACITY = 8;
+  const SLOT_W = 60, SLOT_H = 46, GAP = 10;
+
+  // Core algorithm state -- one array, index 0 = young MRU end ... last index
+  // = old LRU end (the eviction candidate). youngCount marks the boundary:
+  // pages[0..youngCount-1] are YOUNG, pages[youngCount..] are OLD. youngCount
+  // only changes on a promotion (old -> young, +1) or an eviction (-1, only
+  // in the fallback case where the pool is entirely young) -- never
+  // recomputed wholesale from a rounded fraction, because that would
+  // silently un-protect an already-promoted page just for not being the
+  // *most* recently touched one, which would defeat the entire point.
+  let pages, youngCount, flashId, flashTimer, nextScanId;
+
+  function reset() {
+    pages = [];
+    youngCount = 0;
+    flashId = null;
+    nextScanId = 900;
+  }
+
+  function oldCount() {
+    return pages.length - youngCount;
+  }
+
+  function access(pageId) {
+    const idx = pages.indexOf(pageId);
+    if (idx === -1) return insertNew(pageId);
+    const isOld = idx >= youngCount;
+    pages.splice(idx, 1);
+    pages.unshift(pageId);
+    if (isOld) {
+      youngCount += 1;
+      return { event: 'promote', pageId, message: `Page ${pageId} accessed again — promoted from OLD to YOUNG sublist.` };
+    }
+    return { event: 'reaccess-young', pageId, message: `Page ${pageId} accessed again — already in the YOUNG sublist, moved to its MRU head.` };
+  }
+
+  function insertNew(pageId) {
+    // Head of the OLD sublist = index youngCount, NOT index 0 -- the whole
+    // point: a single scan can't shove pages straight to the young/MRU end.
+    pages.splice(youngCount, 0, pageId);
+    let evicted = null, evictedFrom = null;
+    if (pages.length > CAPACITY) {
+      if (oldCount() > 0) {
+        evicted = pages.pop();
+        evictedFrom = 'OLD';
+      } else {
+        // Fallback: pool is entirely young (degenerate case). Shouldn't
+        // normally happen given a maintained old sublist.
+        evicted = pages.pop();
+        youngCount -= 1;
+        evictedFrom = 'YOUNG';
+      }
+    }
+    let message = `Page ${pageId} is new — inserted at the head of the OLD sublist (not young — a single scan won't evict hot pages).`;
+    if (evicted !== null) message += ` Pool full — evicted page ${evicted} from the tail of the ${evictedFrom} sublist.`;
+    return { event: 'insert', pageId, evicted, evictedFrom, message };
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function scheduleFlashClear() {
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => { flashId = null; draw(); }, 1600);
+  }
+
+  function draw() {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    const topY = 28, slotY = 46, labelY = 14;
+    const boundaryX = GAP + youngCount * (SLOT_W + GAP) - GAP / 2;
+
+    if (youngCount > 0) {
+      const youngMidX = GAP + (youngCount * (SLOT_W + GAP)) / 2 - GAP / 2;
+      const t = el('text', { x: youngMidX, y: labelY, class: 'viz-label-dim' });
+      t.textContent = 'YOUNG sublist';
+      svg.appendChild(t);
+    }
+    if (oldCount() > 0) {
+      const oldWidth = CAPACITY * (SLOT_W + GAP) - youngCount * (SLOT_W + GAP);
+      const oldMidX = GAP + youngCount * (SLOT_W + GAP) + oldWidth / 2 - GAP / 2;
+      const t = el('text', { x: oldMidX, y: labelY, class: 'viz-label-dim' });
+      t.textContent = 'OLD sublist';
+      svg.appendChild(t);
+    }
+
+    if (youngCount > 0 && youngCount < CAPACITY) {
+      svg.appendChild(el('line', {
+        x1: boundaryX, y1: topY, x2: boundaryX, y2: slotY + SLOT_H + 14,
+        class: 'viz-edge', 'stroke-dasharray': '4,3',
+      }));
+    }
+
+    for (let i = 0; i < CAPACITY; i++) {
+      const x = GAP + i * (SLOT_W + GAP);
+      const occupied = i < pages.length;
+      const pageId = pages[i];
+      const isOld = i >= youngCount;
+      let cls = isOld ? 'viz-node-highlight' : 'viz-node';
+      if (occupied && pageId === flashId) cls = 'viz-node-new';
+      svg.appendChild(el('rect', {
+        x, y: slotY, width: SLOT_W, height: SLOT_H, rx: 6,
+        class: occupied ? cls : 'viz-edge',
+        'fill-opacity': occupied ? '1' : '0', 'stroke-dasharray': occupied ? '' : '4,3',
+      }));
+      if (occupied) {
+        const t = el('text', { x: x + SLOT_W / 2, y: slotY + SLOT_H / 2 });
+        t.textContent = pageId;
+        svg.appendChild(t);
+      }
+      let bottomLabel = '';
+      if (occupied && i === 0) bottomLabel = 'MRU';
+      if (occupied && i === pages.length - 1) bottomLabel = bottomLabel ? bottomLabel + ' / evict next' : 'evict next';
+      if (bottomLabel) {
+        const bl = el('text', { x: x + SLOT_W / 2, y: slotY + SLOT_H + 14, class: 'viz-label-dim' });
+        bl.textContent = bottomLabel;
+        svg.appendChild(bl);
+      }
+    }
+  }
+
+  root0.querySelector('[data-viz-action="access"]').addEventListener('click', () => {
+    const v = parseInt(input.value, 10);
+    if (isNaN(v)) { setStatus('Enter a page id first.', 'error'); return; }
+    const result = access(v);
+    flashId = v;
+    input.value = '';
+    setStatus(result.message, 'ok');
+    draw();
+    scheduleFlashClear();
+  });
+
+  root0.querySelector('[data-viz-action="scan"]').addEventListener('click', () => {
+    const startId = nextScanId;
+    nextScanId += 5;
+    const evictedOld = [];
+    const evictedYoung = [];
+    for (let i = 0; i < 5; i++) {
+      const result = access(startId + i);
+      if (result.evicted !== null && result.evicted !== undefined) {
+        (result.evictedFrom === 'YOUNG' ? evictedYoung : evictedOld).push(result.evicted);
+      }
+    }
+    flashId = null;
+    let msg = `Simulated a full table scan: pages ${startId}–${startId + 4} each touched once, all inserted into the OLD sublist.`;
+    if (evictedOld.length) msg += ` Evicted from the OLD sublist tail as it churned: ${evictedOld.join(', ')}.`;
+    if (evictedYoung.length) msg += ` Pool was entirely YOUNG (no OLD sublist left to absorb the scan) — had to evict from YOUNG instead: ${evictedYoung.join(', ')}.`;
+    if (!evictedOld.length && !evictedYoung.length) msg += ' Pool had room — nothing evicted yet.';
+    if (!evictedYoung.length) msg += ' No YOUNG page was touched or evicted.';
+    setStatus(msg, 'ok');
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    reset();
+    setStatus('Reset to an empty pool.', '');
+    draw();
+  });
+
+  reset();
+  setStatus('Empty pool (8 slots). Access the same page id twice to see it promoted from OLD to YOUNG, then try "Simulate Full Table Scan."', '');
+  draw();
+})();
+</script>
+
 ---
 
 ## Redo Log (WAL) + Undo Log

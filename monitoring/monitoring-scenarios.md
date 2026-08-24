@@ -305,7 +305,7 @@ graph TD
 
     START["Query slow or timeout"]
     RANGE["Time range too large?<br/>Reduce to 6h or 24h"]:::check
-    REGEX["Regex label matchers?<br/>{__name__=~\".+\"} is brutal"]:::check
+    REGEX["Regex label matchers?<br/>{__name__=~'.+'} is brutal"]:::check
     NOINDEX["No index matcher?<br/>Always filter by job/instance"]:::check
     RECORD["Create recording rule<br/>for expensive query"]:::fix
     STEP["Reduce resolution:<br/>increase step interval"]:::fix
@@ -673,7 +673,7 @@ graph TD
     START["No logs in Loki"]
     PROMTAIL["Promtail running?<br/>kubectl get pods -n monitoring"]:::check
     TARGETS["Promtail scraping<br/>correct pods?"]:::check
-    LABELS["Labels match query?<br/>{namespace=\"prod\"}"]:::check
+    LABELS["Labels match query?<br/>{namespace='prod'}"]:::check
     PARSE["Log format parsed?<br/>json/logfmt pipeline stage"]:::check
     INGEST["Loki ingester healthy?<br/>check distributor metrics"]:::check
 
