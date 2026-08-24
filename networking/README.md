@@ -15,17 +15,19 @@ Core networking concepts for backend engineers and platform engineers — from p
 | [load-balancers.md](./load-balancers.md) | L4 vs L7, algorithms, health checks, sticky sessions, TLS termination, AWS ALB/NLB, LCU/NLCU, GCP GLB, nginx, HAProxy, common issues |
 | [cdn.md](./cdn.md) | CDN internals, edge PoPs, cache hierarchy, Cache-Control headers, CloudFront, Cloudflare, GCP CDN, WAF, debugging |
 | [nslookup-vs-curl.md](./nslookup-vs-curl.md) | DNS resolution vs HTTP request path, when nslookup succeeds but curl fails, layered debugging |
+| [zero-trust.md](./zero-trust.md) | Zero Trust vs perimeter security, BeyondCorp model, GCP Identity-Aware Proxy (IAP), mTLS + Istio AuthorizationPolicy, PSC + IAP + mTLS composition, debugging |
 
 ## Read Order
 
 ```
 osi-model.md         → understand the full picture
 tcp-udp.md           → transport layer (TCP state machine, TIME_WAIT)
-tls-encryption.md    → TLS 1.2 vs 1.3, certificate validation
+tls-encryption.md    → TLS 1.2 vs 1.3, certificate validation, mTLS
 http-versions.md     → HTTP/2 multiplexing, status codes, headers
 grpc-graphql.md      → modern API protocols built on top
 linux-networking.md  → kernel packet path, netfilter, conntrack, namespaces
 load-balancers.md    → L4/L7, algorithms, AWS ALB/NLB, GCP, nginx, HAProxy
 cdn.md               → edge PoPs, caching, CloudFront/Cloudflare/GCP CDN
 nslookup-vs-curl.md  → layered debugging when DNS works but HTTP fails
+zero-trust.md        → ZTNA, BeyondCorp, IAP, mTLS + PSC composition
 ```

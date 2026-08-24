@@ -10,7 +10,26 @@ Most guides here also render as a live site — click-to-reveal knowledge checks
 cd website && npm install && npm run dev   # http://localhost:4321
 ```
 
-Contributing a new guide or retrofitting an old one? [`website/COMPONENTS.md`](./website/COMPONENTS.md) documents the interactive-component syntax (quiz cards, tabs, steppers, toggles), and the `/interactive-docs` Claude Code skill (`.claude/skills/interactive-docs/`) applies that pattern consistently for you.
+A few guides go a step further with **live, manipulable simulators** — not just a diagram, an actual data structure or system you can insert/delete/search/fail into and watch reshape in real time, tested against the real algorithm before being shipped:
+
+| Where | What you can do to it |
+|---|---|
+| [coding-practice/btree.md](./coding-practice/btree.md) | Insert/delete keys in a real order-4 B+tree — watch it split, borrow, merge |
+| [coding-practice/skip-list.md](./coding-practice/skip-list.md) | Insert/search/delete with real randomized level generation |
+| [coding-practice/lru-cache.md](./coding-practice/lru-cache.md) | Get/Put against a capacity-3 cache, watch eviction happen |
+| [coding-practice/consistent-hashing.md](./coding-practice/consistent-hashing.md) | Add/remove nodes on an actual circular hash ring |
+| [coding-practice/bloom-filter.md](./coding-practice/bloom-filter.md) | Insert words, trigger a real false positive on a 16-bit array |
+| [coding-practice/rate-limiter-implementations.md](./coding-practice/rate-limiter-implementations.md) | A token bucket refilling on the real clock — burst it, watch it throttle |
+| [databases/replication.md](./databases/replication.md) | Kill a Raft leader, watch an election resolve |
+| [databases/redis-internals.md](./databases/redis-internals.md) | Insert keys past the load factor, watch incremental rehashing |
+| [databases/clickhouse-internals.md](./databases/clickhouse-internals.md) | Insert rows, flush a memtable, trigger a background merge |
+| [databases/elasticsearch-internals.md](./databases/elasticsearch-internals.md) | Index/delete documents, watch an inverted index's postings update |
+| [databases/postgres-internals.md](./databases/postgres-internals.md) | Run concurrent transactions, see MVCC visibility (xmin/xmax) live |
+| [databases/kafka-internals.md](./databases/kafka-internals.md) | Add/remove consumers, watch partitions reassign |
+| [system-design/geospatial-services.md](./system-design/geospatial-services.md) | Insert points, watch a quadtree subdivide, run a radius query |
+| [kubernetes/scheduler-internals.md](./kubernetes/scheduler-internals.md) | Add pods, watch Filter/Score bind them or land in Pending |
+
+Contributing a new guide or retrofitting an old one? [`website/COMPONENTS.md`](./website/COMPONENTS.md) documents the interactive-component syntax (quiz cards, tabs, steppers, toggles, and the live-simulator pattern above), and the `/interactive-docs` Claude Code skill (`.claude/skills/interactive-docs/`) applies that pattern consistently for you.
 
 ---
 

@@ -100,30 +100,37 @@ const currentPath = Astro.url.pathname;
       }
     });
 
-    // Mermaid rendering
-    import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
-    mermaid.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
-
+    // Mermaid rendering — dynamic import so a CDN failure can't crash the
+    // whole module and silence every other interactive component on the page.
     function renderMermaid() {
+      const blocks: { pre: Element; src: string; id: string }[] = [];
       document.querySelectorAll('pre > code.language-mermaid').forEach((el, i) => {
         const pre = el.parentElement;
         if (!pre) return;
         const src = el.textContent || '';
+        const id = `mermaid-${i}-${Math.floor(performance.now())}`;
         const div = document.createElement('div');
         div.className = 'mermaid my-6';
-        div.id = `mermaid-${Date.now()}-${i}`;
+        div.id = id;
         div.textContent = src;
         pre.replaceWith(div);
+        blocks.push({ pre, src, id });
       });
-      mermaid.run();
+      if (!blocks.length) return;
+      import('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs')
+        .then(m => {
+          m.default.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
+          m.default.run();
+        })
+        .catch(err => console.warn('[DevOpsIndex] Mermaid failed to load:', err));
     }
 
-    // Syntax highlighting (VS Code-like theme, loaded in <head> as a
-    // classic global script — see BaseLayout's <head> for the CDN tags).
-    // Runs after renderMermaid() so `.language-mermaid` blocks have already
-    // been swapped out for rendered SVG and never reach the highlighter.
+    // Syntax highlighting — hljs is a classic CDN script loaded in <head>.
+    // Guard against it not being present (slow network, CDN error, ad blocker)
+    // so a missing hljs can never silently kill tabs/steppers/toggles below.
     declare const hljs: any;
     function initSyntaxHighlighting() {
+      if (typeof hljs === 'undefined') return;
       document.querySelectorAll<HTMLElement>('pre > code:not(.language-mermaid)').forEach(el => {
         hljs.highlightElement(el);
       });
@@ -132,6 +139,7 @@ const currentPath = Astro.url.pathname;
     // Copy button injection
     function addCopyButtons() {
       document.querySelectorAll('pre').forEach(pre => {
+        if (pre.querySelector('.copy-btn')) return; // idempotent
         const code = pre.querySelector('code');
         if (!code) return;
         const btn = document.createElement('button');
@@ -197,10 +205,16 @@ const currentPath = Astro.url.pathname;
 
     function initSteppers() {
       document.querySelectorAll<HTMLElement>('.stepper').forEach(stepper => {
-        const panels = Array.from(stepper.querySelectorAll<HTMLElement>('.stepper-panel'));
+        // Only select panels that are direct children of this stepper's
+        // .stepper-panels — avoids grabbing panels from a nested stepper.
+        const panelsContainer = stepper.querySelector<HTMLElement>('.stepper-panels');
+        if (!panelsContainer) return;
+        const panels = Array.from(panelsContainer.querySelectorAll<HTMLElement>(':scope > .stepper-panel'));
+        if (!panels.length) return;
+
         const prevBtn = stepper.querySelector<HTMLButtonElement>('.stepper-prev');
         const nextBtn = stepper.querySelector<HTMLButtonElement>('.stepper-next');
-        const dotsEl = stepper.querySelector<HTMLElement>('.stepper-dots');
+        const dotsEl  = stepper.querySelector<HTMLElement>('.stepper-dots');
         const labelEl = stepper.querySelector<HTMLElement>('.stepper-label');
         let current = 0;
 
@@ -242,14 +256,25 @@ const currentPath = Astro.url.pathname;
       });
     }
 
+    // Run all init functions independently — a failure in one must never
+    // silence the rest (e.g. hljs missing must not break tabs/steppers).
     function init() {
-      renderMermaid();
-      initSyntaxHighlighting();
-      addCopyButtons();
-      initQuizzes();
-      initTabGroups();
-      initSteppers();
-      initToggles();
+      const steps: [string, () => void][] = [
+        ['renderMermaid',          renderMermaid],
+        ['addCopyButtons',         addCopyButtons],
+        ['initQuizzes',            initQuizzes],
+        ['initTabGroups',          initTabGroups],
+        ['initSteppers',           initSteppers],
+        ['initToggles',            initToggles],
+        ['initSyntaxHighlighting', initSyntaxHighlighting], // last: cosmetic only
+      ];
+      for (const [name, fn] of steps) {
+        try {
+          fn();
+        } catch (err) {
+          console.warn(`[DevOpsIndex] ${name} failed:`, err);
+        }
+      }
     }
 
     if (document.readyState === 'loading') {
@@ -257,6 +282,12 @@ const currentPath = Astro.url.pathname;
     } else {
       init();
     }
+
+    // If hljs loads after DOMContentLoaded (e.g. slow network), highlight then.
+    document.querySelector<HTMLScriptElement>('script[src*="highlight.js"]')
+      ?.addEventListener('load', () => {
+        try { initSyntaxHighlighting(); } catch (_) {}
+      });
   </script>
 </body>
 </html>

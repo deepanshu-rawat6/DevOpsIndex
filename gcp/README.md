@@ -621,6 +621,120 @@ graph TD
   <div class="quiz-a" hidden>Private Service Connect. It creates a dedicated PSC endpoint — a forwarding rule with an internal IP of your choosing — scoped to one specific service or producer VPC. Private Google Access can't do this: it's a blanket subnet-level flag for reaching Google APIs generally through a shared DNS-resolved range, with no way to target a single partner service or pick your own IP for it.</div>
 </div>
 
+### Publishing Your Own Service via PSC (Producer Side)
+
+The diagrams above show the **consumer** connecting to someone else's service. PSC also works the other way: **your team publishes a service**, and other VPCs connect to it privately — without VPC Peering, which would expose your entire network.
+
+**Why not just use VPC Peering?**
+
+VPC Peering opens full L3 routing between two VPCs — every VM in VPC A can potentially reach every VM in VPC B. PSC is surgical: consumers get one internal IP that forwards to exactly one service. The producer's VPC topology stays hidden.
+
+```mermaid
+graph TD
+    classDef consumer fill:#e67e22,stroke:#d35400,color:#fff,rx:8
+    classDef psc fill:#9b59b6,stroke:#8e44ad,color:#fff,rx:8
+    classDef producer fill:#4285f4,stroke:#2a56c6,color:#fff,rx:8
+    classDef blocked fill:#e74c3c,stroke:#c0392b,color:#fff,rx:8
+
+    subgraph PROD["Producer VPC — your team"]
+        ILB["Internal Load Balancer<br/>(forwards to your service)"]:::producer
+        SA["Service Attachment<br/>(published via PSC)"]:::psc
+        SVC["Your backend VMs / GKE pods"]:::producer
+        ILB --> SVC
+        ILB --> SA
+    end
+
+    subgraph CON_A["Consumer VPC A"]
+        EP_A["PSC Endpoint<br/>internal IP: 10.1.0.50"]:::psc
+        WL_A["Workload"]:::consumer
+        WL_A -->|"connects to 10.1.0.50"| EP_A
+        EP_A -->|"privately routed to Service Attachment"| SA
+    end
+
+    subgraph CON_B["Consumer VPC B (rejected)"]
+        EP_B["PSC Endpoint<br/>(not approved)"]:::blocked
+        EP_B -.->|"connection rejected — not in allowlist"| SA
+    end
+
+    NOTE["Producer never sees consumer VPC topology.<br/>Consumers never see producer VPC topology.<br/>No transitive routing — only the one service is reachable."]
+```
+
+**How it works — three resources on the producer side:**
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Internal Load Balancer (ILB).</strong> Your service is fronted by an Internal TCP/UDP or Internal HTTP(S) LB. This is the actual network endpoint PSC will forward traffic to — PSC doesn't directly attach to VMs.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Service Attachment.</strong> You create a Service Attachment that references the ILB's forwarding rule. This is the PSC "publish" handle — it has a URI like <code>projects/my-proj/regions/us-central1/serviceAttachments/my-svc</code> that consumers reference.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Consumer accept list.</strong> The Service Attachment has an <code>--consumer-accept-list</code> (project IDs or service accounts) and a <code>--connection-preference</code>. Connections from unlisted projects are rejected — your VPC topology is never exposed even to the rejected project.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Consumer creates a PSC endpoint.</strong> An approved consumer creates a forwarding rule (PSC endpoint) with an internal IP of their choosing, pointed at your Service Attachment URI. From their VMs, the service looks like a local internal IP.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+```bash
+# --- PRODUCER SIDE ---
+
+# Step 1: Note your ILB forwarding rule name
+# (create the ILB first if you haven't)
+FORWARDING_RULE="projects/my-proj/regions/us-central1/forwardingRules/my-ilb-fr"
+
+# Step 2: Create a Service Attachment
+gcloud compute service-attachments create my-service-attachment \
+  --region=us-central1 \
+  --producer-forwarding-rule=$FORWARDING_RULE \
+  --connection-preference=ACCEPT_MANUAL \          # you explicitly approve each consumer
+  --consumer-accept-list=consumer-project-id=10    # max 10 connections from this project
+
+# Step 3: Share the Service Attachment URI with the consumer team
+gcloud compute service-attachments describe my-service-attachment \
+  --region=us-central1 \
+  --format="value(selfLink)"
+# → projects/my-proj/regions/us-central1/serviceAttachments/my-service-attachment
+
+# Step 4: Approve a pending consumer connection
+gcloud compute service-attachments update my-service-attachment \
+  --region=us-central1 \
+  --consumer-accept-list=consumer-project-id=10
+
+# --- CONSUMER SIDE ---
+
+# Step 5: Consumer creates a PSC endpoint pointed at the Service Attachment
+gcloud compute forwarding-rules create my-psc-endpoint \
+  --region=us-central1 \
+  --network=consumer-vpc \
+  --subnet=consumer-subnet \
+  --address=10.1.0.50 \                            # internal IP consumer picks
+  --target-service-attachment=projects/my-proj/regions/us-central1/serviceAttachments/my-service-attachment
+```
+
+| | VPC Peering | PSC (producer publish) |
+|--|---|---|
+| **What's exposed** | Full VPC — all IPs routable | One service endpoint only |
+| **Consumer can see** | All VMs in the producer VPC | Only the PSC internal IP |
+| **Transitivity** | No (non-transitive) | No — and no need to be |
+| **Setup** | Mutual peering on both VPCs | Service Attachment + consumer endpoint |
+| **Who controls access** | Firewall rules on both sides | Producer's accept list is the gate |
+| **AWS analog** | VPC Peering | PrivateLink (exactly equivalent) |
+
+<div class="quiz-card">
+  <p class="quiz-q">Your team owns a payments service in its own VPC. Three other teams' VPCs need to call it privately. A colleague suggests VPC Peering with all three. What's the security argument for PSC instead?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>VPC Peering exposes the entire payments VPC's IP space to each consumer VPC — any VM in a peered VPC can potentially reach any VM in the payments VPC, and firewall rules are the only thing stopping lateral movement. PSC is surgical: you publish exactly one endpoint (the ILB in front of your service), approve only the specific consumer projects you want, and those consumers get a single internal IP — they have no visibility into or route to any other VM in your VPC. The producer's topology is completely hidden. This is the key advantage: fine-grained surface area vs a broad "full-network" peering trust.</div>
+</div>
+
 ---
 
 ## All Files
