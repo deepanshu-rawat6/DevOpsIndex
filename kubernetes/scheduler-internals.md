@@ -65,6 +65,8 @@ Key filter plugins:
   <div class="quiz-a" hidden>No. A node is eliminated the moment <em>any</em> filter plugin returns false &mdash; it doesn't matter how many others it would have passed. Every filter has to pass for a node to reach Score.</div>
 </div>
 
+Dynamic Resource Allocation (DRA) doesn't add a row to the filter-plugin table above — it's a newer, separate scheduler extension point, the `DynamicResources` plugin, that sits alongside Filter/Score rather than inside either phase. That's because it isn't doing a scalar `Allocatable - requested` check the way `NodeResourcesFit` does; it resolves `ResourceClaim`/`DeviceClass` binding instead, matching structured device attributes rather than comparing a single number against capacity. See [ai-infra/gpu-scheduling.md](../ai-infra/gpu-scheduling.md) for the full treatment of DeviceClass, ResourceClaim, and the capability gap it closes over the classic GPU extended-resource model.
+
 ---
 
 ## Phase 2: Score Plugins

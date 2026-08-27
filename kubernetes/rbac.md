@@ -19,6 +19,7 @@ graph LR
     classDef admission fill:#e67e22,stroke:#d35400,color:#fff,rx:8
     classDef ok fill:#2ecc71,stroke:#27ae60,color:#fff,rx:8
     classDef deny fill:#c0392b,stroke:#922b21,color:#fff,rx:8
+    classDef apf fill:#16a085,stroke:#117a65,color:#fff,rx:8
 
     REQ["API Request kubectl get pods Pod calling K8s API"]:::request
 
@@ -26,8 +27,11 @@ graph LR
     AUTHN -->|"identity established"| AUTHZ["Authorization (RBAC) Are you allowed? check Role/ClusterRole bindings"]:::authz
     AUTHN -->|"unknown identity"| DENY1["401 Unauthorized"]:::deny
 
-    AUTHZ -->|"allowed"| ADMISSION["Admission Controllers Mutate then Validate LimitRanger, PodSecurity, Webhooks"]:::admission
+    AUTHZ -->|"allowed"| APF["API Priority and Fairness — seat available?"]:::apf
     AUTHZ -->|"no matching rule"| DENY2["403 Forbidden"]:::deny
+
+    APF -->|"seat assigned"| ADMISSION["Admission Controllers Mutate then Validate LimitRanger, PodSecurity, Webhooks"]:::admission
+    APF -->|"queue full / no seat"| THROTTLE["429 Too Many Requests"]:::deny
 
     ADMISSION -->|"passes all webhooks"| PERSIST["Persist to etcd 200 OK"]:::ok
     ADMISSION -->|"webhook rejects"| DENY3["400/403 from webhook"]:::deny
@@ -66,6 +70,92 @@ Same chain, one step at a time:
   <button class="quiz-reveal">Reveal answer</button>
   <div class="quiz-a" hidden>
     Authorization. A 403 means Kubernetes successfully identified the caller (authentication passed) but found no RBAC rule allowing that verb+resource. A failed identity check — unknown cert, bad token — fails earlier, at authentication, and returns 401 instead.
+  </div>
+</div>
+
+---
+
+## API Priority and Fairness
+
+RBAC only answers "are you allowed?" It says nothing about "does the API server have room to handle this right now?" That's a separate problem, and Kubernetes solves it with a separate mechanism sitting right after authorization and before admission control: **API Priority and Fairness (APF)**.
+
+Without it, one noisy client — a buggy controller stuck in a hot retry loop, a batch job hammering `list` across every namespace — can consume every available slot on the API server, and every other client, including the scheduler's own requests and kubelet heartbeats, gets starved out along with it. A misbehaving client shouldn't be able to take down cluster-critical control-plane traffic just by being noisy. APF exists to make sure it can't.
+
+### PriorityLevelConfiguration and FlowSchema
+
+Like RBAC being Role/ClusterRole (rules) plus RoleBinding/ClusterRoleBinding (who those rules apply to) instead of one monolithic object, APF splits "how much capacity" from "which requests" into two separate API objects:
+
+- **`PriorityLevelConfiguration`** — defines a queue, its concurrency share, and whether it's an **exempt** priority level (never queued or limited — reserved for traffic that must never be throttled, like the observability/health checks the control plane depends on) or a **limited** priority level (subject to queuing and possible rejection once its share is exhausted).
+- **`FlowSchema`** — matches incoming requests to a priority level by user, group, resource, and verb, the same way a RoleBinding matches a subject to a Role.
+
+Keeping these separate means one `PriorityLevelConfiguration` (say, `workload-high`) can be reused by many `FlowSchemas` (one matching a specific controller's ServiceAccount, another matching a specific verb+resource pattern) without redefining the concurrency share every time.
+
+```yaml
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: PriorityLevelConfiguration
+metadata:
+  name: workload-high
+spec:
+  type: Limited
+  limited:
+    nominalConcurrencyShares: 30   # this class's slice of total server capacity
+    limitResponse:
+      type: Queue
+      queuing:
+        queues: 64
+        queueLengthLimit: 50       # requests queued per queue before rejecting
+        handSize: 6
+---
+apiVersion: flowcontrol.apiserver.k8s.io/v1
+kind: FlowSchema
+metadata:
+  name: workload-high-controllers
+spec:
+  priorityLevelConfiguration:
+    name: workload-high
+  matchingPrecedence: 500
+  distinguisherMethod:
+    type: ByUser
+  rules:
+    - subjects:
+        - kind: ServiceAccount
+          serviceAccount:
+            name: my-controller
+            namespace: payments
+      resourceRules:
+        - apiGroups: ["*"]
+          resources: ["*"]
+          verbs: ["*"]
+```
+
+### Seats, not requests-per-second
+
+The unit APF allocates isn't "requests per second" — it's **seats**. Every in-flight request occupies a seat for as long as it's being processed, and a priority level's concurrency share determines how many seats out of the API server's total capacity that class of traffic gets at any given moment.
+
+This is a fundamentally different model from a flat rate limiter. A rate limiter counts requests over a time window and doesn't care how long any one of them takes. A seat-based model cares about occupancy: a slow `list` across a huge namespace holds its seat for the whole time it takes to build and stream that response, while a fast `get` on a single object frees its seat almost immediately. Two requests that count identically against an RPS limit can consume very different amounts of actual capacity under APF, and the seat model accounts for that directly instead of pretending every request costs the same.
+
+### What happens when the queue is full
+
+If a limited priority level's queue is already full when a new matching request arrives, APF doesn't drop the connection or make the client wait indefinitely — it returns **429 Too Many Requests** with a `Retry-After` header, telling the client exactly when it's reasonable to try again.
+
+That's a deliberately different signal from the 403 the AuthZ stage returns earlier in the chain:
+
+- **403 Forbidden** — the identity is known, but RBAC has no rule permitting this verb+resource. "You're not allowed," and retrying the identical request will never succeed.
+- **429 Too Many Requests** — RBAC already said yes. The server is protecting its own capacity right now and asking the client to back off. "You're allowed, but not this instant," and retrying later — which any well-behaved client, including `client-go`'s own libraries, already knows how to do — is exactly the expected response.
+
+<div class="quiz-card">
+  <p class="quiz-q">A client gets a 429 from the API server. Why isn't that the same kind of failure as a 429 from a typical requests-per-second rate limiter?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    Because APF isn't counting requests per second at all — it's tracking seats. A priority level's concurrency share is a number of seats, and a request holds its seat for the entire time it's being processed, not for one fixed unit of "request cost." A 429 here means that priority level's queue is full of already-in-flight-or-waiting work, not that some request-count threshold in a time window was crossed. A slow request holding its seat longer can trigger this even at low request volume, which a flat RPS limiter would never flag.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Why does APF use two separate objects — PriorityLevelConfiguration and FlowSchema — instead of one combined object that both defines a queue and says which requests go into it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    Splitting them separates "how much capacity does this class of traffic get" (PriorityLevelConfiguration) from "which requests belong to this class" (FlowSchema) — the same reason RBAC keeps Role separate from RoleBinding. One PriorityLevelConfiguration's concurrency share and queue settings can be reused by many FlowSchemas matching different users, groups, or resource+verb patterns, instead of redefining the same queue configuration every time a new set of requests needs to route into it.
   </div>
 </div>
 

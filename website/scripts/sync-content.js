@@ -22,7 +22,7 @@ const SECTIONS = [
   },
   {
     slug: 'kubernetes', title: 'Kubernetes', order: 4,
-    readOrder: ['kubectl-cheatsheet', 'README', 'workloads', 'resource-limits', 'networking', 'coredns', 'storage', 'rbac', 'autoscaling', 'helm', 'eks-architecture', 'pod-lifecycle', 'kube-proxy-modes', 'cross-node-networking', 'hpa-vpa-internals', 'scheduler-internals', 'policy-security', 'node-shutdown'],
+    readOrder: ['kubectl-cheatsheet', 'README', 'workloads', 'resource-limits', 'networking', 'coredns', 'storage', 'rbac', 'autoscaling', 'helm', 'eks-architecture', 'pod-lifecycle', 'controller-pattern', 'custom-resources-operators', 'kubeadm-bootstrap', 'kube-proxy-modes', 'cross-node-networking', 'hpa-vpa-internals', 'scheduler-internals', 'policy-security', 'node-shutdown'],
   },
   {
     slug: 'cicd', title: 'CI/CD', order: 5,

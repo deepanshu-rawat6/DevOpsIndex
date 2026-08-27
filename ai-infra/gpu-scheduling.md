@@ -121,6 +121,110 @@ spec:
 
 ---
 
+## Dynamic Resource Allocation — the Device Plugin Successor
+
+Everything above — extended resources, `nvidia.com/gpu: 1`, the Device Plugin gRPC handshake — is the model **Dynamic Resource Allocation (DRA)** supersedes for GPU and accelerator scheduling on clusters new enough to have it enabled. DRA doesn't replace the Device Plugin's driver-level device enumeration; it replaces how a pod *asks for* a device and how that request gets resolved, using its own scheduler extension point (the `DynamicResources` plugin) instead of the opaque extended-resource count above.
+
+### DeviceClass — what kind of device can satisfy a claim
+
+A `DeviceClass` is a cluster-scoped object (set up once by a cluster admin, like a `StorageClass`) that defines what a "device" means for a given driver — GPUs, in this case — using **structured, queryable attributes**: memory size, compute capability, model name. Compare that to the Device Plugin model, where every GPU advertised under `nvidia.com/gpu` is treated as interchangeable — the extended-resource string carries no information beyond "this is one of these."
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: DeviceClass
+metadata:
+  name: gpu.nvidia.com
+spec:
+  selectors:
+  - cel:
+      expression: "device.driver == 'gpu.nvidia.com'"
+```
+
+### ResourceClaim / ResourceClaimTemplate — how a pod asks for one
+
+Instead of an implicit `resources.limits."nvidia.com/gpu": 1` that the device plugin resolves opaquely at bind time, a pod references a `ResourceClaimTemplate`, which creates a `ResourceClaim` object — a first-class API object with its own lifecycle, independent of the pod's classic Filter/Score cycle.
+
+```yaml
+apiVersion: resource.k8s.io/v1
+kind: ResourceClaimTemplate
+metadata:
+  name: gpu-claim-template
+spec:
+  spec:
+    devices:
+      requests:
+      - name: gpu
+        deviceClassName: gpu.nvidia.com
+        selectors:
+        - cel:
+            expression: "device.attributes['gpu.nvidia.com'].memory.compareTo(quantity('40Gi')) >= 0"
+---
+apiVersion: v1
+kind: Pod
+spec:
+  containers:
+  - name: training
+    resources:
+      claims:
+      - name: gpu
+  resourceClaims:
+  - name: gpu
+    resourceClaimTemplateName: gpu-claim-template
+```
+
+The claim gets created and bound by the `DynamicResources` scheduler plugin, which resolves it **before** the pod even reaches the classic Filter/Score cycle covered in [`kubernetes/scheduler-internals.md`](../kubernetes/scheduler-internals.md) — it isn't a Filter or Score plugin doing a scalar `Allocatable - requested` check, it's a separate resolution step that finds and locks in a matching device up front.
+
+Trace the sequence end to end, next to the Device Plugin handshake diagrammed at the top of this file:
+
+```mermaid
+sequenceDiagram
+    participant Pod as Your Pod
+    participant RCT as ResourceClaimTemplate
+    participant RC as ResourceClaim
+    participant DS as DynamicResources plugin
+    participant K as kubelet
+
+    Pod->>RCT: Pod spec references resourceClaims
+    RCT->>RC: API server creates a ResourceClaim from the template
+    Note over RC: status: pending, unallocated
+    DS->>RC: Resolves claim against DeviceClass + CEL selector, e.g. memory >= 40Gi
+    DS->>RC: Finds matching device, writes allocation into claim status
+    Note over RC: status: allocated, bound to device
+    DS->>Pod: Pod scheduled to the node hosting that device
+    K->>Pod: kubelet exposes the allocated device to the container
+```
+
+### Structured parameters — the actual capability gap this closes
+
+MIG (covered above) can statically **slice** a GPU into fixed-size chunks ahead of time — `1g.10gb`, `2g.20gb`, and so on — each exposed as its own opaque extended-resource name. But a pod still has to name one exact profile; neither MIG's slicing nor the plain Device Plugin model can express a request like *"give me whichever available device has at least 40GB memory"* — every extended-resource name, sliced or not, is matched by name and count only. DRA's CEL-based selectors query structured device **attributes** — memory, compute capability, model — at claim-resolution time, so the same claim can match whichever device qualifies rather than requiring the pod author to hardcode one specific resource name.
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="deviceplugin" class="active state-warn">Device Plugin (extended resource)</button>
+    <button data-toggle-opt="dra" class="state-ok">DRA (ResourceClaim)</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="deviceplugin">
+    A pod sets <code>resources.limits: nvidia.com/gpu: 1</code> — an opaque count under a fixed string name. Every GPU (or MIG slice) advertised under that name is interchangeable to the scheduler; it just does <code>Allocatable - requested</code> arithmetic. The device plugin resolves <em>which</em> physical device at <code>Allocate()</code> time on the kubelet, invisible to the scheduler's own decision.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="dra">
+    A pod references a <code>ResourceClaimTemplate</code>, which creates a <code>ResourceClaim</code> resolved by the <code>DynamicResources</code> scheduler plugin against structured device attributes (memory, compute capability, model) via a CEL selector — before the classic Filter/Score cycle runs. The scheduler itself participates in picking the specific device, not just counting it.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Can the classic Device Plugin model (<code>nvidia.com/gpu: 1</code>) express "give me a GPU with at least 40GB of free memory, whichever one qualifies"?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. An extended resource is just a count under an opaque name — every GPU advertised as <code>nvidia.com/gpu</code> is treated as interchangeable, with no attribute the scheduler can query. DRA closes this gap with CEL-based selectors matched against a <code>DeviceClass</code>'s structured device attributes.</div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">MIG can slice a GPU into fixed profiles like <code>1g.10gb</code> and <code>2g.20gb</code> ahead of time. Does that mean MIG can also express "give me whichever available device has at least 40GB, whatever its exact size"?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. MIG only creates fixed-size profiles known in advance, each exposed as its own opaque extended-resource name (<code>nvidia.com/mig-2g.20gb</code>) — a pod still has to name one exact profile, the same as the plain Device Plugin model. Neither MIG's static slicing nor the plain extended-resource model can express an attribute threshold; DRA's structured parameters can, because the selector is evaluated against real device attributes at claim-resolution time instead of a hardcoded resource name.</div>
+</div>
+
+---
+
 ## Node Taints for GPU Nodes
 
 GPU instances are expensive. Prevent non-GPU workloads from landing on them:

@@ -14,6 +14,9 @@
 | [resource-limits.md](./resource-limits.md) | Requests vs limits, CFS throttling, QoS classes, LimitRange, ResourceQuota, node allocatable chain |
 | [coredns.md](./coredns.md) | Corefile plugins, ndots:5 problem, forwarding, caching, debugging, NodeLocal DNSCache |
 | [pod-lifecycle.md](./pod-lifecycle.md) | Startup sequence (sandbox→CNI→image→probes), admission controller chain, server-side apply, termination race |
+| [controller-pattern.md](./controller-pattern.md) | Informers, Reflector/Indexer local cache, SharedInformer, workqueue key-dedup, level-triggered vs edge-triggered reconcile, resync, leader election (Lease mechanics) |
+| [custom-resources-operators.md](./custom-resources-operators.md) | CRD registration, OpenAPI v3 schema validation, versions/conversion, status/scale subresources, aggregation layer, ownerReferences/GC, finalizers, operator examples |
+| [kubeadm-bootstrap.md](./kubeadm-bootstrap.md) | Self-hosted cluster bootstrap: PKI/CA generation, static pods, bootstrap tokens/TLS bootstrapping, stacked vs external etcd HA topology |
 | [kube-proxy-modes.md](./kube-proxy-modes.md) | iptables O(n) problem, IPVS O(1) + LB algorithms, Cilium/eBPF socket-level LB, comparison table |
 | [cross-node-networking.md](./cross-node-networking.md) | Same-node packet walk, VXLAN overlay, Calico BGP direct routing, AWS VPC CNI flat network, MTU |
 | [hpa-vpa-internals.md](./hpa-vpa-internals.md) | HPA control loop internals, VPA components, singleton VPA, HPA+VPA conflict |
@@ -79,7 +82,7 @@ graph TD
 | **etcd** | Raft-based distributed KV store. Stores all cluster state: nodes, pods, secrets, RBAC, endpoint slices. Keys are at `/registry/<type>/<namespace>/<name>`. |
 | **Scheduler** | Watches for pods with `nodeName=""`. Runs Filter → Score → Bind. Writes `spec.nodeName` back to the pod via API Server. |
 | **Controller Manager** | 50+ reconciliation loops in one binary. Deployment controller, ReplicaSet controller, Node controller, Job controller, EndpointSlice controller. |
-| **Cloud Controller Manager** | Cloud-specific logic decoupled from core K8s. Provisions cloud LBs for `LoadBalancer` services, manages VPC routes for pod CIDRs. |
+| **Cloud Controller Manager** | Out-of-tree binary that keeps cloud-specific logic out of core K8s. Provisions cloud LBs for `LoadBalancer` Services, manages routes for pod CIDRs. Details below. |
 
 **Node components and what they do:**
 
@@ -95,6 +98,49 @@ graph TD
   <p class="quiz-q">Does kube-proxy actually proxy (forward) Service traffic itself?</p>
   <button class="quiz-reveal">Reveal answer</button>
   <div class="quiz-a" hidden>No. Despite the name, kube-proxy does not sit in the data path forwarding packets. It only programs iptables/IPVS rules in the kernel — the kernel's own NAT logic does the actual traffic routing for Service ClusterIPs.</div>
+</div>
+
+### Cloud Controller Manager
+
+**Why it's a separate binary at all.** Originally, cloud-specific logic — AWS/GCP/Azure SDK calls for provisioning load balancers, managing routes, reading instance metadata — lived *inside* `kube-controller-manager` itself. These were the "in-tree" cloud providers. Every cloud's dependencies became part of core Kubernetes, so shipping a fix for one cloud's integration meant waiting on a full core Kubernetes release. The out-of-tree Cloud Controller Manager decouples this: each cloud ships its own separate binary implementing a stable `cloudprovider.Interface`, so core Kubernetes itself stays entirely cloud-agnostic and cloud vendors can iterate independently on their own release cadence.
+
+**What it actually contains.** Not every cloud provider implements all three:
+
+- **Node Controller** — labels new nodes with cloud-specific metadata (region, zone, instance type) and detects node deletion by checking with the cloud API whether the backing instance still actually exists, rather than just assuming it's gone because it became unreachable.
+- **Route Controller** — configures routes in the cloud network so pod CIDRs are reachable across nodes. This matters specifically for non-overlay CNI setups that rely on real cloud routing tables rather than an encapsulation layer.
+- **Service Controller** — watches Services of `type: LoadBalancer` and provisions/deprovisions the actual cloud load balancer (an ELB/ALB on AWS, a Google Cloud LB, an Azure LB) to match.
+
+[eks-architecture.md](./eks-architecture.md) shows the concrete AWS instantiation of this generic pattern — its `CCM["AWS Cloud Controller Manager: provisions ELBs and routes"]` box in the managed control plane is exactly this component, running as an AWS-operated binary you never touch directly.
+
+Walk the Service Controller's LoadBalancer provisioning flow one step at a time:
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. User creates a Service.</strong> A <code>type: LoadBalancer</code> Service is submitted to the API Server and written to etcd, same as any other object.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Service Controller notices.</strong> Running as part of the Cloud Controller Manager, it watches Services and picks up the new <code>type: LoadBalancer</code> object via its own watch — independent of the generic Controller Manager.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Cloud API call.</strong> The Service Controller calls the cloud provider's API to actually provision the load balancer — an ELB/ALB on AWS, a Google Cloud LB, an Azure LB.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Status closes the loop.</strong> Once the cloud confirms provisioning, the Service Controller writes the external IP/hostname into the Service's <code>status.loadBalancer.ingress</code> field — that's what shows up under <code>EXTERNAL-IP</code> in <code>kubectl get svc</code>.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Why was cloud-specific logic pulled out of kube-controller-manager into a separate Cloud Controller Manager binary instead of staying in-tree?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Two reasons, both about decoupling. First, release cadence: in-tree cloud code was bundled into core Kubernetes, so a fix for one cloud's integration had to wait on a full Kubernetes release — out-of-tree lets each cloud vendor ship its own binary on its own schedule. Second, separation of concerns: keeping cloud SDK calls out of core Kubernetes keeps Kubernetes itself entirely cloud-agnostic, with each cloud just implementing the same stable <code>cloudprovider.Interface</code>.</div>
 </div>
 
 ---

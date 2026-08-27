@@ -66,7 +66,7 @@ graph TD
 
 | File | Topics |
 |------|--------|
-| [gpu-scheduling.md](./gpu-scheduling.md) | NVIDIA Device Plugin, extended resources, MIG slicing, GPU Operator, taints/tolerations for GPU nodes |
+| [gpu-scheduling.md](./gpu-scheduling.md) | NVIDIA Device Plugin, extended resources, Dynamic Resource Allocation (ResourceClaim/DeviceClass), MIG slicing, GPU Operator, DCGM metrics, gang scheduling, taints/tolerations for GPU nodes |
 | [kuberay.md](./kuberay.md) | KubeRay operator, RayCluster CRD, head/worker nodes, autoscaling, Ray Serve, resource requests |
 | [model-serving.md](./model-serving.md) | KServe InferenceService, vLLM continuous batching, KV cache, canary rollouts, autoscaling with Knative |
 | [llmops.md](./llmops.md) | RAG architecture, vector DBs (pgvector, Milvus, Pinecone), LangSmith tracing, guardrails, cost optimization |

@@ -135,6 +135,9 @@ Contributing a new guide or retrofitting an old one? [`website/COMPONENTS.md`](.
 | [kubernetes/eks-architecture.md](./kubernetes/eks-architecture.md) | EKS managed control plane, VPC CNI, IRSA, node groups, Fargate | SDE-1/2 |
 | [kubernetes/coredns.md](./kubernetes/coredns.md) | Corefile plugins, ndots:5 problem + fix, forwarding, caching, dnsPolicy options, debugging, NodeLocal DNSCache | SDE-1/2 |
 | [kubernetes/pod-lifecycle.md](./kubernetes/pod-lifecycle.md) | Startup sequence (sandbox→CNI→image→probes→Endpoints), admission controller chain, server-side apply, termination race + preStop fix; why pod won't die: finalizers, PDB, PID 1, node partition, force delete, webhook blocking | SDE-2 |
+| [kubernetes/controller-pattern.md](./kubernetes/controller-pattern.md) | Informers, Reflector/Indexer local cache, SharedInformer, workqueue key-dedup, level-triggered vs edge-triggered reconcile, resync period, leader election (Lease mechanics, failover) | SDE-2 |
+| [kubernetes/custom-resources-operators.md](./kubernetes/custom-resources-operators.md) | CRD registration (apiextensions-apiserver), OpenAPI v3 schema validation, versions/conversion strategies, status/scale subresources, aggregation layer vs CRDs, ownerReferences/GC, finalizers, cert-manager/Prometheus Operator/ArgoCD examples | SDE-2 |
+| [kubernetes/kubeadm-bootstrap.md](./kubernetes/kubeadm-bootstrap.md) | Self-hosted cluster bootstrap: PKI/CA generation, static pods (chicken-and-egg problem, mirror pods), bootstrap tokens/TLS bootstrapping, stacked vs external etcd HA topology, contrast with managed control planes | SDE-2 |
 | [kubernetes/kube-proxy-modes.md](./kubernetes/kube-proxy-modes.md) | iptables O(n) + conntrack, IPVS O(1) + LB algorithms, Cilium/eBPF socket-level LB (no DNAT), comparison | SDE-2 |
 | [kubernetes/cross-node-networking.md](./kubernetes/cross-node-networking.md) | Same-node veth/bridge, VXLAN overlay, Calico BGP direct routing, AWS VPC CNI flat network, MTU table | SDE-2 |
 | [kubernetes/hpa-vpa-internals.md](./kubernetes/hpa-vpa-internals.md) | HPA internals every stage, VPA components, singleton VPA, HPA+VPA conflict | SDE-1/2 |
@@ -142,7 +145,7 @@ Contributing a new guide or retrofitting an old one? [`website/COMPONENTS.md`](.
 | [kubernetes/policy-security.md](./kubernetes/policy-security.md) | OPA/Gatekeeper, Kyverno (validate/mutate/generate), multi-tenancy, ResourceQuota, NetworkPolicy isolation, PSA, seccomp, AppArmor | SDE-2 |
 | [kubernetes/node-shutdown.md](./kubernetes/node-shutdown.md) | Graceful shutdown (systemd inhibitor), pod eviction ordering, node drain, non-graceful shutdown + out-of-service taint, lifecycle taints | SDE-2 |
 
-**Read order:** kubectl-cheatsheet → README → workloads → resource-limits → networking → coredns → storage → rbac → autoscaling → helm → eks-architecture → pod-lifecycle → kube-proxy-modes → cross-node-networking → node-shutdown
+**Read order:** kubectl-cheatsheet → README → workloads → resource-limits → networking → coredns → storage → rbac → autoscaling → helm → eks-architecture → pod-lifecycle → controller-pattern → custom-resources-operators → kubeadm-bootstrap → kube-proxy-modes → cross-node-networking → node-shutdown
 
 ---
 
@@ -296,7 +299,7 @@ The natural extension of K8s/Linux expertise into AI/ML platform engineering.
 | File | Topics | Level |
 |------|--------|-------|
 | [ai-infra/README.md](./ai-infra/README.md) | Index, learning path (Phase 1-3), AI vs standard K8s workload differences | SDE-2 |
-| [ai-infra/gpu-scheduling.md](./ai-infra/gpu-scheduling.md) | NVIDIA Device Plugin, extended resources, MIG slicing, GPU Operator, DCGM metrics, gang scheduling | SDE-2 |
+| [ai-infra/gpu-scheduling.md](./ai-infra/gpu-scheduling.md) | NVIDIA Device Plugin, extended resources, Dynamic Resource Allocation (ResourceClaim/DeviceClass), MIG slicing, GPU Operator, DCGM metrics, gang scheduling, taints/tolerations for GPU nodes | SDE-2 |
 | [ai-infra/kuberay.md](./ai-infra/kuberay.md) | KubeRay operator, RayCluster CRD, RayJob, RayService, autoscaling to zero, observability | SDE-2 |
 | [ai-infra/model-serving.md](./ai-infra/model-serving.md) | KServe InferenceService, vLLM continuous batching, PagedAttention, KV cache, canary rollouts, KEDA scaling | SDE-2 |
 | [ai-infra/llmops.md](./ai-infra/llmops.md) | RAG pipeline, pgvector/Milvus, LangSmith/OpenLLMetry tracing, NeMo guardrails, cost optimization, drift detection | SDE-2 |
