@@ -663,6 +663,114 @@ ORDER BY SUM_TIMER_WAIT DESC LIMIT 10;
 
 ---
 
+## Gap Locks and Next-Key Locking (REPEATABLE READ)
+
+InnoDB's default isolation level is REPEATABLE READ, and the SQL standard's own definition of that level only promises one thing: a row you already read won't appear to change if you read it again in the same transaction. It says nothing about rows that don't exist yet. Left at that, a range query like `SELECT * FROM t WHERE id BETWEEN 10 AND 20 FOR UPDATE` would only be able to lock the rows it actually found — id=10 and id=20 — and a plain row lock on those two rows does nothing to stop a completely different transaction from inserting a brand-new row, id=15, into the gap between them before this transaction commits. That's a **phantom read**: re-run the same range query and a row appears that wasn't there a moment ago, even though every row you originally locked is untouched. InnoDB closes that hole itself, beyond what the standard requires, using two lock types that don't exist in the row-lock model alone:
+
+- **Gap lock** — locks the empty space between two consecutive index records (or before the first record / after the last), with no lock on any actual row. Its only job is to block another transaction from inserting a new index entry into that space.
+- **Next-key lock** — a record lock on an existing index entry *combined with* a gap lock on the space immediately before it. This, not a plain record lock, is what a range scan under REPEATABLE READ actually takes by default — every index record InnoDB examines during the scan gets locked together with the gap leading up to it.
+
+```mermaid
+graph LR
+    classDef locked fill:#8e44ad,stroke:#6c3483,color:#fff,rx:6
+    classDef record fill:#e74c3c,stroke:#c0392b,color:#fff,rx:6
+    classDef blocked fill:#c0392b,stroke:#922b21,color:#fff,rx:6
+
+    subgraph NK1["Next-key lock on id=10"]
+        G0["gap: -inf .. 10"]:::locked
+        R10["record id=10"]:::record
+    end
+
+    subgraph NK2["Next-key lock on id=20"]
+        G1["gap: 10 .. 20"]:::locked
+        R20["record id=20"]:::record
+    end
+
+    G0 --> R10 --> G1 --> R20
+
+    INS["INSERT id=15"]:::blocked -.->|"falls inside the locked gap<br/>BLOCKED until T1 commits/rolls back"| G1
+```
+
+With rows already existing at id=10 and id=20, the range query locks two next-key locks: one on record 10 covering the gap before it, and one on record 20 covering the gap between 10 and 20. id=15 falls inside that second gap — nothing about it involves the *rows* 10 or 20 at all, but the gap they bracket is locked all the same.
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Setup.</strong> Table <code>t(id)</code> already has rows
+      id=10 and id=20. No transaction is open yet.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. T1 runs the range query under REPEATABLE READ.</strong>
+      <code>SELECT * FROM t WHERE id BETWEEN 10 AND 20 FOR UPDATE</code>
+      acquires a next-key lock on id=10 (record 10 + the gap before it) and a
+      next-key lock on id=20 (record 20 + the gap between 10 and 20).
+    </div>
+    <div class="stepper-panel">
+      <strong>3. T2 tries to insert into the gap.</strong>
+      <code>INSERT INTO t VALUES (15)</code> from a separate connection needs
+      to place a new index entry inside the (10, 20) gap — the exact space
+      T1's next-key lock on id=20 covers.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. T2 blocks.</strong> No row named "15" exists for T2 to
+      conflict with — this is a lock-wait purely on the gap, not on any
+      record. T2 sits waiting (and can eventually hit a lock-wait timeout) for
+      as long as T1 holds the transaction open.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. T1 commits (or rolls back).</strong> Its next-key locks
+      release, T2's blocked INSERT proceeds, and id=15 is now in the table —
+      but only after T1 was done, which is exactly the phantom-read
+      prevention working as intended.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="rr" class="active state-ok">REPEATABLE READ (InnoDB default)</button>
+    <button data-toggle-opt="rc" class="state-warn">READ COMMITTED</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="rr">
+    Range scans take next-key locks — record lock + gap lock combined. A
+    concurrent INSERT into a locked gap blocks even though it doesn't touch
+    any row the first transaction locked. This is InnoDB going beyond what
+    the SQL standard's REPEATABLE READ technically requires: phantom reads
+    are prevented as a side effect of how the locking is implemented, not
+    because the isolation level's definition demands it.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="rc">
+    Gap locks are turned off — InnoDB uses plain record locks only. A range
+    query only locks the rows it actually matched, so a concurrent INSERT
+    into the "gap" between matched rows never conflicts with anything and
+    goes through immediately. The tradeoff is explicit: phantom reads ARE
+    possible under READ COMMITTED, re-running the same range query inside the
+    same transaction can return a row that wasn't there the first time.
+  </div>
+</div>
+
+This is precisely why gap-lock blocking catches developers off guard when they're used to another database's READ COMMITTED-style semantics (or MySQL's own READ COMMITTED): an INSERT that looks completely unrelated to a concurrent `SELECT ... FOR UPDATE` — different id, no row in common — can still sit in a lock wait, and `SHOW ENGINE INNODB STATUS\G` will show it waiting on a gap, not a row. That's a common, confusing source of production lock-wait timeouts that look like they "shouldn't" be possible.
+
+<div class="quiz-card">
+  <p class="quiz-q">Why does a plain row lock on the existing matching rows (id=10 and id=20) fail to prevent a new row, id=15, from being inserted between them?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>A row lock can only lock a row that already exists — there's no row object for id=15 to attach a lock to before it's inserted, so a plain record lock on 10 and 20 leaves the space between them completely unprotected. That's exactly the gap a next-key lock's gap-lock component is there to close, by locking the empty space itself rather than any row in it.</div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A developer used to READ COMMITTED semantics is confused: their concurrent INSERT of a brand-new row doesn't touch any row locked by another transaction's SELECT ... FOR UPDATE, yet it still blocks. Why?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Because under REPEATABLE READ (InnoDB's default), that SELECT ... FOR UPDATE took next-key locks, not plain record locks — the gap-lock half of a next-key lock blocks any INSERT landing in that gap regardless of whether the new row's id matches anything already locked. Under READ COMMITTED there are no gap locks at all, only record locks, so the same INSERT would go through immediately — which is exactly why this blocking feels surprising to someone reasoning from READ COMMITTED-style rules.</div>
+</div>
+
+---
+
 ## Deadlock Analysis
 
 ```mermaid

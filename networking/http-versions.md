@@ -233,7 +233,7 @@ graph LR
       <strong>Binary framing over a single TCP connection.</strong> Requests and responses are split into <code>HEADERS</code>/<code>DATA</code> frames, each tagged with a stream ID, and multiplexed onto <em>one</em> TCP connection instead of six. HPACK header compression cuts repeated header bytes across requests, and the server can proactively push resources. It still rides on top of TCP, though — so a single lost packet stalls every multiplexed stream until it's retransmitted, because TCP still enforces in-order delivery for the whole connection.
     </div>
     <div class="tab-panel" data-tab-panel="http3">
-      <strong>QUIC over UDP instead of TCP.</strong> Each stream gets independent, in-order delivery inside QUIC, so a lost packet only stalls the one stream it belongs to — the TCP-level head-of-line blocking that HTTP/2 still has is gone. QUIC also folds the transport and TLS handshakes together for <strong>0-RTT resumption</strong> on reconnect, and supports <strong>connection migration</strong> — a client can switch networks (Wi-Fi → cellular) mid-connection without dropping it, since the connection is identified by a connection ID rather than an IP/port tuple.
+      <strong>QUIC over UDP instead of TCP.</strong> Each stream gets independent, in-order delivery inside QUIC, so a lost packet only stalls the one stream it belongs to — the TCP-level head-of-line blocking that HTTP/2 still has is gone. QUIC also folds the transport and TLS handshakes together for <strong>0-RTT resumption</strong> on reconnect, and supports <strong>connection migration</strong> — a client can switch networks (Wi-Fi → cellular) mid-connection without dropping it, since the connection is identified by a connection ID rather than an IP/port tuple. Don't read "QUIC over UDP" as "HTTP/2 with a different transport bolted on," though — QUIC is a genuinely separate transport protocol with its own congestion control and loss recovery, standardized independently of HTTP itself. See the wire-level deep dive below for why that distinction matters.
     </div>
   </div>
 </div>
@@ -345,6 +345,51 @@ Each HTTP/2 frame has:
   <button class="quiz-reveal">Reveal answer</button>
   <div class="quiz-a" hidden>
     The client. Stream IDs are split by parity so both sides can open new streams without coordinating on the next free number: client-initiated streams get odd IDs, server-initiated streams (like a server push) get even ones.
+  </div>
+</div>
+
+### QUIC / HTTP-3: Wire-Level Depth
+
+The tab above already says QUIC isn't "HTTP/2 semantics moved onto UDP." Here's what that actually means at the wire level.
+
+**QUIC is a separate transport protocol, not an HTTP trick.** UDP itself gives an application nothing beyond "here are some packets, maybe" — no ordering guarantee, no retransmission, no congestion control. TCP built all three of those in. QUIC, running on top of bare UDP, has to reimplement all three itself: it has its own reliability and ordering scheme and its own independent congestion control and loss-recovery algorithm, standardized in its own RFC and unrelated to TCP's (CUBIC/BBR/etc). That's the tradeoff — QUIC pays the cost of rebuilding what TCP gave for free, and in exchange gets to design that reliability layer without inheriting TCP's transport-level head-of-line blocking.
+
+**The TLS handshake and the transport handshake are the same handshake.** The HTTPS section above frames TLS as something layered *on top of* an already-established TCP connection — first the TCP handshake finishes, then a separate TLS handshake runs on that connection. QUIC breaks that mental model on purpose: TLS 1.3 is integrated directly into QUIC's own transport handshake, so the cryptographic handshake and the connection-establishment handshake are literally one exchange, not two sequential ones. That's the entire reason QUIC gets 1-RTT connection establishment (0-RTT for a resumed connection) where TCP+TLS 1.3 needs 2 RTTs — one for TCP's SYN/SYN-ACK/ACK, then a separate one for TLS's ClientHello/ServerHello+Finished on top of it:
+
+<div class="toggle-switch">
+  <div class="toggle-buttons">
+    <button data-toggle-opt="tcptls" class="active state-warn">TCP + TLS 1.3 (2 RTT)</button>
+    <button data-toggle-opt="quic1" class="state-ok">QUIC, fresh (1 RTT)</button>
+    <button data-toggle-opt="quic0" class="state-ok">QUIC, resumed (0 RTT)</button>
+  </div>
+  <div class="toggle-panel active" data-toggle-panel="tcptls">
+    Two handshakes run back to back on two different layers. TCP's SYN/SYN-ACK/ACK (1 RTT) carries zero cryptographic material — it just establishes an ordered byte stream. Only once that's done can TLS 1.3's ClientHello/ServerHello+Finished (1 RTT) run <em>on top of</em> it. 2 RTTs total before the first HTTP byte.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="quic1">
+    There's no "connection first, then encrypt" step to pay for twice. The client's very first UDP packet carries both QUIC's transport parameters and a TLS 1.3 ClientHello with key_share together; the server's reply carries both the transport acknowledgment and ServerHello/Finished together. 1 RTT total, because it's one handshake doing both jobs at once, not two stacked ones.
+  </div>
+  <div class="toggle-panel" data-toggle-panel="quic0">
+    Reconnecting to a server the client already holds a valid session ticket for, the client sends transport parameters <em>and</em> actual application data in that first UDP packet — the server doesn't have to reply before real bytes start moving. 0 RTT, at the same replay-risk tradeoff TLS 1.3's 0-RTT resumption already carries elsewhere in this file.
+  </div>
+</div>
+
+**Streams are independent at the transport layer itself, not just the application layer.** HTTP/2 multiplexes streams too — but it hands those multiplexed frames to TCP, which only understands one ordered byte stream for the whole connection, so a single lost segment stalls every stream behind it (the TCP-level HOL blocking covered above). QUIC moves stream multiplexing *into the transport protocol*: each QUIC stream carries its own delivery and retransmission state, so a packet loss affecting one stream's data only stalls that stream — the others keep delivering in order, unaffected. Same underlying goal as HTTP/2's streams, but fixed one layer further down, which is why it actually closes the gap HTTP/2 couldn't.
+
+**A QUIC connection is identified by a Connection ID, not the traditional 4-tuple.** A TCP connection's identity *is* its (source IP, source port, destination IP, destination port) 4-tuple — change any one of those four values and it is, by definition, a different connection; there's no mechanism for reattaching a live TCP connection to a new 4-tuple. QUIC instead negotiates an explicit Connection ID during the handshake, independent of the underlying IP and port. A phone walking off WiFi onto cellular gets a new source IP the instant it switches — a TCP connection breaks right there and needs a fresh handshake, but a QUIC connection just keeps sending packets tagged with the same Connection ID over the new path, and the server matches them straight back to the same live connection state. That's connection migration.
+
+<div class="quiz-card">
+  <p class="quiz-q">Why can a QUIC connection survive a client's IP address changing (WiFi → cellular) the way a TCP connection never can?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    A TCP connection's identity is literally its 4-tuple (source IP, source port, destination IP, destination port) — change the source IP and it's, by definition, a different connection, with no mechanism to reattach. QUIC identifies a connection by a Connection ID that's independent of the underlying IP and port, so packets arriving from a new IP but carrying the same Connection ID are recognized as the same still-live connection.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">TLS 1.3 alone is already a 1-RTT handshake. Why does QUIC (also 1-RTT for a fresh connection) still save a full round trip over TCP + TLS 1.3?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    Because TCP + TLS 1.3 runs two 1-RTT handshakes sequentially — TCP's SYN/SYN-ACK/ACK first, then TLS's ClientHello/ServerHello+Finished on top of the now-established connection — for 2 RTTs total before HTTP data can move. QUIC's transport handshake and its TLS 1.3 handshake are the same handshake: connection-establishment parameters and the TLS ClientHello travel together in the same first packet, and the equivalent server reply comes back together too, so the two 1-RTT costs collapse into one instead of stacking.
   </div>
 </div>
 
@@ -463,6 +508,52 @@ graph LR
   </div>
   <div class="toggle-panel" data-toggle-panel="504">
     The upstream <strong>timed out</strong> — it's alive and accepted the connection, it's just too slow to respond in time.
+  </div>
+</div>
+
+### WebSocket: The Upgrade Handshake and Frame Format
+
+`101 Switching Protocols` above is the trigger for WebSocket — it's how a connection that starts as ordinary HTTP ends up carrying something that isn't HTTP at all.
+
+**The Upgrade handshake.** A WebSocket connection starts as a completely normal HTTP/1.1 `GET` request, carrying three extra headers: `Upgrade: websocket`, `Connection: Upgrade`, and a client-generated `Sec-WebSocket-Key`. If the server supports the upgrade, it replies `101 Switching Protocols` with its own `Upgrade`/`Connection` headers and a `Sec-WebSocket-Accept` value computed from the client's key via a fixed algorithm/GUID (so the server proves it actually understood the request, not just echoed it). From that `101` response onward, the underlying TCP connection stops being HTTP entirely — no more request lines, no more headers-per-message — it's now a raw stream of WebSocket frames in both directions:
+
+```mermaid
+sequenceDiagram
+    participant C as Client
+    participant S as Server
+
+    rect rgb(255, 240, 200)
+        Note over C,S: Handshake — still plain HTTP/1.1
+        C->>S: GET /chat HTTP/1.1, Upgrade: websocket, Connection: Upgrade, Sec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==
+        S-->>C: 101 Switching Protocols, Upgrade: websocket, Connection: Upgrade, Sec-WebSocket-Accept: s3pPLMBiTxaQ9kYGzzhZRbK+xOo=
+    end
+
+    rect rgb(220, 255, 220)
+        Note over C,S: From here on this is not HTTP anymore - raw WebSocket frames on the same TCP connection
+        C->>S: FRAME opcode=text, MASKED, payload="hello"
+        S-->>C: FRAME opcode=text, unmasked, payload="hi back"
+    end
+```
+
+**Frame format basics.** Every WebSocket frame carries an **opcode** identifying what kind of frame it is (text, binary, close, ping, pong, or continuation for a fragmented message), a **payload-length** field using a variable-length encoding — 7 bits inline for short payloads, with 16-bit or 64-bit extended-length fields kicking in for larger ones — and a **MASK bit**. That MASK bit is mandatory for every client-to-server frame: the client must generate a random 32-bit masking key and XOR it against the entire payload before sending, and the server reverses the same XOR to read it. Server-to-client frames are never masked. This isn't symmetric by accident — masking exists specifically to stop cache-poisoning attacks against naive proxies that might otherwise misinterpret unmasked client bytes as plain, cacheable HTTP traffic sitting on the wire.
+
+**Ping/pong keepalive.** Either side can send a ping control frame at any point; the receiver is required to answer with a pong. This is the mechanism a WebSocket connection uses both to detect a dead peer (no pong back means the other end is gone) and to keep an otherwise-idle connection alive through any piece of infrastructure — proxy, NAT gateway, load balancer — that would silently time out a connection with no bytes flowing across it.
+
+That last point is exactly the failure mode covered in [load-balancers.md](./load-balancers.md)'s Common Issues section: an LB's idle timeout (ALB defaults to 60s) doesn't know or care that a WebSocket connection is intentionally quiet — no bytes flowing for that long looks identical to a dead connection, so the LB kills it. Neither the client nor the server gets a WebSocket close frame or any application-level error; the TCP connection is simply gone. The fix is one of two things: run an application-level ping interval shorter than the LB's idle timeout so bytes are always flowing before its clock runs out, or configure the LB's own idle timeout higher specifically for WebSocket-upgraded connections.
+
+<div class="quiz-card">
+  <p class="quiz-q">Why must client-to-server WebSocket frames be masked, but server-to-client frames never are?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    Masking protects against cache-poisoning attacks against naive proxies that might otherwise misinterpret unmasked client data as plain, cacheable HTTP traffic. The threat model is asymmetric — a malicious client is what's being defended against here, not a malicious server — so only the client's outgoing frames need the random 32-bit masking key XORed against the payload.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">An LB's idle timeout kills a quiet WebSocket connection. What does that actually look like from the client's side?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    A connection reset, with no application-level error at all. The LB severed the underlying TCP connection out from under both ends, so there's no WebSocket close frame and nothing for an app-level handler to catch predictively — the connection just vanishes.
   </div>
 </div>
 

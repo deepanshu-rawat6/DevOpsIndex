@@ -104,6 +104,40 @@ graph TD
 
 ---
 
+### Why Consensus Gives You CP
+
+The table above lists etcd's consistency as "Linearizable (Raft)" — but *why*
+does a Raft- or Paxos-based consensus protocol earn you the C in CP, rather
+than just happening to be strong most of the time? The mechanism is quorum
+writes. Every write has to be replicated to and acknowledged by a **majority**
+of nodes before the leader commits it and answers the client — that's exactly
+the same W+R>N overlap guarantee from the quorum math in Section 8, with W set
+to a majority and every read served by (or forwarded to) the current leader.
+
+That single rule is what produces both halves of CP simultaneously. Consistency
+falls out because any future leader must also win a majority vote, and a
+majority-vote quorum always overlaps with any majority-write quorum in at least
+one node — so a new leader can never be elected without seeing every previously
+committed write. Availability loss on a minority partition isn't a bug or a
+side effect — it's the *same* rule enforced from the other direction: a
+minority of nodes can never assemble a quorum for a write or an election, so
+it **cannot** make progress, full stop, not "make progress slowly." That
+inability to progress *is* the unavailability CAP describes.
+
+The actual leader-election state machine, term numbers, and log-replication
+protocol that implement this — plus a live, interactive Raft election
+simulator you can click through node failures on — live in
+[databases/replication.md § 9, Consensus Algorithms](../databases/replication.md#9-consensus-algorithms).
+This section only covers the CAP-level "why"; that one covers the "how."
+
+<div class="quiz-card">
+  <p class="quiz-q">A minority partition in a Raft/Paxos cluster can't get writes acknowledged. Is that because it's slow to reach quorum, or because it's structurally impossible?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Structurally impossible, not slow. A write (and a leader election) requires acknowledgment from a majority of the full cluster. A minority partition, by definition, can never contain a majority of nodes — no amount of waiting fixes that, because the nodes it needs simply aren't reachable. That guaranteed inability to assemble a quorum is exactly what CAP calls unavailability during a partition — the CP behavior is the quorum requirement, viewed from the losing side.</div>
+</div>
+
+---
+
 ## 4. Consistency Models Spectrum
 
 From strongest to weakest:

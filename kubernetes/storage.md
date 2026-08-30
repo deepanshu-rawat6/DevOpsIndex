@@ -405,6 +405,18 @@ gcloud container clusters create my-cluster \
   --database-encryption-key projects/PROJECT/locations/REGION/keyRings/RING/cryptoKeys/KEY
 ```
 
+**Envelope encryption, explained properly.** The "envelope encryption" mentioned above is a two-layer scheme, not a single key. A **Data Encryption Key (DEK)** encrypts the actual object data — a Secret's contents. A **Key Encryption Key (KEK)**, held entirely inside an external KMS (AWS KMS, GCP Cloud KMS, HashiCorp Vault), encrypts the DEK itself — never the data directly. kube-apiserver talks to the KMS through a **KMS provider plugin**, a gRPC interface between kube-apiserver and the KMS: to write a Secret, the apiserver has the plugin ask the KMS to encrypt the DEK, then stores that encrypted DEK next to the DEK-encrypted ciphertext in etcd; to read it back, the plugin asks the KMS to decrypt the DEK, and the apiserver decrypts the data locally with it. The DEK is cached in memory, so most requests don't pay a KMS round-trip on every read or write — but the KEK **never leaves the external KMS at all**.
+
+**The security property this buys you.** Compare this to the local-key `aescbc` provider shown above, where the key material lives directly in a file on the control-plane node (`secret: <base64-encoded-32-byte-key>`) — a single compromised machine is enough to decrypt every Secret in etcd. With envelope encryption backed by a real external KMS, if etcd itself is fully exfiltrated, the attacker ends up with only DEK-encrypted ciphertext. They still need access to the external KMS to decrypt anything — which is exactly the weakness envelope encryption with a real external KMS is designed to remove.
+
+**KMSv1 vs KMSv2.** KMSv1 called out to the external KMS on every single read/write — a real latency cost at scale. KMSv2 (GA in Kubernetes 1.29) fixed this with proper DEK caching/batching, while preserving the same core security property: the KEK never leaves the KMS.
+
+<div class="quiz-card">
+  <p class="quiz-q">If etcd is fully compromised but the external KMS is not, can the attacker read Secret contents protected by envelope encryption?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No &mdash; the attacker only gets DEK-encrypted ciphertext. Decrypting it requires the KEK, and the KEK never leaves the external KMS, so etcd compromise alone isn't enough. Contrast this with the local-key aescbc provider, where the key material sits in a file on the control-plane node and a single-machine compromise is sufficient to decrypt everything.</div>
+</div>
+
 ### Using Secrets Safely
 
 ```yaml

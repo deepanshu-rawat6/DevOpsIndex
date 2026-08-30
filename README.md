@@ -92,15 +92,17 @@ Contributing a new guide or retrofitting an old one? [`website/COMPONENTS.md`](.
 | [networking/osi-model.md](./networking/osi-model.md) | 7 OSI layers, full HTTPS request flow layer-by-layer (curl google.com), encapsulation, debug by layer | SDE-1 |
 | [networking/tcp-udp.md](./networking/tcp-udp.md) | TCP 3-way handshake, 4-way teardown, state machine, flow/congestion control, TIME_WAIT, UDP, when to use each | SDE-1/2 |
 | [networking/tls-encryption.md](./networking/tls-encryption.md) | Symmetric vs asymmetric, TLS 1.2 vs 1.3 handshake (RTT comparison), certificate chain, validation steps, openssl debugging | SDE-1/2 |
-| [networking/http-versions.md](./networking/http-versions.md) | HTTP/1.1 vs HTTP/2 vs HTTP/3, HOL blocking, binary framing, status codes, methods, caching (ETag), CORS | SDE-1 |
+| [networking/http-versions.md](./networking/http-versions.md) | HTTP/1.1 vs HTTP/2 vs HTTP/3, HOL blocking, binary framing, status codes, methods, caching (ETag), CORS, QUIC wire-level mechanics (independent congestion control, integrated TLS 1.3 handshake, connection migration), WebSocket upgrade handshake/frame format/masking | SDE-1/2 |
 | [networking/linux-networking.md](./networking/linux-networking.md) | Linux packet RX/TX path, netfilter hooks, conntrack, network namespaces, veth pairs, SO_REUSEPORT | SDE-2 |
 | [networking/grpc-graphql.md](./networking/grpc-graphql.md) | gRPC on HTTP/2, Protobuf encoding, 4 streaming modes, connection flow; GraphQL SDL, N+1 problem, DataLoader | SDE-1/2 |
 | [networking/grpc-deep-dive.md](./networking/grpc-deep-dive.md) | Protobuf wire format internals, all 4 streaming modes with full code, interceptors (auth/metrics), deadline propagation, health checking protocol, client-side load balancing, gRPC-Web, error code mapping | SDE-2 |
+| [networking/bgp-routing.md](./networking/bgp-routing.md) | Autonomous systems, path-vector routing, path selection (LOCAL_PREF/AS-PATH/MED), why anycast actually works, route leaks/hijacks, RPKI | SDE-2 |
 | [networking/load-balancers.md](./networking/load-balancers.md) | L4 vs L7, algorithms, health checks, sticky sessions, connection draining, AWS ALB/NLB, LCU/NLCU capacity units + pricing, GCP GLB, nginx, HAProxy | SDE-1/2 |
 | [networking/cdn.md](./networking/cdn.md) | CDN internals, edge PoPs, cache hierarchy, CloudFront vs Cloudflare vs GCP CDN, cache invalidation, TLS at edge | SDE-1/2 |
 | [networking/nslookup-vs-curl.md](./networking/nslookup-vs-curl.md) | DNS resolution vs HTTP request path, when nslookup succeeds but curl fails, layered debugging | SDE-1 |
+| [networking/zero-trust.md](./networking/zero-trust.md) | Zero Trust vs perimeter security, BeyondCorp model, GCP Identity-Aware Proxy (IAP), mTLS + Istio AuthorizationPolicy, PSC + IAP + mTLS composition | SDE-2 |
 
-**Read order:** osi-model → tcp-udp → tls-encryption → http-versions → grpc-graphql → grpc-deep-dive → load-balancers → cdn → nslookup-vs-curl
+**Read order:** osi-model → tcp-udp → tls-encryption → http-versions → grpc-graphql → grpc-deep-dive → linux-networking → bgp-routing → load-balancers → cdn → nslookup-vs-curl → zero-trust
 
 ---
 
@@ -380,8 +382,9 @@ Running stateful databases on Kubernetes — system design, replication, failove
 | [system-design/realtime-chat.md](./system-design/realtime-chat.md) | WebSocket/long-polling/SSE, connection registry + cross-server relay, delivery guarantees, presence, multi-device fan-out, MQTT (QoS, retained/LWT, MQTTS), WebRTC calling (STUN/TURN, mesh/SFU/MCU, SRTP/DTLS-SRTP, E2E vs transport encryption) | SDE-2 |
 | [system-design/distributed-id-generation.md](./system-design/distributed-id-generation.md) | UUID v4 vs ULID/UUIDv7, Twitter Snowflake bit layout, clock-drift handling, ticket servers, range/segment allocation | SDE-2 |
 | [system-design/geospatial-services.md](./system-design/geospatial-services.md) | Geohashing, quadtrees, S2 geometry, Redis GEO commands, real-time location write-amplification, ride-hailing driver-rider matching, KNN vs radius search | SDE-2 |
+| [system-design/probabilistic-data-structures.md](./system-design/probabilistic-data-structures.md) | Bloom filter recap, HyperLogLog cardinality estimation (live simulator), Count-Min Sketch frequency estimation | SDE-2 |
 
-**Read order:** scaling → cap-pacelc → rate-limiting → async-patterns → api-design → distributed-transactions → file-transfer-storage → realtime-chat → distributed-id-generation → geospatial-services
+**Read order:** scaling → cap-pacelc → rate-limiting → async-patterns → api-design → distributed-transactions → file-transfer-storage → realtime-chat → distributed-id-generation → geospatial-services → probabilistic-data-structures
 
 ---
 

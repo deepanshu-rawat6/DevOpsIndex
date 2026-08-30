@@ -256,16 +256,78 @@ Three rule types, one policy engine — flip between them to see what each one a
   <div class="quiz-a" hidden>It stays <code>managed-by: helm</code>. The <code>+</code> prefix means "add this field only if it's missing" &mdash; it never overwrites an existing value. Without the <code>+</code>, the mutate rule would unconditionally overwrite the label on every matching object.</div>
 </div>
 
-### OPA/Gatekeeper vs Kyverno
+## ValidatingAdmissionPolicy
 
-| | OPA/Gatekeeper | Kyverno |
-|--|---------------|---------|
-| Policy language | Rego (new language to learn) | YAML (K8s-native) |
-| Mutate support | Limited | Full |
-| Generate support | No | Yes |
-| Learning curve | High | Low |
-| Ecosystem | Large (OPA used beyond K8s) | K8s-only |
-| Best for | Complex policies, non-K8s too | K8s-only teams, quick adoption |
+Both OPA/Gatekeeper and Kyverno work by standing up a webhook server that the API server calls out to over the network on every matching request. ValidatingAdmissionPolicy (VAP), GA since K8s 1.30, skips that entirely: policies are written in **CEL (Common Expression Language)** — a simple, side-effect-free expression language — and evaluated directly by the API server against fields of the object under review. No external process, no webhook pod to run or scale, no network hop in the admission path.
+
+VAP follows the same separation-of-concerns pattern this repo already covers elsewhere — Role vs. RoleBinding, or PriorityLevelConfiguration vs. FlowSchema — split into two objects instead of one:
+
+- **`ValidatingAdmissionPolicy`** — the CEL rule itself, plus `matchConstraints` defining which resources, namespaces, and operations (CREATE, UPDATE, DELETE) it applies to.
+- **`ValidatingAdmissionPolicyBinding`** — binds a policy to specific resources, namespaces, or parameters, so the same policy definition can be reused across different scopes without rewriting the CEL expression each time.
+
+Inside a policy's `validations`, a CEL expression has access to:
+
+- **`object`** — the incoming resource, as it exists after any mutating webhooks have run.
+- **`oldObject`** — the resource's previous state, relevant only for UPDATE operations (null on CREATE).
+- **`request`** — admission request metadata, like the operation type and the calling user's info.
+
+```yaml
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicy
+metadata:
+  name: replica-limit
+spec:
+  failurePolicy: Fail
+  matchConstraints:
+    resourceRules:
+    - apiGroups: ["apps"]
+      apiVersions: ["v1"]
+      operations: ["CREATE", "UPDATE"]
+      resources: ["deployments"]
+  validations:
+  - expression: "object.spec.replicas <= 10"
+    message: "Deployments cannot request more than 10 replicas"
+---
+apiVersion: admissionregistration.k8s.io/v1
+kind: ValidatingAdmissionPolicyBinding
+metadata:
+  name: replica-limit-binding
+spec:
+  policyName: replica-limit
+  validationActions: ["Deny"]   # or "Warn", "Audit"
+  matchResources:
+    namespaceSelector:
+      matchLabels:
+        environment: production
+```
+
+This isn't a strict upgrade over OPA/Kyverno, though. CEL's tooling and ecosystem are considerably less mature than Rego's or Kyverno's native YAML — fewer libraries, less community policy content, thinner debugging support. VAP is also validating-only: there's no mutating equivalent in mainline, GA Kubernetes, so it can't inject defaults or rewrite fields the way a Kyverno mutate rule or an OPA mutating webhook can. In practice these approaches aren't mutually exclusive — a real cluster might lean on VAP for simple structural CEL rules (replica caps, required fields, image registry checks) precisely because it needs no extra infrastructure, while keeping Kyverno or OPA around for anything that needs to mutate objects or that's too complex to express cleanly as a CEL one-liner.
+
+<div class="quiz-card">
+  <p class="quiz-q">OPA/Gatekeeper and Kyverno both have a failure mode where "the webhook is down" can block or bypass admission depending on <code>failurePolicy</code>. Why doesn't ValidatingAdmissionPolicy have that same failure mode?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Because there's no webhook to be down. OPA and Kyverno both work via a ValidatingWebhookConfiguration that calls out over the network to a separate webhook pod — if that pod is unreachable, <code>failurePolicy</code> decides whether the request is denied or let through unchecked. A ValidatingAdmissionPolicy's CEL expression is evaluated in-process by the API server itself, against the object directly, with no separate process and no network call involved — so there's nothing external that can be "down."</div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Why does ValidatingAdmissionPolicy split into two objects — a Policy and a Binding — rather than one object that both defines the CEL rule and says what it applies to?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Same reasoning as Role/RoleBinding: the CEL rule (what the policy checks) is kept separate from where it's enforced (which resources, namespaces, or parameters it's bound to). That lets one <code>ValidatingAdmissionPolicy</code> definition — say, a replica-count check — be reused by multiple <code>ValidatingAdmissionPolicyBindings</code>, each scoping it to a different namespace or parameter set, instead of redefining the same CEL expression every time it needs to apply somewhere new.</div>
+</div>
+
+---
+
+### OPA/Gatekeeper vs Kyverno vs ValidatingAdmissionPolicy
+
+| | OPA/Gatekeeper | Kyverno | ValidatingAdmissionPolicy |
+|--|---------------|---------|---------------------------|
+| Policy language | Rego (new language to learn) | YAML (K8s-native) | CEL |
+| Mutate support | Limited | Full | No |
+| Generate support | No | Yes | No |
+| Learning curve | High | Low | Low-medium |
+| Ecosystem | Large (OPA used beyond K8s) | K8s-only | K8s-only, newer |
+| Requires a webhook server | Yes | Yes | No |
+| Best for | Complex policies, non-K8s too | K8s-only teams, quick adoption | Simple structural rules, no extra infra
 
 ---
 

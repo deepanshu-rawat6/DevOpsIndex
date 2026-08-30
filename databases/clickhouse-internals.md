@@ -312,6 +312,44 @@ The two index files do different jobs even though both sound like "an index on t
   <div class="quiz-a" hidden>minmax_event_date.idx works at the partition level — it stores the min/max of the partitioning column so the planner can skip whole partitions (e.g. whole months) without opening them at all. primary.idx works inside the partitions that survive that cut — it's a sparse index over the ORDER BY columns that lets a query skip individual granules within a part. Partition pruning is the coarse first cut; the primary index skip is the fine-grained second one.</div>
 </div>
 
+### Data-Skipping Indexes — Beyond the Automatic Ones
+
+`primary.idx` and `minmax_event_date.idx` are both automatic — every MergeTree table has them, whether you ask for them or not, and they only ever help a query that filters on the partition key or (a prefix of) the `ORDER BY` key. A query filtering on some *other* column gets none of that benefit: with no index to consult, ClickHouse has to open every granule in every part and check the condition row-range by row-range. That's the gap **data-skipping indexes** (also called secondary indexes) close — small, optional, per-granule summaries you explicitly declare on a non-key column so a query can rule out granules that provably can't match, without ClickHouse building anything as heavyweight as a B-tree over that column.
+
+```sql
+ALTER TABLE events ADD INDEX idx_action action TYPE set(100) GRANULARITY 4;
+ALTER TABLE events ADD INDEX idx_value value TYPE minmax GRANULARITY 4;
+ALTER TABLE events ADD INDEX idx_ua user_agent TYPE ngrambf_v1(3, 256, 2, 0) GRANULARITY 4;
+
+-- Existing parts aren't indexed retroactively — MATERIALIZE builds the index
+-- over data already on disk; new inserts get it automatically going forward.
+ALTER TABLE events MATERIALIZE INDEX idx_action;
+```
+
+| Index type | What it stores per granule | Best-fit column |
+|---|---|---|
+| `minmax` | Min and max value seen | Numeric/date columns correlated with insertion or sort order (near-monotonic) |
+| `set(N)` | Up to N distinct values seen | Low-cardinality columns (status codes, enum-like strings) |
+| `bloom_filter` | Probabilistic membership bitmap | Higher-cardinality columns doing equality/`IN` lookups — see [coding-practice/bloom-filter.md](../coding-practice/bloom-filter.md) for how the underlying structure and its false-positive-only guarantee work |
+| `ngrambf_v1` | Bloom filter over fixed-length n-grams | Substring/`LIKE '%...%'` search on text columns |
+| `tokenbf_v1` | Bloom filter over whitespace/punctuation-split tokens | Word-boundary search on log lines, free text |
+
+The mental model that matters more than memorizing the list: **a data-skipping index can only tell you which granules to SKIP, never where a matching row actually is.** A B-tree secondary index points you straight at a row. These don't — `minmax` says "this granule's range doesn't contain your value, skip it" (or "it might, go look"); `bloom_filter` says "this value is definitely not in this granule" (or "it might be, go look"). Either way, a granule that isn't ruled out still gets fully scanned and filtered the normal way. The entire value proposition is I/O reduction — fewer granules decompressed and checked — not point-lookup precision. A data-skipping index with weak selectivity for a given workload doesn't produce wrong results; it just fails to skip anything, and the query degrades to the same full scan it would've done with no index at all.
+
+`GRANULARITY` here means something more specific than `index_granularity`: it's how many consecutive index blocks (each already covering `index_granularity` rows) one skip-index entry summarizes. `GRANULARITY 4` on a `minmax` index means each stored min/max pair spans 4 granules' worth of rows, not 1. A smaller value gives finer-grained skipping (a query can rule out data in tighter chunks) at the cost of more index entries to store and check; a larger value shrinks the index but forces the query to pull in more rows around each match it can't rule out.
+
+<div class="quiz-card">
+  <p class="quiz-q">How is a data-skipping index fundamentally different from a B-tree secondary index?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>A B-tree secondary index points you straight at the matching row. A data-skipping index can't do that — it only tells you which granules to SKIP because they provably can't match. Any granule it can't rule out still gets fully scanned and filtered the normal way. The value it adds is reduced I/O from skipping granules, not point-lookup precision.</div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Why would a minmax index be nearly useless on a column whose values are in random/shuffled order, but very effective on a column correlated with insertion order?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>minmax only stores one min/max pair per granule, so it's only a tight, useful range when the underlying data is already somewhat sorted or clustered by that column. If values are randomly shuffled, almost every granule ends up containing both very low and very high values, so its min/max spans nearly the entire domain — a WHERE value almost never falls outside that range, so nothing gets skipped. A column correlated with insertion order (like a timestamp) naturally clusters similar values into the same granules, so each granule's min/max is a narrow range and most granules can be ruled out immediately.</div>
+</div>
+
 ---
 
 ## Columnar Storage — Why Queries Are Fast

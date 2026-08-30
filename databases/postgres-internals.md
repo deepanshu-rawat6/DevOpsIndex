@@ -674,6 +674,44 @@ VACUUM VERBOSE my_table;  -- shows what it freed
 
 ---
 
+## Isolation Levels and Serializable Snapshot Isolation (SSI)
+
+MVCC (above) is the *mechanism* — the xmin/xmax bookkeeping that lets each transaction resolve its own view of a row. Isolation level is the *policy* built on top of it: how much cross-transaction interference a transaction is allowed to see, and how much of that Postgres will actually let happen versus reject.
+
+Postgres implements all four SQL standard levels, but only three behaviors:
+
+- **READ UNCOMMITTED.** The SQL standard permits dirty reads at this level. Postgres doesn't have dirty reads at all, at any level — a reader's snapshot only ever resolves to a tuple whose creating transaction has already committed, so there's nothing for READ UNCOMMITTED to relax. Requesting it silently gets you READ COMMITTED instead. This is worth calling out explicitly because it surprises people coming from databases where READ UNCOMMITTED is a real, distinct, dangerous mode.
+- **READ COMMITTED (the default).** Each individual *statement* inside the transaction gets its own fresh snapshot, taken at the moment that statement starts — not one snapshot for the whole transaction. Two SELECTs in the same transaction can legitimately see different committed data if another transaction committed in between them.
+- **REPEATABLE READ.** The whole transaction gets one snapshot, taken at its first statement, and every subsequent statement reuses it. Because Postgres's snapshot isolation is inherently row-based rather than lock-based, this also happens to block phantom reads — stronger than the SQL standard actually requires at this level.
+- **SERIALIZABLE.** Everything REPEATABLE READ does, plus runtime detection of read/write dependency cycles between concurrent transactions that could not have arisen from *any* serial (one-at-a-time) execution order.
+
+**SSI — how SERIALIZABLE is actually implemented.** This is the detail that trips people up: Postgres's SERIALIZABLE is not lock-based serializability in the traditional sense (no 2-phase locking, nothing blocks on read/write conflicts as they happen). It's Serializable Snapshot Isolation — REPEATABLE READ's ordinary snapshot mechanism, with an added layer that watches for "dangerous structures": specific patterns of read-write dependencies between concurrent transactions that are the necessary signature of a non-serializable outcome. It tracks these with predicate locks (SIREAD locks) that, unlike a normal lock, never block anything by themselves — a SIREAD lock just records "this transaction's result depended on this data," and the dependency graph built from those records gets checked only when a transaction tries to commit.
+
+**What a SERIALIZABLE failure actually looks like.** Because the check happens at commit, not at the statement that created the conflicting dependency, the failure surfaces as a `40001` `serialization_failure` error returned from **COMMIT** — potentially on a transaction whose every individual statement executed and returned rows successfully. The application has to be prepared to catch that SQLSTATE and retry the *entire transaction* from its first statement. This isn't an edge case to shrug off — using SERIALIZABLE without a retry loop around it means occasional, load-dependent transaction failures in production that have nothing to do with a bug in the transaction itself.
+
+| Level | Dirty read | Non-repeatable read | Phantom read | Serialization anomaly |
+|-------|------------|----------------------|---------------|------------------------|
+| READ UNCOMMITTED (= READ COMMITTED in Postgres) | Not possible | Possible | Possible | Possible |
+| READ COMMITTED (default) | Not possible | Possible | Possible | Possible |
+| REPEATABLE READ | Not possible | Not possible | Not possible (Postgres's snapshot isolation prevents this beyond what the standard requires) | Possible |
+| SERIALIZABLE | Not possible | Not possible | Not possible | Not possible |
+
+Try it against the MVCC demo above: begin two overlapping transactions there, and picture SERIALIZABLE sitting on top of exactly that scenario. Nothing about which version each snapshot resolves to changes — what SSI adds is a dependency check at commit time that would refuse to let *both* transactions commit if doing so could never correspond to running them one after another in either order.
+
+<div class="quiz-card">
+  <p class="quiz-q">Why does Postgres treat READ UNCOMMITTED identically to READ COMMITTED instead of implementing a genuinely weaker level?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Because dirty reads never happen in Postgres's MVCC design regardless of the requested isolation level — a reader's snapshot only ever resolves to tuples from transactions that have already committed, so there's no uncommitted-write visibility for READ UNCOMMITTED to additionally permit. There's nothing weaker to fall back to, so Postgres just maps the request onto READ COMMITTED.</div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A SERIALIZABLE transaction's statements all execute fine, but the transaction fails with a 40001 error at COMMIT. Why does the failure surface there instead of at the specific statement that caused the conflict?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Because SSI's predicate-lock (SIREAD) checking is a commit-time check, not a per-statement one. SIREAD locks only record which data a transaction's reads depended on as it goes — they don't block anything in the moment. Only at COMMIT does Postgres have the full picture needed to tell whether a genuinely non-serializable dependency cycle formed among the concurrent transactions involved, so that's the only point where it can safely say "one of these can't be allowed to commit."</div>
+</div>
+
+---
+
 ## Replication — Sync vs Async in Detail
 
 ```mermaid
@@ -758,6 +796,7 @@ graph TD
     classDef btree fill:#3498db,stroke:#2471a3,color:#fff,rx:6
     classDef gin fill:#8e44ad,stroke:#6c3483,color:#fff,rx:6
     classDef brin fill:#16a085,stroke:#117a65,color:#fff,rx:6
+    classDef gist fill:#c0392b,stroke:#922b21,color:#fff,rx:6
 
     subgraph BTG["B-tree (default)"]
         B["Root node"]:::btree --> L["Leaf nodes<br/>sorted keys + heap pointers<br/>O(log n) lookup, range scans"]:::btree
@@ -768,6 +807,9 @@ graph TD
     subgraph BRING["BRIN — Block Range Index"]
         BR["Min/max per block range<br/>Tiny index, good for sequential data<br/>timestamps, auto-increment IDs"]:::brin
     end
+    subgraph GISTG["GiST — Generalized Search Tree (a framework, not one algorithm)"]
+        GS["Balanced tree over union/consistent/distance<br/>Used for: geometric types, tsvector, range overlap"]:::gist
+    end
 ```
 
 <div class="tab-group">
@@ -775,6 +817,7 @@ graph TD
     <button data-tab="btree" class="active">B-tree</button>
     <button data-tab="gin">GIN</button>
     <button data-tab="brin">BRIN</button>
+    <button data-tab="gist">GiST</button>
   </div>
   <div class="tab-panels">
     <div class="tab-panel active" data-tab-panel="btree">
@@ -785,6 +828,9 @@ graph TD
     </div>
     <div class="tab-panel" data-tab-panel="brin">
       <strong>Block Range Index — tiny, for naturally sorted data.</strong> Stores only a min/max per block range instead of an entry per row. Only effective when the column correlates with physical insertion order — timestamps and auto-incrementing IDs on an append-only table — because that correlation is what lets whole block ranges be skipped based on two numbers.
+    </div>
+    <div class="tab-panel" data-tab-panel="gist">
+      <strong>Not one index type — a framework for building one.</strong> GiST (Generalized Search Tree) is a generic balanced-tree structure for data types that have no natural linear ordering, unlike B-tree's strict total order (<code>&lt;</code>, <code>=</code>, <code>&gt;</code>). An extension author implements a handful of support functions — <code>union</code> (how to summarize a subtree's contents), <code>consistent</code> (could this subtree possibly contain what I'm looking for), <code>distance</code> (for nearest-neighbor queries) — and gets a working balanced index in return, without writing any tree-balancing logic themselves. That's also why it can index things a B-tree structurally can't: "does this subtree possibly overlap the range I'm searching for" is answerable even when there's no single correct way to sort ranges into one line. Real uses: the built-in geometric types (<code>point</code>, <code>box</code>, <code>polygon</code>), full-text search over <code>tsvector</code> (a GIN alternative, better suited to frequently-updated documents), and range types (<code>int4range</code>, <code>tstzrange</code>) for overlap queries like "find all bookings overlapping this date range." PostGIS layers its own GiST-based indexes on the same framework for spatial geometry/geography types — see <a href="../system-design/geospatial-services.md">system-design/geospatial-services.md</a> for the database-level indexing tradeoffs there.
     </div>
   </div>
 </div>
@@ -805,6 +851,10 @@ CREATE INDEX idx_posts_fts ON posts USING gin(to_tsvector('english', body));
 -- BRIN: large append-only tables (logs, time-series)
 CREATE INDEX idx_events_created ON events USING brin(created_at);
 
+-- GiST: range overlap ("find all bookings overlapping this date range")
+CREATE INDEX idx_bookings_period ON bookings USING gist(during);
+SELECT * FROM bookings WHERE during && tstzrange('2026-08-01', '2026-08-05');
+
 -- Check index usage
 SELECT indexrelname, idx_scan, idx_tup_read
 FROM pg_stat_user_indexes
@@ -815,6 +865,12 @@ WHERE idx_scan = 0;  -- unused indexes
   <p class="quiz-q">You need to query "find all posts containing the word kubernetes." B-tree, GIN, or BRIN — and why?</p>
   <button class="quiz-reveal">Reveal answer</button>
   <div class="quiz-a" hidden>GIN. It's built specifically for full-text search (plus jsonb and arrays) because it inverts the index to map each token to the rows containing it — exactly what "contains this word" needs. A B-tree only helps with equality/range on the column as a whole, and BRIN is for naturally sorted large tables, not text search.</div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Why can't a plain B-tree index efficiently answer "find all date ranges overlapping this one" the way GiST can?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>A B-tree needs a strict total order — every key has to sort into one line so the tree knows which branch to descend into. "Overlap" has no such consistent linear ordering: there's no single correct way to sort ranges such that adjacent-in-sort-order always means overlapping. GiST doesn't need a total order at all — its <code>consistent</code> function only has to answer "could this subtree possibly contain a match," which is answerable for overlap even without ever sorting the ranges into one sequence.</div>
 </div>
 
 ---

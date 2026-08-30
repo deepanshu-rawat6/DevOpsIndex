@@ -14,7 +14,7 @@ const SECTIONS = [
   },
   {
     slug: 'networking', title: 'Networking', order: 2,
-    readOrder: ['README', 'osi-model', 'tcp-udp', 'tls-encryption', 'http-versions', 'linux-networking', 'grpc-graphql', 'load-balancers', 'cdn', 'nslookup-vs-curl'],
+    readOrder: ['README', 'osi-model', 'tcp-udp', 'tls-encryption', 'http-versions', 'grpc-graphql', 'grpc-deep-dive', 'linux-networking', 'bgp-routing', 'load-balancers', 'cdn', 'nslookup-vs-curl', 'zero-trust'],
   },
   {
     slug: 'docker', title: 'Docker', order: 3,
@@ -74,7 +74,7 @@ const SECTIONS = [
   },
   {
     slug: 'system-design', title: 'System Design', order: 17,
-    readOrder: ['README', 'scaling', 'cap-pacelc', 'rate-limiting', 'async-patterns', 'api-design', 'distributed-transactions', 'file-transfer-storage', 'realtime-chat', 'distributed-id-generation', 'geospatial-services'],
+    readOrder: ['README', 'scaling', 'cap-pacelc', 'rate-limiting', 'async-patterns', 'api-design', 'distributed-transactions', 'file-transfer-storage', 'realtime-chat', 'distributed-id-generation', 'geospatial-services', 'probabilistic-data-structures'],
   },
   {
     slug: 'sre', title: 'SRE & Debugging', order: 18,

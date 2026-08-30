@@ -472,6 +472,62 @@ Same idea as the diagram above, but live: one partition, 1 leader + 2 followers.
 
 ---
 
+## Cluster Metadata and the Controller: KRaft (KIP-500)
+
+Everything above this point — ISR membership, which broker leads which partition, who's allowed to do what — is a decision someone has to track cluster-wide, not per-partition. That someone is the **controller**: exactly one broker (pre-KRaft) or a small elected leader (KRaft) responsible for topic/partition metadata, leader assignment, broker liveness, and ACLs. If it goes away, the remaining nodes elect a new one and the cluster keeps serving data in the meantime. The interesting question this section answers: where does that metadata actually *live*, and what does "elect a new one" actually *mean* under the hood — because as of Kafka 3.x (production-ready) and 4.0 (default, ZooKeeper support removed entirely), the answer changed completely.
+
+**Why ZooKeeper got removed.** For most of Kafka's life, none of that metadata lived inside Kafka at all — it lived in Apache ZooKeeper, a general-purpose coordination service Kafka delegated to. That meant every Kafka deployment was actually *two* distributed systems stacked on top of each other: the Kafka cluster you wanted, and a ZooKeeper ensemble underneath it whose sole job was being Kafka's filing cabinet for topics, partitions, ACLs, and controller election. ZooKeeper brought its own cluster to provision and patch, its own quorum-sizing rules, its own session-timeout tuning, and its own failure modes — a lost ZK quorum could stall Kafka's entire control plane (no new leader elections, no topic changes) even while every broker was up and healthy serving reads and writes. Running Kafka well meant a team had to also run ZooKeeper well, as a second, unrelated skill set. KIP-500 removed that second system.
+
+**KRaft's approach.** Instead of delegating metadata to an outside system, Kafka now stores it the same way it stores everything else it's good at storing: as a log. Every metadata change — a topic created, a partition's leader changing, an ACL granted — is appended as a record to an internal topic, `__cluster_metadata`, and that topic is replicated using an actual Raft implementation among a small set of nodes running the **controller** role. Which physical nodes play that role is a config choice, not a fixed topology — the `process.roles` setting on each node is `broker`, `controller`, or both:
+
+```mermaid
+graph TD
+    subgraph Small["Small cluster -- roles combined"]
+        S1["Node 1<br/>process.roles=broker,controller"]
+        S2["Node 2<br/>process.roles=broker,controller"]
+        S3["Node 3<br/>process.roles=broker,controller"]
+        S1 --> S2
+        S2 --> S3
+        S3 --> S1
+    end
+
+    subgraph Large["Larger cluster -- roles split"]
+        C1["Controller 1 -- current Raft leader<br/>process.roles=controller"]
+        C2["Controller 2<br/>process.roles=controller"]
+        C3["Controller 3<br/>process.roles=controller"]
+        B1["Broker 1<br/>process.roles=broker"]
+        B2["Broker N<br/>process.roles=broker"]
+        C1 --> C2
+        C1 --> C3
+        B1 -->|"fetch __cluster_metadata"| C1
+        B2 -->|"fetch __cluster_metadata"| C1
+    end
+```
+
+Small clusters typically combine both roles on the same handful of nodes (cheaper, fewer processes to run). Larger clusters split them — a dedicated 3- or 5-node controller quorum handling only metadata, separate from the brokers serving produce/consume traffic, so metadata load never competes with data load on the same process.
+
+Leader election for that metadata quorum is no longer "ZooKeeper handles it as a black box" — it's genuine Raft: terms, log offsets, majority votes, the same mechanics already covered in [replication.md § 9, Consensus Algorithms](./replication.md#9-consensus-algorithms) (including a live leader-election demo). That's the identical algorithm, not a loose analogy — it's just electing a leader for the `__cluster_metadata` log instead of a general-purpose replicated log, so there's no need to re-derive term numbers or vote-counting here.
+
+**What's operationally different for a cluster admin:**
+
+- **One system to run and monitor, not two.** No separate ZooKeeper ensemble to size, patch, upgrade, and page on — controller state is just another Kafka log, observed with the same tooling as everything else in the cluster.
+- **Faster controller failover.** ZooKeeper-based failover was bottlenecked by ZK session timeouts before a dead controller's session even expired and a new election could start. Raft's own election timeout drives failover directly instead — no second system's timeout sitting in the critical path.
+- **Metadata durability rides on Kafka's own replication.** `__cluster_metadata` is replicated and made durable the same way any other Kafka log is, instead of depending on a separate consensus implementation (ZooKeeper's) with its own semantics and its own bugs to reason about.
+
+<div class="quiz-card">
+  <p class="quiz-q">Why is running a KRaft-based Kafka cluster operationally simpler than the old ZooKeeper-based one?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Because it collapses two distributed systems into one. The ZooKeeper-based architecture meant running an entire second cluster — its own provisioning, patching, quorum sizing, and failure modes — just to store Kafka's metadata. KRaft stores that same metadata as a Kafka log (<code>__cluster_metadata</code>) replicated among controller nodes that are part of the Kafka cluster itself, so there's one system to run and monitor instead of two.</div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Under the old architecture, ZooKeeper handled controller election as a black box. Under KRaft, did the election mechanism itself change, or did metadata just move to a new storage location with the same election logic underneath?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The mechanism itself changed, not just the storage location. Controller election under KRaft is genuine Raft -- terms, log offsets, majority votes over the <code>__cluster_metadata</code> log -- the same algorithm covered in replication.md's Consensus Algorithms section, not a Kafka-specific black box ZooKeeper ran internally. Metadata moving into a Kafka-style log is one change; electing that log's leader with real Raft semantics is a separate, more fundamental one.</div>
+</div>
+
+---
+
 ## Log Compaction
 
 ```mermaid

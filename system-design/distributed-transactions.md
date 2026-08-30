@@ -115,7 +115,131 @@ This is the **uncertainty window** — participants hold locks on rows they've p
 
 ---
 
-## 3. 2PC Sequence Diagrams
+## 3. Spanner & TrueTime — Solving 2PC's Blocking Problem With Time
+
+2PC's failure mode above isn't a bug in some particular implementation — it's
+structural. The moment the coordinator's decision becomes the single source
+of truth, every participant is one crashed coordinator away from holding
+locks indefinitely. Google Spanner is the system that solved this exact
+problem in production, across datacenters, using a fundamentally different
+approach: instead of a locking protocol that blocks other transactions while
+waiting for a coordinator's decision, it uses **time itself** as the
+synchronization mechanism.
+
+### The core insight: an honest clock
+
+A locking protocol like 2PC blocks because a participant genuinely cannot
+know the outcome without asking someone else. Spanner sidesteps that by
+giving every node a way to reason about "has enough real time passed" without
+asking anyone. That only works because Google built **TrueTime** — an API
+that doesn't return a single timestamp the way `System.currentTimeMillis()`
+does. It returns a **bounded uncertainty interval**: `TT.now()` gives back
+`[earliest, latest]`, an honest admission that the true current time lies
+somewhere in that window, not a claimed exact instant.
+
+That interval stays narrow (typically a few milliseconds, not the unbounded
+skew a normal NTP-synced server can silently accumulate) because Google backs
+it with GPS receivers and atomic clocks in every datacenter, cross-checked
+against each other continuously. The interval isn't a rounding convenience —
+it's the mechanism the entire protocol depends on being trustworthy.
+
+### Commit-wait: turning "probably enough time" into "certainly enough time"
+
+When Spanner commits a transaction, it assigns it a timestamp `s`. But
+picking `s` isn't the hard part — making sure no other transaction can
+observe the effects of this one before real time has actually reached `s` is.
+Spanner enforces this with **commit-wait**: before releasing locks or making
+the commit visible, it waits out the remaining uncertainty —
+`TT.now().latest - s` — so that by the time anything becomes visible, every
+node in the system is guaranteed real time has passed `s`, not just likely
+passed it.
+
+That's the whole trick. A single imprecise clock reading "it's probably time"
+isn't good enough to order transactions across datacenters. A bounded,
+honest interval that the system can *wait out* is — because waiting out a
+known bound converts uncertainty into certainty. This is what makes Spanner
+**externally consistent** (linearizable across the entire system, not just
+within one replica set): if transaction A commits before transaction B
+starts anywhere in the world, every observer sees A's effects before B's.
+
+### Why this is a genuinely different tradeoff than 2PC
+
+2PC blocks on a **coordinator decision** — a logical, communication-bound
+dependency. A participant can be stuck for minutes if the coordinator is slow
+to restart, because there's no bound on how long a network partition or a
+crashed process takes to resolve. Spanner "blocks" too, briefly — but only on
+**TrueTime's own uncertainty bound**, a physical, hardware-bounded wait
+that's typically single-digit milliseconds. It never holds a lock across a
+network round-trip to another node the way 2PC's prepare and commit phases
+do; it holds a lock only across a short, fixed wait against its own local
+clock reading. Short and bounded beats short and blocking-on-someone-else,
+which is exactly the property 2PC lacks.
+
+### The dependency this creates
+
+This approach only works because Google controls the hardware in every
+datacenter — GPS antennas and atomic clock references are a physical
+infrastructure investment, not a software trick any team can drop into an
+existing cluster. That's precisely why TrueTime-style consistency stayed a
+Google-specific capability for years. CockroachDB and YugabyteDB later built
+similar ideas on top of regular NTP instead, accepting a much larger and less
+certain uncertainty bound in exchange for not needing custom hardware — a
+different point on the same tradeoff curve, not a free lunch.
+
+```mermaid
+sequenceDiagram
+    participant App as Client transaction
+    participant SP as Spanner leader replica
+    participant TT as TrueTime API
+    participant R as Replicas, other datacenters
+
+    App->>SP: Commit transaction
+    SP->>TT: TT.now()
+    TT-->>SP: interval earliest to latest, pick s = latest
+    SP->>R: Replicate write at timestamp s via Paxos
+    R-->>SP: Majority acknowledges
+    Note over SP: Commit-wait — hold locks until TT.now().earliest passes s
+    SP->>App: Commit visible, locks released
+```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Assign a timestamp with an uncertainty bound.</strong> The leader replica calls <code>TT.now()</code> and gets back <code>[earliest, latest]</code>. It picks the commit timestamp <code>s = latest</code> — the upper bound of the interval — rather than a single number it can't actually vouch for.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Replicate the write.</strong> The write at timestamp <code>s</code> is replicated to a majority of replicas (via Paxos) across datacenters. No participant needs to be asked "can you commit?" the way 2PC's PREPARE phase asks — the timestamp itself is the ordering mechanism.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Commit-wait out the remaining uncertainty.</strong> Before releasing locks, the leader waits until <code>TT.now().earliest</code> is past <code>s</code> — concretely, it waits <code>TT.now().latest - s</code> worth of real time. This is a short, bounded, local wait against its own clock, not a message round-trip to another node.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Become visible.</strong> Only after the wait completes are locks released and the commit's effects visible to other transactions — by now every node in the system is guaranteed to agree that real time has passed <code>s</code>, which is what makes the ordering externally consistent across datacenters.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">TrueTime returns an uncertainty interval <code>[earliest, latest]</code> instead of a single precise timestamp. Why does Spanner need that, rather than just a good clock reading?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Because no clock, however good, gives a perfectly precise instant — there's always some error, even if GPS receivers and atomic clocks keep it down to a few milliseconds. TrueTime's honesty about its own uncertainty bound — returning a range instead of pretending to know the exact instant — is exactly what makes commit-wait a sound mechanism rather than an approximation: Spanner can deliberately wait out that known bound and be certain real time has passed, not just probably passed. A single fabricated "precise" timestamp would give the illusion of exactness with no way to know how much margin, if any, actually existed.</div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Why can't a normal NTP-synchronized server — with possible drift anywhere from tens of milliseconds to seconds — safely use the same commit-wait trick as TrueTime?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Commit-wait is only as sound as the uncertainty bound it waits out. NTP's possible drift is both much larger and much less certain than TrueTime's — a normal server has no hardware-backed, actively-monitored guarantee on how wrong its clock is, so even waiting proportional to "tens of milliseconds to seconds" wouldn't be safe: a bug, a stalled NTP daemon, or a network issue could push the actual drift beyond whatever bound was assumed, silently breaking the ordering guarantee. TrueTime's bound is trustworthy specifically because it's backed by GPS and atomic clock references that are cross-checked continuously, not merely claimed.</div>
+</div>
+
+---
+
+## 4. 2PC Sequence Diagrams
 
 ### Happy Path
 
@@ -188,7 +312,7 @@ sequenceDiagram
 
 ---
 
-## 4. Three-Phase Commit (3PC)
+## 5. Three-Phase Commit (3PC)
 
 Adds a **pre-commit** phase between Prepare and Commit to reduce the uncertainty window.
 
@@ -209,7 +333,7 @@ Adds a **pre-commit** phase between Prepare and Commit to reduce the uncertainty
 
 ---
 
-## 5. Saga Pattern
+## 6. Saga Pattern
 
 A saga is a sequence of **local transactions**. Each step updates one service's database. On failure, **compensating transactions** undo the preceding steps.
 
@@ -250,7 +374,7 @@ A **Saga Orchestrator** (a service or workflow engine) explicitly calls each par
 
 ---
 
-## 6. Saga Choreography Diagram
+## 7. Saga Choreography Diagram
 
 Order → Inventory → Payment → Shipping, with compensation on failure.
 
@@ -303,7 +427,7 @@ sequenceDiagram
 
 ---
 
-## 7. Outbox Pattern
+## 8. Outbox Pattern
 
 Write to an **outbox table** in the **same database transaction** as your business data. A separate relay process reads the outbox and publishes to the message broker.
 
@@ -347,7 +471,7 @@ UPDATE outbox SET published_at = now() WHERE id = $1;
 
 ---
 
-## 8. Outbox Sequence Diagram
+## 9. Outbox Sequence Diagram
 
 ```mermaid
 sequenceDiagram
@@ -384,7 +508,7 @@ sequenceDiagram
 
 ---
 
-## 9. Change Data Capture (CDC) with Debezium
+## 10. Change Data Capture (CDC) with Debezium
 
 CDC reads the **database replication log** (Postgres WAL, MySQL binlog) to capture every committed change as a stream of events. No polling, no outbox table needed in the application code.
 
@@ -431,7 +555,7 @@ graph LR
 
 ---
 
-## 10. Idempotency Across Services
+## 11. Idempotency Across Services
 
 An idempotent operation produces the same result if called multiple times. Critical for at-least-once delivery systems.
 
@@ -468,7 +592,7 @@ ON CONFLICT (key) DO NOTHING;
 
 ---
 
-## 11. Distributed Locking
+## 12. Distributed Locking
 
 Use when multiple instances must not execute a critical section simultaneously (e.g., scheduled job, inventory deduction).
 
@@ -530,7 +654,7 @@ Acquire the lock on N/2+1 independent Redis nodes within a time window. If quoru
 
 ---
 
-## 12. Optimistic Concurrency Control
+## 13. Optimistic Concurrency Control
 
 No locks. Each row carries a **version** field. The writer checks the version hasn't changed before committing.
 
@@ -570,7 +694,7 @@ ETags are the HTTP-native expression of optimistic concurrency — the ETag is t
 
 ---
 
-## 13. TCC (Try-Confirm-Cancel)
+## 14. TCC (Try-Confirm-Cancel)
 
 A reservation pattern that avoids holding database locks across service boundaries.
 
@@ -620,7 +744,7 @@ graph LR
 
 ---
 
-## 14. Decision Table
+## 15. Decision Table
 
 | Pattern | Consistency | Availability | Latency | Complexity | Use when |
 |---------|------------|--------------|---------|------------|----------|
@@ -635,7 +759,7 @@ graph LR
 
 ---
 
-## 15. Real-World Examples
+## 16. Real-World Examples
 
 ### E-Commerce Order (Saga Orchestration)
 

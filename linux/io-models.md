@@ -231,6 +231,108 @@ graph TD
 
 ---
 
+## sendfile(2) and splice(2) — The Classic Zero-Copy Syscalls
+
+**The problem with naive I/O forwarding.** Serving a static file over a socket the naive
+way looks like this:
+
+```c
+ssize_t n = read(file_fd, buf, sizeof(buf));   // page cache -> userspace buffer
+write(socket_fd, buf, n);                       // userspace buffer -> socket buffer
+```
+
+That's two data copies for bytes the application never actually needed to look at:
+`read()` copies the file's data from the kernel's page cache into a userspace buffer,
+then `write()` copies that same data straight back into a kernel-side socket buffer for
+transmission. Two copies, plus two syscall round trips into and out of the kernel — all
+to move data the app just passes through unchanged.
+
+```mermaid
+graph TD
+    classDef app  fill:#3498db,stroke:#2980b9,color:#fff,rx:8
+    classDef kern fill:#2ecc71,stroke:#27ae60,color:#fff,rx:8
+    classDef bad  fill:#e74c3c,stroke:#c0392b,color:#fff,rx:8
+
+    subgraph Naive["Naive read plus write: 2 copies"]
+        direction TD
+        PC1["Page cache file data"]:::kern
+        UB["Userspace buffer read lands here"]:::bad
+        SB1["Socket buffer write lands here"]:::bad
+        NIC1["NIC"]:::kern
+        PC1 -->|"copy 1: read()"| UB
+        UB -->|"copy 2: write()"| SB1
+        SB1 --> NIC1
+    end
+
+    subgraph ZeroCopy["sendfile / splice: 0 userspace copies"]
+        direction TD
+        PC2["Page cache file data"]:::kern
+        SB2["Socket buffer kernel-internal transfer"]:::kern
+        NIC2["NIC"]:::kern
+        PC2 -->|"sendfile or splice, kernel only"| SB2
+        SB2 --> NIC2
+    end
+```
+
+### sendfile(2) — fd to fd, entirely in kernel space
+
+```c
+ssize_t sendfile(int out_fd, int in_fd, off_t *offset, size_t count);
+```
+
+`sendfile()` copies data directly from one file descriptor to another **entirely within
+kernel space** — no userspace buffer ever gets involved. The classic call is
+`sendfile(socket_fd, file_fd, &offset, count)`: the kernel reads from the file (page
+cache) and writes into the socket buffer itself, in one syscall, with zero copies into
+userspace. This is exactly what nginx does when you leave `sendfile on;` set (the
+default) to serve static assets — the file's bytes go straight from disk cache to
+network card without ever passing through the worker process's address space.
+
+<div class="quiz-card">
+  <p class="quiz-q">A naive read()+write() pair to forward file data to a socket costs two data copies. Why does sendfile() cost zero?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>read()</code> copies data from the kernel's page cache into a userspace buffer, and <code>write()</code> copies it right back from userspace into the kernel's socket buffer &mdash; two copies for data the app never touched. <code>sendfile()</code> skips both: it transfers the data from the source fd to the destination fd entirely within kernel space, so userspace never receives a copy at all.</div>
+</div>
+
+### splice(2) — the general case, via a kernel pipe buffer
+
+```c
+ssize_t splice(int fd_in, loff_t *off_in, int fd_out, loff_t *off_out, size_t len, unsigned int flags);
+```
+
+`sendfile()` only covers one specific shape: read from this fd, write to that fd.
+`splice()` generalizes it — it moves data between two file descriptors via a
+kernel-only pipe buffer, without the restriction that one side has to be a regular file
+the way `sendfile()` effectively requires. That's what lets you splice
+**socket → pipe → socket**: proxying data between two TCP connections with the same
+zero-copy property, something `sendfile()` alone can't do since neither end there is a
+file. HAProxy uses `splice()` for exactly this — forwarding bytes between the client and
+backend connections it's proxying without ever copying the payload into its own
+userspace buffers.
+
+### How this fits next to io_uring
+
+This file already covers io_uring's own zero-copy send/receive (`IORING_OP_SEND_ZC`,
+registered buffers, and so on) — so what's the difference? `sendfile`/`splice` are
+older, narrower, **synchronous** syscalls purpose-built to solve one problem: avoid the
+userspace round-trip when moving data between two kernel-visible endpoints. io_uring
+generalizes the same zero-copy idea across arbitrary **async** I/O operations — reads,
+writes, sends, receives, accepts — all through the same submission/completion ring,
+rather than one fd-to-fd forwarding call. In practice, which one a modern
+high-performance server reaches for depends on what it's already built on: a server
+already running an io_uring event loop stays in that ring and uses its zero-copy
+send/receive opcodes; a simpler blocking or thread-per-connection server (nginx's
+traditional worker model, HAProxy) reaches for `sendfile`/`splice` directly, since that
+gets the zero-copy win without restructuring the whole I/O loop around io_uring.
+
+<div class="quiz-card">
+  <p class="quiz-q">What's the key difference in scope between sendfile() and splice()?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden><code>sendfile()</code> is narrower &mdash; it covers one specific fd-to-fd shape (classically file to socket). <code>splice()</code> is more general: it moves data between any two file descriptors via a kernel-only pipe buffer, which is what makes patterns like socket-to-socket proxying (via an intermediate pipe) possible &mdash; something <code>sendfile()</code> alone can't do because neither end there is a regular file.</div>
+</div>
+
+---
+
 ## io_uring — True Async I/O (Linux 5.1+)
 
 ```mermaid

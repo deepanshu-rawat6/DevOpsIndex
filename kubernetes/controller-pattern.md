@@ -356,6 +356,8 @@ A **Lease** object (`coordination.k8s.io/v1`) holds `holderIdentity` (who curren
   <div class="quiz-a" hidden>The API server's optimistic concurrency control on the object's resourceVersion — the same mechanism that protects any object from lost updates. Both PATCH requests target the same resourceVersion they last observed; whichever reaches etcd first succeeds and bumps the resourceVersion, and the second request is rejected as a conflict because its resourceVersion is now stale. The loser re-reads the object, sees someone else already won, and goes back to watching — there's never a window where both requests could succeed.</div>
 </div>
 
+Lease objects aren't unique to leader election — kubelet uses the same primitive as its own heartbeat mechanism. Rather than rewriting the entire Node object's `status` (conditions, capacity, allocatable resources, the images list — a much larger object) on every heartbeat interval, kubelet instead renews a lightweight per-node Lease in the `kube-node-lease` namespace. A Lease write is tiny — just a `renewTime` timestamp — so at high node counts this is a real, deliberate reduction in etcd write load, not a stylistic choice. The NodeLifecycle controller watches these Leases alongside Node status to determine node health.
+
 ---
 
 ## Interview Follow-Ups
