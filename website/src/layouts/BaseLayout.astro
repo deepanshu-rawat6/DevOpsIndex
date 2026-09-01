@@ -36,29 +36,49 @@ const currentPath = Astro.url.pathname;
   <meta name="description" content={description} />
   <title>{title} | DevOpsIndex</title>
   <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <!-- Apply a saved theme choice before first paint, so toggling on one
+       page doesn't flash back to the system default when navigating to
+       the next (this is a classic multi-page site, not an SPA — every
+       navigation reloads the document). Falls back silently if
+       localStorage is unavailable (privacy mode, etc). -->
+  <script is:inline>
+    (function () {
+      try {
+        var saved = localStorage.getItem('devopsindex-theme');
+        if (saved === 'light' || saved === 'dark') {
+          document.documentElement.setAttribute('data-theme', saved);
+        }
+      } catch (e) {}
+    })();
+  </script>
   <!-- VS Code-style syntax highlighting for code fences (see initSyntaxHighlighting below) -->
   <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/styles/vs2015.min.css" />
   <script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
 </head>
-<body class="min-h-screen flex flex-col bg-slate-900 text-slate-200">
-  <header class="border-b border-slate-800 px-6 py-4 flex items-center gap-4">
-    <a href="/" class="text-xl font-bold text-blue-400 hover:text-blue-300">DevOpsIndex</a>
-    <span class="text-slate-500 text-sm hidden sm:block">Kubernetes · Linux · Docker · AWS · GCP · CI/CD</span>
-    <button id="mobile-menu-btn" class="ml-auto lg:hidden text-slate-400 hover:text-slate-200">
-      <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
-        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
-      </svg>
-    </button>
+<body class="min-h-screen flex flex-col">
+  <header class="site-header px-6 py-3.5 flex items-center gap-5">
+    <a href="/" class="wordmark"><span class="prompt">❯</span>devopsindex<span class="cursor"></span></a>
+    <span class="site-tagline hidden sm:block">Kubernetes · Linux · Docker · AWS · GCP · CI/CD</span>
+    <div class="header-right">
+      <button id="theme-toggle" class="theme-toggle" type="button" aria-label="Toggle color theme">
+        <span class="sw"></span>--theme=<span class="theme-toggle-label">dark</span>
+      </button>
+      <button id="mobile-menu-btn" class="mobile-menu-btn lg:hidden">
+        <svg xmlns="http://www.w3.org/2000/svg" class="h-6 w-6" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+          <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 6h16M4 12h16M4 18h16" />
+        </svg>
+      </button>
+    </div>
   </header>
 
   <div class="flex flex-1 overflow-hidden">
     <!-- Sidebar -->
-    <nav id="sidebar" class="hidden lg:flex flex-col w-64 border-r border-slate-800 overflow-y-auto py-4 shrink-0">
+    <nav id="sidebar" class="sidebar hidden lg:flex flex-col w-64 overflow-y-auto py-4 shrink-0">
       {sections.map(section => (
         <details class="group" open={currentPath.startsWith(`/topic/${section.pages[0]?.data.section}`)}>
-          <summary class="flex items-center gap-2 px-4 py-1.5 text-xs font-semibold text-slate-500 uppercase tracking-wider cursor-pointer hover:text-slate-300 select-none list-none">
-            <span class="w-5 h-5 rounded bg-slate-800 text-slate-400 text-xs flex items-center justify-center shrink-0">{section.sectionOrder}</span>
-            <a href={`/topic/${section.pages[0]?.data.section}`} class="hover:text-blue-400" onclick="event.stopPropagation()">
+          <summary class="sidebar-summary">
+            <span class="sidebar-index">{section.sectionOrder}</span>
+            <a href={`/topic/${section.pages[0]?.data.section}`} onclick="event.stopPropagation()">
               {section.sectionTitle}
             </a>
           </summary>
@@ -66,10 +86,7 @@ const currentPath = Astro.url.pathname;
             const href = `/topic/${page.data.pageSlug}`;
             const isActive = currentPath === href || currentPath === href + '/';
             return (
-              <a
-                href={href}
-                class={`block pl-10 pr-4 py-1 text-sm hover:bg-slate-800 hover:text-blue-400 transition-colors ${isActive ? 'bg-slate-800 text-blue-400 border-l-2 border-blue-400' : 'text-slate-400'}`}
-              >
+              <a href={href} class={`sidebar-link ${isActive ? 'active' : ''}`}>
                 {page.data.title}
               </a>
             );
@@ -95,13 +112,43 @@ const currentPath = Astro.url.pathname;
         sidebar.classList.toggle('inset-y-0');
         sidebar.classList.toggle('left-0');
         sidebar.classList.toggle('z-50');
-        sidebar.classList.toggle('bg-slate-900');
         sidebar.classList.toggle('pt-16');
       }
     });
 
+    // ── Theme toggle ──────────────────────────────────────────
+    // Bare :root carries light tokens, prefers-color-scheme swaps to
+    // dark, and an explicit data-theme attribute (set here) overrides
+    // system preference in either direction — see global.css. Persisted
+    // to localStorage so it survives full-page navigations (this is a
+    // classic multi-page Astro site, not an SPA); the inline <script
+    // is:inline> in <head> applies the saved value before first paint
+    // to avoid a flash of the wrong theme.
+    function currentTheme(): 'light' | 'dark' {
+      const attr = document.documentElement.getAttribute('data-theme');
+      if (attr === 'light' || attr === 'dark') return attr;
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+    function updateThemeToggleLabels(theme: string) {
+      document.querySelectorAll<HTMLElement>('.theme-toggle-label').forEach(el => { el.textContent = theme; });
+    }
+    function initThemeToggle() {
+      updateThemeToggleLabels(currentTheme());
+      document.getElementById('theme-toggle')?.addEventListener('click', () => {
+        const next = currentTheme() === 'dark' ? 'light' : 'dark';
+        document.documentElement.setAttribute('data-theme', next);
+        try { localStorage.setItem('devopsindex-theme', next); } catch (e) { /* privacy mode etc */ }
+        updateThemeToggleLabels(next);
+      });
+    }
+
     // Mermaid rendering — dynamic import so a CDN failure can't crash the
     // whole module and silence every other interactive component on the page.
+    // Theme picked from the current light/dark state at render time; note
+    // this only affects the INITIAL render — toggling the theme after
+    // diagrams are already drawn as SVG does not currently re-theme them
+    // (a live re-render-on-toggle is a possible future enhancement, out
+    // of scope for this pass).
     function renderMermaid() {
       const blocks: { pre: Element; src: string; id: string }[] = [];
       document.querySelectorAll('pre > code.language-mermaid').forEach((el, i) => {
@@ -119,7 +166,7 @@ const currentPath = Astro.url.pathname;
       if (!blocks.length) return;
       import('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs')
         .then(m => {
-          m.default.initialize({ startOnLoad: false, theme: 'dark', securityLevel: 'loose' });
+          m.default.initialize({ startOnLoad: false, theme: currentTheme() === 'light' ? 'default' : 'dark', securityLevel: 'loose' });
           m.default.run();
         })
         .catch(err => console.warn('[DevOpsIndex] Mermaid failed to load:', err));
@@ -260,6 +307,7 @@ const currentPath = Astro.url.pathname;
     // silence the rest (e.g. hljs missing must not break tabs/steppers).
     function init() {
       const steps: [string, () => void][] = [
+        ['initThemeToggle',        initThemeToggle],
         ['renderMermaid',          renderMermaid],
         ['addCopyButtons',         addCopyButtons],
         ['initQuizzes',            initQuizzes],

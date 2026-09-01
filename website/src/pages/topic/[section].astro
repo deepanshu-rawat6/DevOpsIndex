@@ -38,16 +38,16 @@ if (rootPage) {
 <BaseLayout title={sectionTitle}>
   <div class="max-w-4xl mx-auto">
     <!-- Breadcrumb -->
-    <nav class="text-sm text-slate-500 mb-6">
-      <a href="/" class="hover:text-blue-400">Home</a>
-      <span class="mx-2">›</span>
-      <span class="text-slate-300">{sectionTitle}</span>
+    <nav class="crumb-trail mb-6">
+      <a href="/">Home</a>
+      <span class="sep">›</span>
+      <span class="current">{sectionTitle}</span>
     </nav>
 
     <div class="flex items-center gap-3 mb-8">
-      <h1 class="text-2xl font-bold text-slate-100">{sectionTitle}</h1>
-      <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-400">#{sectionOrder}</span>
-      <span class="text-xs px-2 py-1 rounded bg-slate-800 text-slate-400">{subPages.length} pages</span>
+      <h1 class="text-2xl font-bold" style="color: var(--text)">{sectionTitle}</h1>
+      <span class="font-mono text-xs px-2 py-1 rounded" style="background: var(--surface-raised); color: var(--text-dim)">#{sectionOrder}</span>
+      <span class="font-mono text-xs px-2 py-1 rounded" style="background: var(--surface-raised); color: var(--text-dim)">{subPages.length} pages</span>
     </div>
 
     <!-- Inline README content if available -->
@@ -60,17 +60,12 @@ if (rootPage) {
     <!-- Sub-pages list -->
     {subPages.length > 0 && (
       <div>
-        {readmeHtml && <h2 class="text-lg font-semibold text-slate-300 mb-4 border-b border-slate-800 pb-2">Pages in this section</h2>}
+        {readmeHtml && <h2 class="text-lg font-semibold mb-4 pb-2" style="color: var(--text-secondary); border-bottom: 1px solid var(--border)">Pages in this section</h2>}
         <div class="space-y-2">
           {subPages.map((page, i) => (
-            <a
-              href={`/topic/${page.data.pageSlug}`}
-              class="flex items-center gap-4 px-4 py-3 rounded-lg border border-slate-800 bg-slate-800/30 hover:bg-slate-800 hover:border-slate-700 transition-colors group"
-            >
-              <span class="w-7 h-7 rounded bg-slate-800 text-slate-500 text-xs flex items-center justify-center shrink-0 group-hover:text-blue-400">
-                {i + 1}
-              </span>
-              <div class="text-slate-200 text-sm font-medium group-hover:text-blue-400">
+            <a href={`/topic/${page.data.pageSlug}`} class="pager-link flex items-center gap-4 px-4 py-3 group">
+              <span class="sidebar-index w-7 h-7 text-xs">{i + 1}</span>
+              <div class="text-sm font-medium" style="color: var(--text-secondary)">
                 {page.data.title}
               </div>
             </a>

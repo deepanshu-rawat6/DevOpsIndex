@@ -86,6 +86,292 @@ flowchart TD
   <div class="quiz-a" hidden>It discards the advertisement immediately. Because BGP is path-vector — every advertisement carries the full ordered list of ASes it already traversed, not just a hop count — the evidence that accepting this route would create a loop is sitting directly in the path itself. Seeing its own ASN there is proof positive a loop exists, so a simple membership check replaces what a distance-vector or link-state protocol would need a dedicated loop-detection mechanism for.</div>
 </div>
 
+The stepper above only ever shows one scenario: two routes tied on LOCAL_PREF, decided by AS-PATH length. The tiebreaker cascade goes further than that, and two of its rules are easy to get wrong — MED is only ever compared between routes learned from the *same* neighboring AS, never across unrelated neighbors, and eBGP-learned routes beat iBGP-learned ones after MED. Add your own candidate routes below and recompute to see the full cascade run in order: highest LOCAL_PREF → shortest AS-PATH → lowest MED (same neighbor AS only) → eBGP over iBGP → lowest router ID as the tiebreak of last resort.
+
+<div class="structure-viz" id="bgp-bestpath-demo">
+  <svg class="viz-canvas" viewBox="0 0 660 130"></svg>
+  <div class="viz-controls">
+    <input class="viz-input" data-field="label" type="text" placeholder="label (optional)" style="width:9rem" />
+    <input class="viz-input" data-field="localpref" type="number" placeholder="LOCAL_PREF (100)" style="width:8.5rem" />
+    <input class="viz-input" data-field="aspath" type="text" placeholder="AS-PATH e.g. 65010,65001" style="width:11rem" />
+    <input class="viz-input" data-field="med" type="number" placeholder="MED (0)" style="width:6rem" />
+    <select class="viz-input" data-field="session" style="width:6rem">
+      <option value="eBGP">eBGP</option>
+      <option value="iBGP">iBGP</option>
+    </select>
+    <button class="viz-btn" data-viz-action="add">Add route</button>
+    <button class="viz-btn" data-viz-action="recompute">Recompute best path</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#1e3a8a"></span> candidate route</span>
+    <span><span class="viz-swatch" style="background:#78350f"></span> current best path</span>
+    <span>Click the small &times; on a card to remove that route.</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  var svgNS = 'http://www.w3.org/2000/svg';
+  var root = document.getElementById('bgp-bestpath-demo');
+  var svg = root.querySelector('.viz-canvas');
+  var status = root.querySelector('.viz-status');
+  var labelInput = root.querySelector('[data-field="label"]');
+  var lpInput = root.querySelector('[data-field="localpref"]');
+  var pathInput = root.querySelector('[data-field="aspath"]');
+  var medInput = root.querySelector('[data-field="med"]');
+  var sessionInput = root.querySelector('[data-field="session"]');
+
+  var routes = [];
+  var nextId = 1;
+  var winnerId = null;
+
+  // ---- pure, testable comparator logic --------------------------------
+  function parseAsPath(str) {
+    return str.split(/[,\s]+/).map(function (s) { return s.trim(); }).filter(Boolean).map(Number);
+  }
+
+  function narrowByLocalPref(rs) {
+    var max = Math.max.apply(null, rs.map(function (r) { return r.localPref; }));
+    return rs.filter(function (r) { return r.localPref === max; });
+  }
+  function narrowByAsPathLength(rs) {
+    var min = Math.min.apply(null, rs.map(function (r) { return r.asPath.length; }));
+    return rs.filter(function (r) { return r.asPath.length === min; });
+  }
+  function narrowByMed(rs) {
+    // MED is only ever compared between routes learned from the SAME neighboring AS.
+    var groups = {};
+    rs.forEach(function (r) {
+      var key = String(r.asPath[0]);
+      (groups[key] = groups[key] || []).push(r);
+    });
+    var survivors = [];
+    Object.keys(groups).forEach(function (key) {
+      var group = groups[key];
+      var min = Math.min.apply(null, group.map(function (r) { return r.med; }));
+      group.forEach(function (r) { if (r.med === min) survivors.push(r); });
+    });
+    return survivors;
+  }
+  function narrowByEbgpOverIbgp(rs) {
+    var hasEbgp = rs.some(function (r) { return r.session === 'eBGP'; });
+    if (!hasEbgp) return rs;
+    return rs.filter(function (r) { return r.session === 'eBGP'; });
+  }
+  function narrowByRouterId(rs) {
+    var min = Math.min.apply(null, rs.map(function (r) { return r.routerId; }));
+    return rs.filter(function (r) { return r.routerId === min; });
+  }
+
+  var CASCADE = [
+    {
+      shortLabel: 'LOCAL_PREF',
+      narrow: narrowByLocalPref,
+      describe: function (w, c) { return w.label + "'s LOCAL_PREF (" + w.localPref + ') beats ' + c.label + "'s (" + c.localPref + ')'; }
+    },
+    {
+      shortLabel: 'AS-PATH length',
+      narrow: narrowByAsPathLength,
+      describe: function (w, c) { return w.label + "'s AS-PATH is shorter (" + w.asPath.length + ' hop' + (w.asPath.length === 1 ? '' : 's') + ' vs ' + c.label + "'s " + c.asPath.length + ')'; }
+    },
+    {
+      shortLabel: 'MED',
+      narrow: narrowByMed,
+      describe: function (w, c) { return w.label + ' and ' + c.label + ' are both learned from AS' + w.asPath[0] + ", and " + w.label + "'s MED (" + w.med + ') is lower than ' + c.label + "'s (" + c.med + ')'; }
+    },
+    {
+      shortLabel: 'session type (eBGP vs iBGP)',
+      narrow: narrowByEbgpOverIbgp,
+      describe: function (w, c) { return w.label + ' is eBGP-learned vs ' + c.label + "'s iBGP"; }
+    },
+    {
+      shortLabel: 'router ID',
+      narrow: narrowByRouterId,
+      describe: function (w, c) { return w.label + "'s router ID (" + w.routerId + ') is lower than ' + c.label + "'s (" + c.routerId + ')'; }
+    }
+  ];
+
+  function selectBestPath(rs) {
+    if (!rs.length) return null;
+    if (rs.length === 1) return { winner: rs[0], tiedOn: [], decidedBy: null, competitor: null };
+    var candidates = rs.slice();
+    var tiedOn = [];
+    var decidedBy = null;
+    var beforeStep = candidates;
+    for (var i = 0; i < CASCADE.length; i++) {
+      var step = CASCADE[i];
+      beforeStep = candidates;
+      candidates = step.narrow(candidates);
+      if (candidates.length === 1) { decidedBy = step; break; }
+      tiedOn.push(step.shortLabel);
+    }
+    var winner = candidates[0];
+    var competitor = decidedBy ? beforeStep.filter(function (r) { return r !== winner; })[0] : null;
+    return { winner: winner, tiedOn: tiedOn, decidedBy: decidedBy, competitor: competitor };
+  }
+
+  function joinAnd(arr) {
+    if (arr.length === 0) return '';
+    if (arr.length === 1) return arr[0];
+    if (arr.length === 2) return arr[0] + ' and ' + arr[1];
+    return arr.slice(0, -1).join(', ') + ', and ' + arr[arr.length - 1];
+  }
+
+  function buildMessage(result) {
+    var winner = result.winner, tiedOn = result.tiedOn, decidedBy = result.decidedBy, competitor = result.competitor;
+    if (!decidedBy) {
+      if (tiedOn.length === 0) return winner.label + ' wins: it is the only candidate route.';
+      return winner.label + ' wins arbitrarily — every route tied all the way down to router ID. Give routes distinct router IDs to break a real tie.';
+    }
+    var decisive = decidedBy.describe(winner, competitor);
+    if (tiedOn.length) {
+      return winner.label + ' wins: tied on ' + joinAnd(tiedOn) + ', but ' + decisive + '.';
+    }
+    return winner.label + ' wins: ' + decisive + '.';
+  }
+
+  // ---- rendering --------------------------------------------------------
+  function computeLayout(n) {
+    var cardW = 200, cardH = 118, gapX = 16, gapY = 16, padding = 14;
+    var cols = Math.max(1, Math.min(3, n));
+    var rows = Math.max(1, Math.ceil(n / cols));
+    var width = cols * cardW + (cols - 1) * gapX + padding * 2;
+    var height = rows * cardH + (rows - 1) * gapY + padding * 2;
+    return { cardW: cardW, cardH: cardH, gapX: gapX, gapY: gapY, padding: padding, cols: cols, width: width, height: height };
+  }
+
+  function setStatus(text, kind) {
+    status.textContent = text;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function draw() {
+    var layout = computeLayout(routes.length || 1);
+    svg.setAttribute('viewBox', '0 0 ' + layout.width + ' ' + layout.height);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    if (routes.length === 0) {
+      var empty = document.createElementNS(svgNS, 'text');
+      empty.setAttribute('x', layout.width / 2);
+      empty.setAttribute('y', layout.height / 2);
+      empty.setAttribute('class', 'viz-label-dim');
+      empty.textContent = 'No candidate routes yet — add one below.';
+      svg.appendChild(empty);
+      return;
+    }
+
+    routes.forEach(function (route, i) {
+      var col = i % layout.cols;
+      var row = Math.floor(i / layout.cols);
+      var x = layout.padding + col * (layout.cardW + layout.gapX);
+      var y = layout.padding + row * (layout.cardH + layout.gapY);
+
+      var rect = document.createElementNS(svgNS, 'rect');
+      rect.setAttribute('x', x);
+      rect.setAttribute('y', y);
+      rect.setAttribute('width', layout.cardW);
+      rect.setAttribute('height', layout.cardH);
+      rect.setAttribute('rx', 8);
+      rect.setAttribute('class', route.id === winnerId ? 'viz-node-highlight' : 'viz-node');
+      svg.appendChild(rect);
+
+      var lines = [
+        route.label,
+        'LOCAL_PREF ' + route.localPref,
+        'AS-PATH ' + route.asPath.join(',') + ' (' + route.asPath.length + ')',
+        'MED ' + route.med + ' via AS' + route.asPath[0],
+        route.session,
+        'Router ID ' + route.routerId
+      ];
+      lines.forEach(function (line, li) {
+        var t = document.createElementNS(svgNS, 'text');
+        t.setAttribute('x', x + layout.cardW / 2);
+        t.setAttribute('y', y + 20 + li * 17);
+        if (li !== 0) t.setAttribute('class', 'viz-label-dim');
+        t.textContent = line;
+        svg.appendChild(t);
+      });
+
+      var delCircle = document.createElementNS(svgNS, 'circle');
+      delCircle.setAttribute('cx', x + layout.cardW - 14);
+      delCircle.setAttribute('cy', y + 14);
+      delCircle.setAttribute('r', 9);
+      delCircle.setAttribute('fill', '#7f1d1d');
+      delCircle.setAttribute('stroke', '#f87171');
+      delCircle.setAttribute('data-remove-id', route.id);
+      delCircle.style.cursor = 'pointer';
+      svg.appendChild(delCircle);
+
+      var delText = document.createElementNS(svgNS, 'text');
+      delText.setAttribute('x', x + layout.cardW - 14);
+      delText.setAttribute('y', y + 14);
+      delText.setAttribute('fill', '#fecaca');
+      delText.setAttribute('font-size', '10');
+      delText.textContent = '×';
+      svg.appendChild(delText);
+    });
+  }
+
+  function labelFromIndex(idx) {
+    return 'Route ' + String.fromCharCode(65 + (idx % 26));
+  }
+
+  root.querySelector('[data-viz-action="add"]').addEventListener('click', function () {
+    var rawPath = pathInput.value.trim();
+    var asPath = parseAsPath(rawPath);
+    if (!asPath.length || asPath.some(function (n) { return isNaN(n); })) {
+      setStatus('AS-PATH needs at least one AS number, e.g. "65010, 65001".', 'error');
+      return;
+    }
+    var id = nextId++;
+    var label = labelInput.value.trim() || labelFromIndex(routes.length);
+    var localPref = lpInput.value.trim() === '' ? 100 : Number(lpInput.value);
+    var med = medInput.value.trim() === '' ? 0 : Number(medInput.value);
+    var session = sessionInput.value;
+    routes.push({ id: id, label: label, localPref: localPref, asPath: asPath, med: med, session: session, routerId: id });
+    labelInput.value = ''; pathInput.value = ''; medInput.value = ''; lpInput.value = '';
+    winnerId = null;
+    setStatus(label + ' added. Click "Recompute best path" to re-run selection.', '');
+    draw();
+  });
+
+  root.querySelector('[data-viz-action="recompute"]').addEventListener('click', function () {
+    if (routes.length === 0) { setStatus('Add at least one candidate route first.', 'error'); return; }
+    var result = selectBestPath(routes);
+    winnerId = result.winner.id;
+    setStatus(buildMessage(result), 'ok');
+    draw();
+  });
+
+  root.querySelector('[data-viz-action="reset"]').addEventListener('click', function () {
+    routes = [];
+    winnerId = null;
+    nextId = 1;
+    setStatus('Cleared all candidate routes.', '');
+    draw();
+  });
+
+  svg.addEventListener('click', function (e) {
+    var id = e.target.getAttribute && e.target.getAttribute('data-remove-id');
+    if (id) {
+      routes = routes.filter(function (r) { return r.id !== Number(id); });
+      if (winnerId === Number(id)) winnerId = null;
+      draw();
+    }
+  });
+
+  // Seed with the file's own worked example from the stepper above, so the
+  // widget starts in a familiar state before the reader explores further.
+  routes.push({ id: nextId++, label: 'Route A (via AS 65010)', localPref: 100, asPath: [65010, 65001], med: 0, session: 'eBGP', routerId: 1 });
+  routes.push({ id: nextId++, label: 'Route B (via AS 65020 → AS 65030)', localPref: 100, asPath: [65020, 65030, 65001], med: 0, session: 'eBGP', routerId: 2 });
+  draw();
+})();
+</script>
+
+Two cases worth trying that the stepper above never shows: add a third route with the *same* AS-PATH as Route A (`65010,65001`) but a higher MED — since it shares Route A's neighboring AS (65010), MED now legitimately decides between them. Then try adding a route with a *different* first AS hop (a different neighboring AS) and a much lower MED than everything else — watch it *not* win on MED, because MED is never compared across routes from different neighbors; the cascade falls through to eBGP-vs-iBGP or router ID instead.
+
 ---
 
 ## 3. Why Anycast Actually Works

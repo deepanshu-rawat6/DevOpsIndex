@@ -769,6 +769,279 @@ This is precisely why gap-lock blocking catches developers off guard when they'r
   <div class="quiz-a" hidden>Because under REPEATABLE READ (InnoDB's default), that SELECT ... FOR UPDATE took next-key locks, not plain record locks — the gap-lock half of a next-key lock blocks any INSERT landing in that gap regardless of whether the new row's id matches anything already locked. Under READ COMMITTED there are no gap locks at all, only record locks, so the same INSERT would go through immediately — which is exactly why this blocking feels surprising to someone reasoning from READ COMMITTED-style rules.</div>
 </div>
 
+The fixed walkthrough above always uses the same table (rows at 10 and 20) and the same blocked insert (15) — useful for seeing the mechanism once, but it can't show you where the gap boundaries actually fall for a table shape of your own choosing. The live version below runs the exact same rule (a range scan takes next-key locks bounded by whichever real rows sit on either side of the queried range, not clipped to the range's own start/end) against whatever rows, range, and insert ids you type in, and lets you flip the isolation toggle on a lock you're already holding to watch the gap locks disappear.
+
+<div class="structure-viz" id="gap-lock-live-viz">
+  <svg class="viz-canvas" viewBox="0 0 620 190"></svg>
+  <div class="viz-controls">
+    <input class="viz-input" data-field="rows" type="text" placeholder="rows e.g. 10, 20, 30" style="width:11rem" />
+    <button class="viz-btn" data-viz-action="set-rows">Set Rows</button>
+    <input class="viz-input" data-field="range-start" type="number" placeholder="range start" />
+    <input class="viz-input" data-field="range-end" type="number" placeholder="range end" />
+    <button class="viz-btn" data-viz-action="lock">SELECT ... FOR UPDATE</button>
+  </div>
+  <div class="viz-controls">
+    <button class="viz-btn" data-viz-action="iso-rr">REPEATABLE READ</button>
+    <button class="viz-btn" data-viz-action="iso-rc">READ COMMITTED</button>
+    <input class="viz-input" data-field="insert" type="number" placeholder="insert id" />
+    <button class="viz-btn" data-viz-action="insert">Insert</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#1e3a8a"></span> existing row</span>
+    <span><span class="viz-swatch" style="background:#78350f"></span> existing row — record-locked (in range)</span>
+    <span><span class="viz-swatch" style="background:#8e44ad"></span> locked gap (next-key lock)</span>
+    <span><span class="viz-swatch" style="background:#14532d"></span> insert allowed</span>
+    <span><span class="viz-swatch" style="background:#7f1d1d"></span> insert blocked</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root0 = document.getElementById('gap-lock-live-viz');
+  const svg = root0.querySelector('.viz-canvas');
+  const status = root0.querySelector('.viz-status');
+  const rowsInput = root0.querySelector('[data-field="rows"]');
+  const startInput = root0.querySelector('[data-field="range-start"]');
+  const endInput = root0.querySelector('[data-field="range-end"]');
+  const insertInput = root0.querySelector('[data-field="insert"]');
+  const rrBtn = root0.querySelector('[data-viz-action="iso-rr"]');
+  const rcBtn = root0.querySelector('[data-viz-action="iso-rc"]');
+
+  // ---- Pure logic (no DOM) -------------------------------------------
+  // Given the current existing rows, an (optional) locked query range, and
+  // an isolation level, compute which index gaps InnoDB's next-key locking
+  // would hold. Under REPEATABLE READ every gap the range scan touches gets
+  // locked end-to-end (bounded by the nearest real rows on each side, not
+  // clipped to the query's own start/end) -- that's exactly why an INSERT
+  // whose id has nothing to do with any locked row can still block. Under
+  // READ COMMITTED, InnoDB never takes gap locks at all.
+  function sortedUnique(rows) {
+    return Array.from(new Set(rows)).sort((a, b) => a - b);
+  }
+
+  function computeLockedGaps(rows, rangeStart, rangeEnd, isolation) {
+    if (isolation !== 'rr') return [];
+    if (rangeStart == null || rangeEnd == null) return [];
+    const lo0 = Math.min(rangeStart, rangeEnd);
+    const hi0 = Math.max(rangeStart, rangeEnd);
+    const sorted = sortedUnique(rows);
+    const gaps = [];
+    for (let i = -1; i < sorted.length; i++) {
+      const lo = i === -1 ? -Infinity : sorted[i];
+      const hi = i + 1 < sorted.length ? sorted[i + 1] : Infinity;
+      // Gap (lo, hi) is open; query range [lo0, hi0] is closed. They
+      // overlap (and so the gap gets locked by the scan) iff:
+      if (lo < hi0 && hi > lo0) gaps.push({ lo, hi });
+    }
+    return gaps;
+  }
+
+  function evaluateInsert(rows, lockedGaps, candidateId) {
+    if (rows.includes(candidateId)) {
+      return { outcome: 'blocked', reason: 'duplicate-key' };
+    }
+    for (const gap of lockedGaps) {
+      if (candidateId > gap.lo && candidateId < gap.hi) {
+        return { outcome: 'blocked', reason: 'gap-lock', gap };
+      }
+    }
+    return { outcome: 'allowed' };
+  }
+
+  // ---- Widget state ----------------------------------------------------
+  let rows, lockRange, isolation, lastAttempt, flashTimer;
+
+  function reset() {
+    rows = [10, 20, 30];
+    lockRange = null;
+    isolation = 'rr';
+    lastAttempt = null;
+    clearTimeout(flashTimer);
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function updateIsoButtons() {
+    rrBtn.disabled = isolation === 'rr';
+    rcBtn.disabled = isolation === 'rc';
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function scheduleFlashClear() {
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => { lastAttempt = null; draw(); }, 2200);
+  }
+
+  function draw() {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    const leftX = 60, rightX = 590, baseY = 110;
+
+    const domainValues = rows.slice();
+    if (lockRange) domainValues.push(lockRange.start, lockRange.end);
+    if (lastAttempt) domainValues.push(lastAttempt.id);
+    if (domainValues.length === 0) domainValues.push(0, 40);
+    let dMin = Math.min(...domainValues);
+    let dMax = Math.max(...domainValues);
+    if (dMin === dMax) { dMin -= 5; dMax += 5; }
+    const span = dMax - dMin;
+    const pad = Math.max(2, span * 0.15);
+    const domainMin = dMin - pad, domainMax = dMax + pad;
+    const x = (v) => leftX + ((v - domainMin) / (domainMax - domainMin)) * (rightX - leftX);
+
+    // Baseline
+    svg.appendChild(el('line', { x1: leftX, y1: baseY, x2: rightX, y2: baseY, class: 'viz-edge' }));
+
+    // Locked gaps (drawn behind everything else)
+    const lockedGaps = lockRange
+      ? computeLockedGaps(rows, lockRange.start, lockRange.end, isolation)
+      : [];
+    lockedGaps.forEach((gap) => {
+      const gx1 = x(Math.max(gap.lo, domainMin));
+      const gx2 = x(Math.min(gap.hi, domainMax));
+      svg.appendChild(el('rect', {
+        x: gx1, y: baseY - 18, width: Math.max(1, gx2 - gx1), height: 36,
+        fill: '#8e44ad', 'fill-opacity': '0.35', stroke: '#8e44ad', 'stroke-opacity': '0.6', rx: 4,
+      }));
+    });
+
+    // Query range bracket, above the baseline
+    if (lockRange) {
+      const rLo = Math.min(lockRange.start, lockRange.end);
+      const rHi = Math.max(lockRange.start, lockRange.end);
+      const rx1 = x(rLo), rx2 = x(rHi);
+      svg.appendChild(el('line', { x1: rx1, y1: 55, x2: rx2, y2: 55, class: 'viz-edge-active' }));
+      svg.appendChild(el('line', { x1: rx1, y1: 50, x2: rx1, y2: 60, class: 'viz-edge-active' }));
+      svg.appendChild(el('line', { x1: rx2, y1: 50, x2: rx2, y2: 60, class: 'viz-edge-active' }));
+      const rLabel = el('text', { x: (rx1 + rx2) / 2, y: 40, class: 'viz-label-dim' });
+      rLabel.textContent = `SELECT ... FOR UPDATE [${rLo}, ${rHi}]`;
+      svg.appendChild(rLabel);
+    }
+
+    // Existing rows
+    const rLo = lockRange ? Math.min(lockRange.start, lockRange.end) : null;
+    const rHi = lockRange ? Math.max(lockRange.start, lockRange.end) : null;
+    rows.forEach((r) => {
+      const inRange = lockRange && r >= rLo && r <= rHi;
+      const cx = x(r);
+      svg.appendChild(el('circle', { cx, cy: baseY, r: 16, class: inRange ? 'viz-node-highlight' : 'viz-node' }));
+      const t = el('text', { x: cx, y: baseY });
+      t.textContent = r;
+      svg.appendChild(t);
+    });
+
+    // Most recent insert attempt
+    if (lastAttempt) {
+      const cx = x(lastAttempt.id);
+      const cy = baseY + 45;
+      const cls = lastAttempt.outcome === 'allowed' ? 'viz-node-new' : 'viz-node-removing';
+      svg.appendChild(el('line', { x1: cx, y1: baseY + 16, x2: cx, y2: cy - 14, class: 'viz-edge', 'stroke-dasharray': '3,3' }));
+      svg.appendChild(el('circle', { cx, cy, r: 14, class: cls }));
+      const t = el('text', { x: cx, y: cy });
+      t.textContent = lastAttempt.id;
+      svg.appendChild(t);
+      const label = el('text', { x: cx, y: cy + 24, class: 'viz-label-dim' });
+      label.textContent = lastAttempt.outcome === 'allowed' ? 'inserted' : lastAttempt.reason === 'duplicate-key' ? 'blocked (duplicate)' : 'blocked (gap lock)';
+      svg.appendChild(label);
+    }
+
+    // Domain edge labels for orientation
+    const minLabel = el('text', { x: leftX, y: baseY - 32, class: 'viz-label-dim' });
+    minLabel.textContent = Math.round(domainMin);
+    svg.appendChild(minLabel);
+    const maxLabel = el('text', { x: rightX, y: baseY - 32, class: 'viz-label-dim' });
+    maxLabel.textContent = Math.round(domainMax);
+    svg.appendChild(maxLabel);
+  }
+
+  root0.querySelector('[data-viz-action="set-rows"]').addEventListener('click', () => {
+    const raw = rowsInput.value.trim();
+    if (!raw) { setStatus('Enter a comma-separated list of row ids first.', 'error'); return; }
+    const parsed = raw.split(',').map((s) => parseInt(s.trim(), 10)).filter((n) => !isNaN(n));
+    if (parsed.length === 0) { setStatus('Could not parse any row ids -- try "10, 20, 30".', 'error'); return; }
+    rows = sortedUnique(parsed);
+    lockRange = null;
+    lastAttempt = null;
+    setStatus(`Table now has rows: ${rows.join(', ')}. No active lock -- run a SELECT ... FOR UPDATE to take one.`, 'ok');
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="lock"]').addEventListener('click', () => {
+    const s = parseInt(startInput.value, 10);
+    const e = parseInt(endInput.value, 10);
+    if (isNaN(s) || isNaN(e)) { setStatus('Enter both a range start and range end first.', 'error'); return; }
+    lockRange = { start: s, end: e };
+    lastAttempt = null;
+    const gaps = computeLockedGaps(rows, s, e, isolation);
+    if (isolation === 'rr') {
+      const desc = gaps.map((g) => `(${g.lo === -Infinity ? '-inf' : g.lo}, ${g.hi === Infinity ? '+inf' : g.hi})`).join(', ');
+      setStatus(`Locked range [${Math.min(s, e)}, ${Math.max(s, e)}] under REPEATABLE READ -- next-key locks now cover gap(s): ${desc || '(none -- no rows in range)'}.`, 'ok');
+    } else {
+      setStatus(`Locked range [${Math.min(s, e)}, ${Math.max(s, e)}] under READ COMMITTED -- only the exact matching rows are record-locked, no gaps.`, 'ok');
+    }
+    draw();
+  });
+
+  function setIsolation(next) {
+    isolation = next;
+    lastAttempt = null;
+    updateIsoButtons();
+    setStatus(`Isolation switched to ${next === 'rr' ? 'REPEATABLE READ' : 'READ COMMITTED'}.` + (lockRange ? ' Re-evaluating the held lock under the new isolation level.' : ''), '');
+    draw();
+  }
+  rrBtn.addEventListener('click', () => setIsolation('rr'));
+  rcBtn.addEventListener('click', () => setIsolation('rc'));
+
+  root0.querySelector('[data-viz-action="insert"]').addEventListener('click', () => {
+    const id = parseInt(insertInput.value, 10);
+    if (isNaN(id)) { setStatus('Enter a row id to insert first.', 'error'); return; }
+    const gaps = lockRange ? computeLockedGaps(rows, lockRange.start, lockRange.end, isolation) : [];
+    const result = evaluateInsert(rows, gaps, id);
+    insertInput.value = '';
+    if (result.outcome === 'allowed') {
+      rows = sortedUnique(rows.concat([id]));
+      lastAttempt = { id, outcome: 'allowed' };
+      setStatus(`INSERT ${id} succeeded -- no lock covered that position.`, 'ok');
+    } else if (result.reason === 'duplicate-key') {
+      lastAttempt = { id, outcome: 'blocked', reason: 'duplicate-key' };
+      setStatus(`INSERT ${id} rejected -- a row with that id already exists (duplicate key, independent of any lock).`, 'error');
+    } else {
+      lastAttempt = { id, outcome: 'blocked', reason: 'gap-lock' };
+      setStatus(`INSERT ${id} BLOCKED -- it falls inside a next-key lock's gap (${result.gap.lo === -Infinity ? '-inf' : result.gap.lo}, ${result.gap.hi === Infinity ? '+inf' : result.gap.hi}). It would wait for the locking transaction to commit or roll back.`, 'error');
+    }
+    draw();
+    scheduleFlashClear();
+  });
+
+  root0.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    reset();
+    rowsInput.value = '';
+    startInput.value = '';
+    endInput.value = '';
+    insertInput.value = '';
+    updateIsoButtons();
+    setStatus('Reset to rows 10, 20, 30 -- no active lock, REPEATABLE READ selected.', '');
+    draw();
+  });
+
+  reset();
+  updateIsoButtons();
+  setStatus('Rows 10, 20, 30. Pick a range and run SELECT ... FOR UPDATE, then try inserting ids to see which land inside a locked gap.', '');
+  draw();
+})();
+</script>
+
 ---
 
 ## Deadlock Analysis

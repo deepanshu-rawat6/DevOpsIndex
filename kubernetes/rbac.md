@@ -388,6 +388,235 @@ roleRef:
   </div>
 </div>
 
+### Try It Yourself: A Live RBAC Evaluator (mirrors `kubectl auth can-i`)
+
+Everything above is the theory. This walks the real chain — subject → binding → role → rule — against whatever bindings you define, and answers allow or deny the same way `kubectl auth can-i` would, except every step of the decision stays visible instead of collapsing into one yes/no.
+
+A few modeling choices worth stating up front, all straight from the rules above: a **RoleBinding** always confines whatever it references — even a ClusterRole — to the single namespace the RoleBinding itself lives in; only a **ClusterRoleBinding** is cluster-wide. Verbs and resources both support the `*` wildcard, same as real RBAC rules. And subject matching here is literal, not group-resolved — a binding for group `platform-team` only matches a query that itself asks "can Group `platform-team`…", the same simplification `kubectl auth can-i --as-group=` makes you supply explicitly rather than resolving membership for you.
+
+Load a preset below, then try to break it — query a namespace the binding was never scoped to, or a verb it never granted, and watch the evaluator explain the deny instead of just asserting it.
+
+<div class="structure-viz" id="rbac-can-i-viz">
+  <svg class="viz-canvas" viewBox="0 0 720 90"></svg>
+  <div class="viz-controls">
+    <button class="viz-btn" data-preset="pod-reader-alice">Load: pod-reader → alice (dev)</button>
+    <button class="viz-btn" data-preset="cluster-admin-platform-team">Load: cluster-admin → group platform-team (cluster-wide)</button>
+    <button class="viz-btn" data-preset="app-role-ci-bot">Load: app-role (ClusterRole) → ci-bot via RoleBinding in payments</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="clear-all">Clear all</button>
+  </div>
+  <div class="viz-controls">
+    <select class="viz-input" data-field="b-subjectKind" style="width:7rem">
+      <option>User</option>
+      <option>Group</option>
+      <option>ServiceAccount</option>
+    </select>
+    <input class="viz-input" data-field="b-subject" type="text" placeholder="subject e.g. alice" style="width:8rem" />
+    <input class="viz-input" data-field="b-role" type="text" placeholder="role name e.g. pod-reader" style="width:9rem" />
+    <select class="viz-input" data-field="b-roleKind" style="width:7rem">
+      <option>Role</option>
+      <option>ClusterRole</option>
+    </select>
+    <input class="viz-input" data-field="b-verbs" type="text" placeholder="verbs e.g. get,list,watch" style="width:9.5rem" />
+    <input class="viz-input" data-field="b-resources" type="text" placeholder="resources e.g. pods" style="width:8rem" />
+    <input class="viz-input" data-field="b-scope" type="text" placeholder='namespace, or "cluster"' style="width:9rem" />
+    <button class="viz-btn" data-viz-action="add-binding">Add binding</button>
+  </div>
+  <div class="viz-controls">
+    <select class="viz-input" data-field="q-subjectKind" style="width:7rem">
+      <option>User</option>
+      <option>Group</option>
+      <option>ServiceAccount</option>
+    </select>
+    <input class="viz-input" data-field="q-subject" type="text" placeholder="subject e.g. alice" style="width:8rem" />
+    <input class="viz-input" data-field="q-verb" type="text" placeholder="verb e.g. get" style="width:6rem" />
+    <input class="viz-input" data-field="q-resource" type="text" placeholder="resource e.g. pods" style="width:7rem" />
+    <input class="viz-input" data-field="q-namespace" type="text" placeholder='namespace, or "cluster"' style="width:9rem" />
+    <button class="viz-btn" data-viz-action="check">Check</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#1e3a8a"></span> defined binding</span>
+    <span><span class="viz-swatch" style="background:#14532d"></span> matched the last Check</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root0 = document.getElementById('rbac-can-i-viz');
+  const svg = root0.querySelector('.viz-canvas');
+  const status = root0.querySelector('.viz-status');
+
+  function field(name) { return root0.querySelector('[data-field="' + name + '"]'); }
+
+  let bindings = [];
+  let lastMatch = null;
+
+  // ---- Pure evaluator: given the current bindings and a query tuple, ----
+  // ---- returns { allowed, binding } with no DOM access at all.       ----
+  function evaluateAccess(bindingsList, query) {
+    for (const b of bindingsList) {
+      if (b.subjectKind !== query.subjectKind) continue;
+      if (b.subject !== query.subject) continue;
+      const scopeOk = b.scope === 'cluster' || b.scope === query.namespace;
+      if (!scopeOk) continue;
+      const verbOk = b.verbs.includes('*') || b.verbs.includes(query.verb);
+      if (!verbOk) continue;
+      const resourceOk = b.resources.includes('*') || b.resources.includes(query.resource);
+      if (!resourceOk) continue;
+      return { allowed: true, binding: b };
+    }
+    return { allowed: false, binding: null };
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function parseList(raw) {
+    return raw.split(',').map(function (s) { return s.trim().toLowerCase(); }).filter(Boolean);
+  }
+
+  function normalizeScope(raw) {
+    const t = raw.trim();
+    return t.toLowerCase() === 'cluster' ? 'cluster' : t;
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function bindingKindLabel(b) { return b.scope === 'cluster' ? 'ClusterRoleBinding' : 'RoleBinding'; }
+  function scopeLabel(b) { return b.scope === 'cluster' ? 'cluster-wide' : ('ns: ' + b.scope); }
+
+  function draw() {
+    const rowH = 66;
+    const vbW = 720;
+    const vbH = bindings.length ? (20 + bindings.length * rowH) : 90;
+    svg.setAttribute('viewBox', '0 0 ' + vbW + ' ' + vbH);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    if (!bindings.length) {
+      const t = el('text', { x: String(vbW / 2), y: String(vbH / 2), class: 'viz-label-dim' });
+      t.textContent = 'No bindings yet — load a preset or add one below.';
+      svg.appendChild(t);
+      return;
+    }
+
+    bindings.forEach(function (b, i) {
+      const y = 33 + i * rowH;
+      const isMatch = lastMatch === b;
+      const cls = isMatch ? 'viz-node-new' : 'viz-node';
+      const edgeCls = isMatch ? 'viz-edge-active' : 'viz-edge';
+
+      svg.appendChild(el('rect', { x: 8, y: y - 24, width: 148, height: 48, rx: 6, class: cls }));
+      const s1 = el('text', { x: 82, y: y - 8 }); s1.textContent = b.subjectKind + ':'; svg.appendChild(s1);
+      const s2 = el('text', { x: 82, y: y + 10 }); s2.textContent = b.subject; svg.appendChild(s2);
+
+      svg.appendChild(el('line', { x1: 156, y1: y, x2: 190, y2: y, class: edgeCls }));
+
+      svg.appendChild(el('rect', { x: 194, y: y - 24, width: 180, height: 48, rx: 6, class: cls }));
+      const bd1 = el('text', { x: 284, y: y - 8 }); bd1.textContent = bindingKindLabel(b); svg.appendChild(bd1);
+      const bd2 = el('text', { x: 284, y: y + 10, class: 'viz-label-dim' }); bd2.textContent = scopeLabel(b); svg.appendChild(bd2);
+
+      svg.appendChild(el('line', { x1: 374, y1: y, x2: 408, y2: y, class: edgeCls }));
+
+      svg.appendChild(el('rect', { x: 412, y: y - 24, width: 300, height: 48, rx: 6, class: cls }));
+      const r1 = el('text', { x: 562, y: y - 8 }); r1.textContent = b.roleName + ' (' + b.roleKind + ')'; svg.appendChild(r1);
+      const r2 = el('text', { x: 562, y: y + 10, class: 'viz-label-dim' }); r2.textContent = b.verbs.join(',') + ' -> ' + b.resources.join(','); svg.appendChild(r2);
+    });
+  }
+
+  function loadPreset(name) {
+    const presets = {
+      'pod-reader-alice': { subjectKind: 'User', subject: 'alice', roleName: 'pod-reader', roleKind: 'Role', verbs: ['get', 'list', 'watch'], resources: ['pods'], scope: 'dev' },
+      'cluster-admin-platform-team': { subjectKind: 'Group', subject: 'platform-team', roleName: 'cluster-admin', roleKind: 'ClusterRole', verbs: ['*'], resources: ['*'], scope: 'cluster' },
+      'app-role-ci-bot': { subjectKind: 'ServiceAccount', subject: 'ci-bot', roleName: 'app-role', roleKind: 'ClusterRole', verbs: ['get', 'list'], resources: ['deployments'], scope: 'payments' },
+    };
+    const p = presets[name];
+    if (!p) return;
+    bindings.push(p);
+    lastMatch = null;
+    setStatus('Loaded preset: ' + p.subjectKind + ' "' + p.subject + '" → ' + bindingKindLabel(p) + ' "' + p.roleName + '" (' + scopeLabel(p) + ').', 'ok');
+    draw();
+  }
+
+  root0.querySelectorAll('[data-preset]').forEach(function (btn) {
+    btn.addEventListener('click', function () { loadPreset(btn.dataset.preset); });
+  });
+
+  root0.querySelector('[data-viz-action="clear-all"]').addEventListener('click', function () {
+    bindings = [];
+    lastMatch = null;
+    setStatus('Cleared all bindings.', '');
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="add-binding"]').addEventListener('click', function () {
+    const subjectKind = field('b-subjectKind').value;
+    const subject = field('b-subject').value.trim();
+    const roleName = field('b-role').value.trim();
+    const roleKind = field('b-roleKind').value;
+    const verbs = parseList(field('b-verbs').value);
+    const resources = parseList(field('b-resources').value);
+    const scope = normalizeScope(field('b-scope').value);
+
+    if (!subject || !roleName || !verbs.length || !resources.length || !scope) {
+      setStatus('Fill in subject, role name, verbs, resources, and scope before adding.', 'error');
+      return;
+    }
+    if (scope === 'cluster' && roleKind === 'Role') {
+      setStatus('A Role is always namespace-scoped — it can’t be bound cluster-wide. Set role kind to ClusterRole, or give this binding a specific namespace instead.', 'error');
+      return;
+    }
+
+    bindings.push({ subjectKind: subjectKind, subject: subject, roleName: roleName, roleKind: roleKind, verbs: verbs, resources: resources, scope: scope });
+    lastMatch = null;
+    setStatus('Added: ' + subjectKind + ' "' + subject + '" → ' + bindingKindLabel({ scope: scope }) + ' "' + roleName + '" (' + scopeLabel({ scope: scope }) + ').', 'ok');
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="check"]').addEventListener('click', function () {
+    const subjectKind = field('q-subjectKind').value;
+    const subject = field('q-subject').value.trim();
+    const verb = field('q-verb').value.trim().toLowerCase();
+    const resource = field('q-resource').value.trim().toLowerCase();
+    const namespace = normalizeScope(field('q-namespace').value);
+
+    if (!subject || !verb || !resource || !namespace) {
+      setStatus('Fill in subject, verb, resource, and namespace before checking.', 'error');
+      return;
+    }
+
+    const query = { subjectKind: subjectKind, subject: subject, verb: verb, resource: resource, namespace: namespace };
+    const result = evaluateAccess(bindings, query);
+    lastMatch = result.binding;
+    const nsLabel = namespace === 'cluster' ? 'a cluster-scoped request' : ('namespace "' + namespace + '"');
+
+    if (result.allowed) {
+      setStatus('YES — ' + subjectKind + ' "' + subject + '" can ' + verb + ' ' + resource + ' in ' + nsLabel + '. Matched ' + bindingKindLabel(result.binding) + ' → ' + result.binding.roleName + '.', 'ok');
+    } else {
+      setStatus('NO — ' + subjectKind + ' "' + subject + '" cannot ' + verb + ' ' + resource + ' in ' + nsLabel + '. No binding grants this — implicit deny.', 'error');
+    }
+    draw();
+  });
+
+  draw();
+  setStatus('Load a preset, or add your own binding, then run a Check query below.', '');
+})();
+</script>
+
+<div class="quiz-card">
+  <p class="quiz-q">You load the "app-role (ClusterRole) → ci-bot via RoleBinding in payments" preset, then query whether ServiceAccount <code>ci-bot</code> can <code>get</code> <code>deployments</code> in namespace <code>orders</code>. Does the evaluator allow it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    No. Even though <code>app-role</code> is a ClusterRole, it was bound with a <strong>RoleBinding</strong> that lives in <code>payments</code> — and a RoleBinding confines whatever it references to its own namespace only. <code>ci-bot</code> gets <code>get,list</code> on <code>deployments</code> in <code>payments</code> and nowhere else; querying <code>orders</code> finds no matching binding and comes back an implicit deny, exactly like the earlier ClusterRole-template example above.
+  </div>
+</div>
+
 ---
 
 ## RBAC Patterns

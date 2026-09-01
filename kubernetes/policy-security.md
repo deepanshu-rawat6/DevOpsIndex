@@ -371,6 +371,253 @@ spec:
     count/deployments.apps: "20"
 ```
 
+### Try It Yourself: Live ResourceQuota Admission
+
+A ResourceQuota's `hard` limits aren't just a display number — every pod creation gets evaluated against the namespace's *running total*, the same admission chain covered above (this check happens in-tree in the API server, no webhook involved). Set a quota below, then try creating pods with different cpu/memory requests. A creation that would push any single dimension over its hard limit gets rejected outright — nothing partially applies, and the running totals don't move. Delete a pod to free its share back up, then retry a request that was previously rejected.
+
+<div class="structure-viz" id="quota-live-viz">
+  <svg class="viz-canvas" viewBox="0 0 640 210"></svg>
+  <div class="viz-controls">
+    <input class="viz-input" type="number" step="0.1" min="0" placeholder="cpu hard limit (cores)" />
+    <input class="viz-input" type="text" placeholder="memory hard limit (e.g. 16Gi)" />
+    <input class="viz-input" type="number" step="1" min="0" placeholder="pods hard limit" />
+    <button class="viz-btn" data-viz-action="set-quota">Set quota</button>
+  </div>
+  <div class="viz-controls">
+    <input class="viz-input" type="number" step="0.1" min="0" placeholder="pod cpu request (cores)" />
+    <input class="viz-input" type="text" placeholder="pod memory request (e.g. 256Mi)" />
+    <button class="viz-btn" data-viz-action="insert">Create pod</button>
+    <input class="viz-input" type="number" step="1" min="1" placeholder="pod # to delete" />
+    <button class="viz-btn viz-btn-danger" data-viz-action="delete">Delete pod</button>
+    <button class="viz-btn" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#1e3a8a"></span> running pod</span>
+    <span><span class="viz-swatch" style="background:#14532d"></span> just admitted</span>
+    <span><span class="viz-swatch" style="background:#7f1d1d"></span> dimension at/over hard limit</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root0 = document.getElementById('quota-live-viz');
+  const svg = root0.querySelector('.viz-canvas');
+  const status = root0.querySelector('.viz-status');
+  const inputs = root0.querySelectorAll('.viz-input');
+  const cpuLimitInput = inputs[0], memLimitInput = inputs[1], podsLimitInput = inputs[2];
+  const podCpuInput = inputs[3], podMemInput = inputs[4], deleteIdInput = inputs[5];
+
+  const EPS = 1e-6;
+
+  // ---- Pure, DOM-free quota accounting (stress-tested standalone before
+  // being wired up here) ----
+  function round(v) {
+    return Math.round(v * 1000) / 1000;
+  }
+
+  function evaluateAdmission(usage, limits, request) {
+    const nextCpu = round(usage.cpu + request.cpu);
+    const nextMemory = round(usage.memory + request.memory);
+    const nextPods = usage.pods + 1;
+
+    if (nextCpu > limits.cpu + EPS) {
+      return {
+        allowed: false,
+        dimension: 'cpu',
+        message: `rejected by the ResourceQuota admission controller: requests.cpu would exceed hard limit (${formatCores(usage.cpu)}/${formatCores(limits.cpu)} cores used, pod requests ${formatCores(request.cpu)} more core${request.cpu === 1 ? '' : 's'})`,
+      };
+    }
+    if (nextMemory > limits.memory + EPS) {
+      return {
+        allowed: false,
+        dimension: 'memory',
+        message: `rejected by the ResourceQuota admission controller: requests.memory would exceed hard limit (${formatMi(usage.memory)}/${formatMi(limits.memory)} used, pod requests ${formatMi(request.memory)} more)`,
+      };
+    }
+    if (nextPods > limits.pods) {
+      return {
+        allowed: false,
+        dimension: 'pods',
+        message: `rejected by the ResourceQuota admission controller: pods would exceed hard limit (${usage.pods}/${limits.pods} pods used, this creation would add 1 more)`,
+      };
+    }
+    return { allowed: true, usage: { cpu: nextCpu, memory: nextMemory, pods: nextPods } };
+  }
+
+  function releasePod(usage, pod) {
+    return {
+      cpu: round(usage.cpu - pod.cpu),
+      memory: round(usage.memory - pod.memory),
+      pods: usage.pods - 1,
+    };
+  }
+  // ---- end pure accounting logic ----
+
+  function parseMemoryMi(input) {
+    if (input == null) return NaN;
+    const m = String(input).trim().match(/^([0-9]*\.?[0-9]+)\s*(Gi|Mi)?$/i);
+    if (!m) return NaN;
+    const val = parseFloat(m[1]);
+    const unit = (m[2] || 'Mi').toLowerCase();
+    return round(unit === 'gi' ? val * 1024 : val);
+  }
+
+  function formatMi(mi) {
+    if (mi >= 1024) {
+      const g = mi / 1024;
+      return (Number.isInteger(g) ? g : parseFloat(g.toFixed(2))) + 'Gi';
+    }
+    return (Number.isInteger(mi) ? mi : parseFloat(mi.toFixed(2))) + 'Mi';
+  }
+
+  function formatCores(v) {
+    return String(Math.round(v * 100) / 100);
+  }
+
+  const DEFAULT_LIMITS = { cpu: 8, memory: 16384, pods: 50 }; // matches the payments-quota example above
+
+  let limits, usage, pods, nextId, lastCreatedId, flashTimer;
+
+  function reset() {
+    limits = { ...DEFAULT_LIMITS };
+    usage = { cpu: 0, memory: 0, pods: 0 };
+    pods = [];
+    nextId = 1;
+    lastCreatedId = null;
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function drawBar(index, label, used, limit, formatFn) {
+    const y = 6 + index * 42;
+    const barX = 20, barW = 560, barH = 18;
+    const frac = limit > 0 ? Math.min(1, used / limit) : 0;
+    const over = limit > 0 && used >= limit - EPS;
+
+    const labelText = el('text', { x: barX + barW / 2, y: y });
+    labelText.textContent = `${label}: ${formatFn(used)} / ${formatFn(limit)}`;
+    svg.appendChild(labelText);
+
+    svg.appendChild(el('rect', { x: barX, y: y + 8, width: barW, height: barH, rx: 4, class: 'viz-edge', fill: 'none' }));
+    if (frac > 0) {
+      svg.appendChild(el('rect', {
+        x: barX, y: y + 8, width: Math.max(2, barW * frac), height: barH, rx: 4,
+        class: over ? 'viz-node-removing' : 'viz-node',
+      }));
+    }
+  }
+
+  function draw() {
+    const cols = 8, chipW = 70, chipH = 40, gapX = 10, gapY = 10;
+    const chipsTop = 140;
+    const rows = Math.max(1, Math.ceil(pods.length / cols));
+    const height = chipsTop + rows * (chipH + gapY) + 20;
+    svg.setAttribute('viewBox', `0 0 640 ${height}`);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    drawBar(0, 'requests.cpu', usage.cpu, limits.cpu, (v) => formatCores(v) + ' cores');
+    drawBar(1, 'requests.memory', usage.memory, limits.memory, (v) => formatMi(v));
+    drawBar(2, 'pods', usage.pods, limits.pods, (v) => String(v));
+
+    if (pods.length === 0) {
+      const t = el('text', { x: 320, y: chipsTop + 20, class: 'viz-label-dim' });
+      t.textContent = 'No pods created yet — use "Create pod" above.';
+      svg.appendChild(t);
+    } else {
+      pods.forEach((pod, i) => {
+        const col = i % cols, row = Math.floor(i / cols);
+        const x = 20 + col * (chipW + gapX);
+        const y = chipsTop + row * (chipH + gapY);
+        const cls = pod.id === lastCreatedId ? 'viz-node-new' : 'viz-node';
+        svg.appendChild(el('rect', { x, y, width: chipW, height: chipH, rx: 6, class: cls }));
+        const t1 = el('text', { x: x + chipW / 2, y: y + 14 });
+        t1.textContent = `P${pod.id}`;
+        svg.appendChild(t1);
+        const t2 = el('text', { x: x + chipW / 2, y: y + 29, class: 'viz-label-dim' });
+        t2.textContent = `${formatCores(pod.cpu)}c/${formatMi(pod.memory)}`;
+        svg.appendChild(t2);
+      });
+    }
+  }
+
+  function scheduleFlashClear() {
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(() => { lastCreatedId = null; draw(); }, 1600);
+  }
+
+  root0.querySelector('[data-viz-action="set-quota"]').addEventListener('click', () => {
+    const cpu = parseFloat(cpuLimitInput.value);
+    const mem = parseMemoryMi(memLimitInput.value);
+    const podsLim = parseInt(podsLimitInput.value, 10);
+    if (!isFinite(cpu) || cpu <= 0 || !isFinite(mem) || mem <= 0 || !Number.isFinite(podsLim) || podsLim <= 0) {
+      setStatus('Enter positive values for cpu, memory, and pods hard limits first.', 'error');
+      return;
+    }
+    limits = { cpu, memory: mem, pods: podsLim };
+    setStatus(`Quota set: requests.cpu=${formatCores(cpu)} cores, requests.memory=${formatMi(mem)}, pods=${podsLim}. Existing pods keep running even if a lowered limit no longer fits them — only new admissions get checked against it.`, '');
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="insert"]').addEventListener('click', () => {
+    const cpuReq = parseFloat(podCpuInput.value);
+    const memReq = parseMemoryMi(podMemInput.value);
+    if (!isFinite(cpuReq) || cpuReq < 0 || !isFinite(memReq) || memReq < 0 || (cpuReq === 0 && memReq === 0)) {
+      setStatus('Enter a pod cpu request (cores) and memory request (e.g. 256Mi) first.', 'error');
+      return;
+    }
+    const result = evaluateAdmission(usage, limits, { cpu: round(cpuReq), memory: memReq });
+    if (!result.allowed) {
+      setStatus(result.message, 'error');
+      return;
+    }
+    usage = result.usage;
+    const pod = { id: nextId++, cpu: round(cpuReq), memory: memReq };
+    pods.push(pod);
+    lastCreatedId = pod.id;
+    setStatus(`Admitted pod P${pod.id} (cpu ${formatCores(pod.cpu)}, memory ${formatMi(pod.memory)}). Namespace now at ${formatCores(usage.cpu)}/${formatCores(limits.cpu)} cores, ${formatMi(usage.memory)}/${formatMi(limits.memory)}, ${usage.pods}/${limits.pods} pods.`, 'ok');
+    podCpuInput.value = '';
+    podMemInput.value = '';
+    draw();
+    scheduleFlashClear();
+  });
+
+  root0.querySelector('[data-viz-action="delete"]').addEventListener('click', () => {
+    const id = parseInt(deleteIdInput.value, 10);
+    if (!Number.isFinite(id)) { setStatus('Enter the pod number to delete (the number on its chip, e.g. 1 for P1).', 'error'); return; }
+    const idx = pods.findIndex((p) => p.id === id);
+    if (idx === -1) { setStatus(`No running pod P${id}.`, 'error'); return; }
+    const pod = pods[idx];
+    usage = releasePod(usage, pod);
+    pods.splice(idx, 1);
+    if (lastCreatedId === pod.id) lastCreatedId = null;
+    setStatus(`Deleted P${pod.id}, freed ${formatCores(pod.cpu)} cpu core(s) and ${formatMi(pod.memory)} back to the quota.`, 'ok');
+    deleteIdInput.value = '';
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    reset();
+    setStatus('Reset — quota back to the payments-quota example (8 cores / 16Gi / 50 pods), no pods running.', '');
+    draw();
+  });
+
+  reset();
+  setStatus('Loaded with the payments-quota example above (8 cores / 16Gi / 50 pods). Create a few pods, then try one that would blow a limit — it gets rejected and nothing moves. Delete a pod and retry it.', '');
+  draw();
+})();
+</script>
+
 ### LimitRange — defaults for pods without requests
 
 ```yaml

@@ -44,14 +44,14 @@ const pageHref = (t: { pageSlug: string; section: string }) =>
 <BaseLayout title={topic.title}>
   <div class="max-w-4xl mx-auto">
     <!-- Breadcrumb -->
-    <nav class="text-sm text-slate-500 mb-6">
-      <a href="/" class="hover:text-blue-400">Home</a>
-      <span class="mx-2">›</span>
-      <a href={`/topic/${topic.section}`} class="hover:text-blue-400">{topic.sectionTitle}</a>
+    <nav class="crumb-trail mb-6">
+      <a href="/">Home</a>
+      <span class="sep">›</span>
+      <a href={`/topic/${topic.section}`}>{topic.sectionTitle}</a>
       {topic.pageSlug !== topic.section && (
         <>
-          <span class="mx-2">›</span>
-          <span class="text-slate-300">{topic.title}</span>
+          <span class="sep">›</span>
+          <span class="current">{topic.title}</span>
         </>
       )}
     </nav>
@@ -63,17 +63,17 @@ const pageHref = (t: { pageSlug: string; section: string }) =>
 
     <!-- Prev / Next -->
     {(prev || next) && (
-      <div class="flex justify-between mt-12 pt-6 border-t border-slate-800 gap-4">
+      <div class="flex justify-between mt-12 pt-6 gap-4" style="border-top: 1px solid var(--border)">
         {prev ? (
-          <a href={pageHref(prev)} class="flex-1 text-left px-4 py-3 rounded-lg border border-slate-800 hover:border-slate-600 hover:bg-slate-800 transition-colors">
-            <div class="text-xs text-slate-500 mb-1">← Previous</div>
-            <div class="text-sm text-slate-300">{prev.pageSlug === prev.section ? 'Overview' : prev.title}</div>
+          <a href={pageHref(prev)} class="pager-link flex-1 text-left px-4 py-3">
+            <div class="pager-eyebrow mb-1">← Previous</div>
+            <div class="pager-title">{prev.pageSlug === prev.section ? 'Overview' : prev.title}</div>
           </a>
         ) : <div class="flex-1" />}
         {next && (
-          <a href={pageHref(next)} class="flex-1 text-right px-4 py-3 rounded-lg border border-slate-800 hover:border-slate-600 hover:bg-slate-800 transition-colors">
-            <div class="text-xs text-slate-500 mb-1">Next →</div>
-            <div class="text-sm text-slate-300">{next.pageSlug === next.section ? 'Overview' : next.title}</div>
+          <a href={pageHref(next)} class="pager-link flex-1 text-right px-4 py-3">
+            <div class="pager-eyebrow mb-1">Next →</div>
+            <div class="pager-title">{next.pageSlug === next.section ? 'Overview' : next.title}</div>
           </a>
         )}
       </div>

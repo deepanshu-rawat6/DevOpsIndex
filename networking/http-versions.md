@@ -307,6 +307,440 @@ graph TD
   </div>
 </div>
 
+### Try It: Live Head-of-Line Blocking Simulator
+
+The stepper above walks through one fixed scenario. Rebuild it with your own
+resources below — add as many as you want, mark any subset **slow** or
+**lost**, then flip between the three protocols to see how each one schedules
+the exact same set of resources.
+
+<div class="structure-viz" id="hol-sim">
+  <div class="viz-controls">
+    <input class="viz-input" type="text" placeholder="resource name (e.g. app.js)" />
+    <button class="viz-btn" data-viz-action="add">Add resource</button>
+    <button class="viz-btn" data-viz-action="reset">Reset to default</button>
+  </div>
+  <div class="viz-controls" data-viz-resource-list></div>
+  <div class="viz-controls">
+    <button class="viz-btn" data-viz-protocol="http11">HTTP/1.1</button>
+    <button class="viz-btn" data-viz-protocol="http2">HTTP/2</button>
+    <button class="viz-btn" data-viz-protocol="http3">HTTP/3</button>
+    <button class="viz-btn" data-viz-action="run">Run ▶</button>
+  </div>
+  <svg class="viz-canvas" viewBox="0 0 640 220"></svg>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:var(--accent)"></span> normal</span>
+    <span><span class="viz-swatch" style="background:var(--warn)"></span> slow</span>
+    <span><span class="viz-swatch" style="background:var(--bad)"></span> lost / dropped packet</span>
+    <span><span class="viz-swatch" style="background:var(--text-faint)"></span> waiting (blocked)</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root = document.getElementById('hol-sim');
+  const svg = root.querySelector('.viz-canvas');
+  const input = root.querySelector('.viz-input');
+  const status = root.querySelector('.viz-status');
+  const resourceList = root.querySelector('[data-viz-resource-list]');
+
+  // ---- pure scheduling core (no DOM) -------------------------------------
+  // Kept standalone on purpose: this same logic, unmodified, is what gets
+  // copied into a plain Node.js file for randomized invariant testing.
+
+  const BASE_TIME = 10;
+  const SLOW_TIME = 60;
+  const LOST_TIME = 150; // effective cost of a dropped packet's retransmit-timeout recovery
+  const NUM_CONNECTIONS = 6;
+
+  function timeFor(r) {
+    if (r.lost) return LOST_TIME;
+    if (r.slow) return SLOW_TIME;
+    return BASE_TIME;
+  }
+
+  function stateFor(r) {
+    if (r.lost) return 'lost';
+    if (r.slow) return 'slow';
+    return 'ok';
+  }
+
+  // HTTP/1.1: resources round-robin across NUM_CONNECTIONS connections; each
+  // connection processes its own resources strictly in order (serial queue).
+  function scheduleHttp11(resources, numConnections) {
+    numConnections = numConnections || NUM_CONNECTIONS;
+    const conns = Array.from({ length: numConnections }, () => []);
+    resources.forEach((r, i) => conns[i % numConnections].push(r));
+    const byId = {};
+    conns.forEach((list, connId) => {
+      let clock = 0;
+      let activeBlockerId = null;
+      list.forEach((r) => {
+        const start = clock;
+        const dur = timeFor(r);
+        const finish = start + dur;
+        byId[r.id] = {
+          id: r.id,
+          connId,
+          waitStart: 0,
+          waitEnd: start,
+          transferStart: start,
+          finish,
+          state: stateFor(r),
+          blockedByConnection: activeBlockerId !== null,
+          blockedById: activeBlockerId,
+        };
+        clock = finish;
+        if (r.slow || r.lost) activeBlockerId = r.id;
+      });
+    });
+    return resources.map((r) => byId[r.id]);
+  }
+
+  // HTTP/2: one connection, all resources multiplexed as streams — UNLESS a
+  // resource is "lost" (a dropped packet), which stalls the WHOLE connection
+  // (every other stream too) until it's recovered. A merely "slow" resource
+  // only delays its own stream.
+  function scheduleHttp2(resources) {
+    const stallUntil = resources.some((r) => r.lost) ? LOST_TIME : 0;
+    return resources.map((r) => {
+      const own = timeFor(r);
+      const blockedByConnection = !r.lost && stallUntil > own;
+      const finish = r.lost ? own : Math.max(own, stallUntil);
+      return {
+        id: r.id,
+        waitStart: 0,
+        waitEnd: blockedByConnection ? finish - own : 0,
+        transferStart: blockedByConnection ? finish - own : 0,
+        finish,
+        state: stateFor(r),
+        blockedByConnection,
+      };
+    });
+  }
+
+  // HTTP/3: every stream is fully independent — a resource's finish time
+  // never depends on any other resource's slow/lost flag.
+  function scheduleHttp3(resources) {
+    return resources.map((r) => ({
+      id: r.id,
+      waitStart: 0,
+      waitEnd: 0,
+      transferStart: 0,
+      finish: timeFor(r),
+      state: stateFor(r),
+      blockedByConnection: false,
+    }));
+  }
+
+  function runSchedule(resources, protocol) {
+    if (protocol === 'http11') return scheduleHttp11(resources, NUM_CONNECTIONS);
+    if (protocol === 'http2') return scheduleHttp2(resources);
+    return scheduleHttp3(resources);
+  }
+
+  // ---- component state ----------------------------------------------------
+
+  let resources = [];
+  let nextId = 0;
+  let protocol = 'http11';
+
+  function defaultResources() {
+    // 9 resources so the 6-connection HTTP/1.1 round-robin actually doubles
+    // up on a connection: app.js (slow) lands on the same connection as
+    // vendor.js (index 2 and index 8, both mod 6 == 2), reproducing the
+    // stepper's "6-connection limit bites" scenario above with a concrete
+    // second resource queued behind the slow one.
+    return [
+      { id: nextId++, label: 'index.html', slow: false, lost: false },
+      { id: nextId++, label: 'style.css', slow: false, lost: false },
+      { id: nextId++, label: 'app.js', slow: true, lost: false },
+      { id: nextId++, label: 'image.png', slow: false, lost: false },
+      { id: nextId++, label: 'font.woff', slow: false, lost: false },
+      { id: nextId++, label: 'icon.svg', slow: false, lost: false },
+      { id: nextId++, label: 'data.json', slow: false, lost: false },
+      { id: nextId++, label: 'analytics.js', slow: false, lost: false },
+      { id: nextId++, label: 'vendor.js', slow: false, lost: false },
+    ];
+  }
+
+  function setStatusText(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function connLetter(n) {
+    return String.fromCharCode(65 + n);
+  }
+
+  function buildStatus(schedule) {
+    const byId = {};
+    resources.forEach((r) => { byId[r.id] = r; });
+
+    if (protocol === 'http11') {
+      const used = new Set(schedule.map((s) => s.connId));
+      const flagged = resources.filter((r) => r.slow || r.lost);
+      if (flagged.length === 0) {
+        return `HTTP/1.1: ${resources.length} resource(s) spread across ${Math.min(NUM_CONNECTIONS, resources.length)} of ${NUM_CONNECTIONS} parallel connections. Nothing slow or lost — every connection clears quickly.`;
+      }
+      // Report on EVERY flagged resource, not just the first one found —
+      // a resource can be slow/lost yet have nothing queued behind it on
+      // its connection (last in that connection's queue), which is still
+      // worth surfacing even though nothing else is delayed by it.
+      const parts = flagged.map((r) => {
+        const s = schedule.find((x) => x.id === r.id);
+        const victims = schedule.filter((x) => x.blockedById === r.id);
+        const kind = r.lost ? 'lost' : 'slow';
+        if (victims.length > 0) {
+          const names = victims.map((v) => `"${byId[v.id] ? byId[v.id].label : '?'}"`).join(', ');
+          return `"${r.label}" is ${kind} on connection ${connLetter(s.connId)} — ${names} queued behind it on that connection ${victims.length === 1 ? 'is' : 'are'} delayed`;
+        }
+        return `"${r.label}" is ${kind} on connection ${connLetter(s.connId)}, but nothing else shares that connection so only itself is delayed`;
+      });
+      return `HTTP/1.1: ${used.size} connections in use. ${parts.join('; ')}. Other connections finish unaffected.`;
+    }
+
+    if (protocol === 'http2') {
+      const lostOnes = resources.filter((r) => r.lost);
+      const slowOnes = resources.filter((r) => r.slow && !r.lost);
+      if (lostOnes.length > 0) {
+        return `HTTP/2: 1 connection multiplexing ${resources.length} streams. "${lostOnes[0].label}" is a lost packet — TCP-level HOL blocking stalls ALL ${resources.length - 1} other stream(s) on this connection until it's recovered.`;
+      }
+      if (slowOnes.length > 0) {
+        return `HTTP/2: 1 connection multiplexing ${resources.length} streams. "${slowOnes[0].label}" is slow, but multiplexing means the other streams keep flowing — only its own stream is delayed.`;
+      }
+      return `HTTP/2: 1 connection multiplexing ${resources.length} streams, all clear quickly — no packet loss, no stall.`;
+    }
+
+    // http3
+    const stalled = resources.filter((r) => r.slow || r.lost);
+    if (stalled.length === 0) {
+      return `HTTP/3: ${resources.length} independent streams, all finish without blocking each other.`;
+    }
+    const names = stalled.map((r) => `"${r.label}"`).join(', ');
+    return `HTTP/3: ${names} ${stalled.length === 1 ? 'stalls alone on its own stream' : 'each stall alone on their own stream'} — the other ${resources.length - stalled.length} stream(s) finish independently, completely unaffected.`;
+  }
+
+  // ---- drawing --------------------------------------------------------------
+
+  const MARGIN_LEFT = 130;
+  const MARGIN_TOP = 24;
+  const ROW_H = 28;
+  const PX_PER_UNIT = 3.4;
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function stateClass(state) {
+    if (state === 'lost') return 'viz-node-removing';
+    if (state === 'slow') return 'viz-node-highlight';
+    return 'viz-node';
+  }
+
+  function lanesFor(schedule) {
+    if (protocol === 'http11') {
+      const byConn = {};
+      schedule.forEach((s) => {
+        (byConn[s.connId] = byConn[s.connId] || []).push(s);
+      });
+      return Object.keys(byConn)
+        .sort((a, b) => a - b)
+        .map((connId) => ({ label: `Conn ${connLetter(Number(connId))}`, items: byConn[connId] }));
+    }
+    if (protocol === 'http2') {
+      return schedule.map((s, i) => ({ label: `Stream ${i + 1}`, items: [s] }));
+    }
+    return schedule.map((s, i) => ({ label: `Stream ${i + 1}`, items: [s] }));
+  }
+
+  function draw() {
+    const schedule = runSchedule(resources, protocol);
+    const byId = {};
+    resources.forEach((r) => { byId[r.id] = r; });
+
+    const lanes = lanesFor(schedule);
+    const vbH = MARGIN_TOP + Math.max(lanes.length, 1) * ROW_H + 16;
+    svg.setAttribute('viewBox', `0 0 640 ${vbH}`);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    if (protocol === 'http2' && resources.length > 0) {
+      svg.appendChild(el('rect', {
+        x: 8, y: 6, width: 624, height: vbH - 12, rx: 8,
+        class: 'viz-edge', 'fill-opacity': '0', 'stroke-dasharray': '4,3',
+      }));
+      const bracket = el('text', { x: 16, y: 16, class: 'viz-label-dim' });
+      bracket.textContent = '1 shared TCP connection';
+      svg.appendChild(bracket);
+    }
+
+    lanes.forEach((lane, laneIdx) => {
+      const y = MARGIN_TOP + laneIdx * ROW_H;
+      const laneLabel = el('text', { x: MARGIN_LEFT - 10, y: y + ROW_H / 2, class: 'viz-label-dim' });
+      laneLabel.setAttribute('text-anchor', 'end');
+      laneLabel.textContent = lane.label;
+      svg.appendChild(laneLabel);
+
+      lane.items.forEach((s) => {
+        const r = byId[s.id];
+        const barH = 18;
+        const barY = y + (ROW_H - barH) / 2;
+
+        if (s.waitEnd > s.waitStart) {
+          svg.appendChild(el('rect', {
+            x: MARGIN_LEFT + s.waitStart * PX_PER_UNIT,
+            y: barY,
+            width: (s.waitEnd - s.waitStart) * PX_PER_UNIT,
+            height: barH,
+            rx: 3,
+            class: 'viz-edge',
+            'fill-opacity': '0.25',
+            'stroke-dasharray': '3,2',
+          }));
+        }
+
+        const transferStart = s.transferStart;
+        const transferW = Math.max(s.finish - transferStart, 1) * PX_PER_UNIT;
+        svg.appendChild(el('rect', {
+          x: MARGIN_LEFT + transferStart * PX_PER_UNIT,
+          y: barY,
+          width: transferW,
+          height: barH,
+          rx: 3,
+          class: stateClass(s.state),
+        }));
+
+        const label = el('text', {
+          x: MARGIN_LEFT + transferStart * PX_PER_UNIT + transferW / 2,
+          y: barY + barH / 2,
+        });
+        label.textContent = r ? r.label : '?';
+        svg.appendChild(label);
+      });
+    });
+
+    setStatusText(buildStatus(schedule), resources.some((r) => r.lost) ? 'error' : (resources.some((r) => r.slow) ? '' : 'ok'));
+  }
+
+  // ---- resource list UI -------------------------------------------------
+
+  function renderResourceList() {
+    while (resourceList.firstChild) resourceList.removeChild(resourceList.firstChild);
+    resources.forEach((r) => {
+      const wrap = document.createElement('span');
+      wrap.style.display = 'inline-flex';
+      wrap.style.alignItems = 'center';
+      wrap.style.gap = '0.3rem';
+      wrap.style.border = '1px solid var(--border)';
+      wrap.style.borderRadius = '0.4rem';
+      wrap.style.padding = '0.2rem 0.4rem';
+
+      const name = document.createElement('span');
+      name.textContent = r.label;
+      name.style.fontSize = '0.78rem';
+      name.style.color = 'var(--text)';
+      wrap.appendChild(name);
+
+      const slowBtn = document.createElement('button');
+      slowBtn.className = 'viz-btn';
+      slowBtn.textContent = 'Slow';
+      slowBtn.dataset.vizResourceId = String(r.id);
+      slowBtn.dataset.vizToggle = 'slow';
+      if (r.slow) { slowBtn.style.borderColor = 'var(--warn)'; slowBtn.style.color = 'var(--warn)'; }
+      wrap.appendChild(slowBtn);
+
+      const lostBtn = document.createElement('button');
+      lostBtn.className = 'viz-btn';
+      lostBtn.textContent = 'Lost';
+      lostBtn.dataset.vizResourceId = String(r.id);
+      lostBtn.dataset.vizToggle = 'lost';
+      if (r.lost) { lostBtn.style.borderColor = 'var(--bad)'; lostBtn.style.color = 'var(--bad)'; }
+      wrap.appendChild(lostBtn);
+
+      const removeBtn = document.createElement('button');
+      removeBtn.className = 'viz-btn viz-btn-danger';
+      removeBtn.textContent = '✕';
+      removeBtn.dataset.vizResourceId = String(r.id);
+      removeBtn.dataset.vizToggle = 'remove';
+      wrap.appendChild(removeBtn);
+
+      resourceList.appendChild(wrap);
+    });
+  }
+
+  function highlightProtocolButtons() {
+    root.querySelectorAll('[data-viz-protocol]').forEach((btn) => {
+      const active = btn.dataset.vizProtocol === protocol;
+      btn.style.borderColor = active ? 'var(--accent)' : '';
+      btn.style.color = active ? 'var(--accent)' : '';
+      btn.style.background = active ? 'var(--accent-soft)' : '';
+    });
+  }
+
+  function renderAll() {
+    renderResourceList();
+    highlightProtocolButtons();
+    draw();
+  }
+
+  // ---- events -------------------------------------------------------------
+
+  root.querySelector('[data-viz-action="add"]').addEventListener('click', () => {
+    const v = input.value.trim();
+    if (!v) { setStatusText('Enter a resource name first.', 'error'); return; }
+    resources.push({ id: nextId++, label: v, slow: false, lost: false });
+    input.value = '';
+    renderAll();
+  });
+
+  input.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter') root.querySelector('[data-viz-action="add"]').click();
+  });
+
+  root.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    resources = defaultResources();
+    renderAll();
+  });
+
+  root.querySelector('[data-viz-action="run"]').addEventListener('click', () => {
+    draw();
+  });
+
+  root.querySelectorAll('[data-viz-protocol]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      protocol = btn.dataset.vizProtocol;
+      renderAll();
+    });
+  });
+
+  resourceList.addEventListener('click', (e) => {
+    const btn = e.target.closest('[data-viz-toggle]');
+    if (!btn) return;
+    const id = Number(btn.dataset.vizResourceId);
+    const action = btn.dataset.vizToggle;
+    const r = resources.find((x) => x.id === id);
+    if (!r) return;
+    if (action === 'remove') {
+      resources = resources.filter((x) => x.id !== id);
+    } else if (action === 'slow') {
+      r.slow = !r.slow;
+      if (r.slow) r.lost = false;
+    } else if (action === 'lost') {
+      r.lost = !r.lost;
+      if (r.lost) r.slow = false;
+    }
+    renderAll();
+  });
+
+  resources = defaultResources();
+  renderAll();
+})();
+</script>
+
 ### HTTP/2 Binary Framing
 
 <div class="tab-group">

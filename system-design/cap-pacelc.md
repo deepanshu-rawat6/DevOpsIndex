@@ -356,6 +356,218 @@ graph TD
   <div class="quiz-a" hidden>No. W+R = 2, which is not greater than N = 3, so there's no guaranteed overlap between the node that received the write and the node a later read hits. A read can land on a replica that never got the latest write — this is the eventual-consistency row in the quorum table, not the strong one.</div>
 </div>
 
+### Try It Yourself: Live Quorum Overlap
+
+The table above states W+R>N as a static arithmetic rule. But the guarantee it
+describes is really about *specific nodes*, not just counts — a write quorum
+and a read quorum only actually overlap if the particular nodes chosen for
+each happen to share a member. Toggle real nodes into a write set and a read
+set below and see whether they actually intersect, for sizes both above and
+at-or-below the W+R>N threshold.
+
+<div class="structure-viz" id="quorum-overlap-viz">
+  <svg class="viz-canvas" viewBox="0 0 500 260"></svg>
+  <div class="viz-controls">
+    <button class="viz-btn" data-viz-action="setn" data-n="3">N=3</button>
+    <button class="viz-btn" data-viz-action="setn" data-n="5">N=5</button>
+    <button class="viz-btn" data-viz-action="setn" data-n="7">N=7</button>
+    <input class="viz-input" type="number" min="2" max="9" placeholder="custom N (2-9)" />
+    <button class="viz-btn" data-viz-action="applyn">Set N</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="reset">Clear picks</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#e67e22"></span> write-only</span>
+    <span><span class="viz-swatch" style="background:#3498db"></span> read-only</span>
+    <span><span class="viz-swatch" style="background:#27ae60"></span> both — overlap point</span>
+    <span><span class="viz-swatch" style="background:#7f8c8d"></span> neither</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root = document.getElementById('quorum-overlap-viz');
+  const svg = root.querySelector('.viz-canvas');
+  const status = root.querySelector('.viz-status');
+  const nInput = root.querySelector('.viz-input');
+
+  const COLOR = {
+    write: { fill: '#e67e22', stroke: '#ba6018' },
+    read: { fill: '#3498db', stroke: '#2471a3' },
+    both: { fill: '#27ae60', stroke: '#1e8449' },
+    idle: { fill: '#7f8c8d', stroke: '#616a6b' },
+  };
+
+  const WRITE_Y = 55, READ_Y = 135, COMBINED_Y = 215, RADIUS = 20, SPACING = 80, MARGIN = 95;
+
+  let n = 5;
+  let writeSet = new Set();
+  let readSet = new Set();
+
+  // Pure, testable: given N and the specific node indices chosen for the
+  // write and read sets, report set sizes, the arithmetic W+R>N check, and
+  // whether the actual chosen sets share a node.
+  function checkQuorumOverlap(nodeCount, writeIdx, readIdx) {
+    const w = new Set(writeIdx);
+    const r = new Set(readIdx);
+    const overlapNodes = [...w].filter((i) => r.has(i)).sort((a, b) => a - b);
+    const wPlusR = w.size + r.size;
+    return {
+      n: nodeCount,
+      w: w.size,
+      r: r.size,
+      wPlusR,
+      arithmeticGuarantee: wPlusR > nodeCount,
+      overlaps: overlapNodes.length > 0,
+      overlapNodes,
+    };
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function nodeX(i) { return MARGIN + i * SPACING; }
+
+  function rowLabel(x, y, text) {
+    const t = el('text', { x, y, style: 'text-anchor:start;font-weight:600' });
+    t.textContent = text;
+    svg.appendChild(t);
+  }
+
+  function nodeCircle(cx, cy, color, text, clickable, emphasize) {
+    const g = el('g', {});
+    const c = el('circle', {
+      cx, cy, r: RADIUS,
+      fill: color.fill, stroke: color.stroke,
+      'stroke-width': emphasize ? 3.5 : 1.5,
+    });
+    if (clickable) c.style.cursor = 'pointer';
+    g.appendChild(c);
+    const t = el('text', { x: cx, y: cy });
+    t.textContent = text;
+    g.appendChild(t);
+    svg.appendChild(g);
+    return c;
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function statusMessage(result) {
+    const wList = '{' + [...writeSet].sort((a, b) => a - b).join(', ') + '}';
+    const rList = '{' + [...readSet].sort((a, b) => a - b).join(', ') + '}';
+    const arith = result.arithmeticGuarantee
+      ? `W+R=${result.wPlusR} > N=${result.n} — arithmetic guarantee holds`
+      : `W+R=${result.wPlusR} ≤ N=${result.n} — no arithmetic guarantee`;
+    if (result.overlaps) {
+      const nodes = result.overlapNodes.join(', ');
+      return `W=${wList} (|W|=${result.w}), R=${rList} (|R|=${result.r}). ${arith}. These picks DO share node(s) {${nodes}} — overlap confirmed.`;
+    }
+    return `W=${wList} (|W|=${result.w}), R=${rList} (|R|=${result.r}). ${arith}. These picks share NO node — no overlap${result.arithmeticGuarantee ? ' (should be impossible once W+R>N — recheck your picks)' : ' (expected: W+R ≤ N never guarantees overlap)'}.`;
+  }
+
+  function draw() {
+    const width = Math.max(360, MARGIN + (n - 1) * SPACING + 100);
+    svg.setAttribute('viewBox', `0 0 ${width} 260`);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    const result = checkQuorumOverlap(n, writeSet, readSet);
+
+    rowLabel(16, WRITE_Y, 'WRITE');
+    rowLabel(16, READ_Y, 'READ');
+    rowLabel(16, COMBINED_Y, 'BOTH');
+
+    for (let i = 0; i < n; i++) {
+      const x = nodeX(i);
+      const isOverlap = result.overlapNodes.includes(i);
+
+      if (writeSet.has(i)) {
+        svg.appendChild(el('line', {
+          x1: x, y1: WRITE_Y + RADIUS, x2: x, y2: COMBINED_Y - RADIUS,
+          class: isOverlap ? 'viz-edge-active' : 'viz-edge',
+        }));
+      }
+      if (readSet.has(i)) {
+        svg.appendChild(el('line', {
+          x1: x, y1: READ_Y + RADIUS, x2: x, y2: COMBINED_Y - RADIUS,
+          class: isOverlap ? 'viz-edge-active' : 'viz-edge',
+        }));
+      }
+
+      const wCircle = nodeCircle(x, WRITE_Y, writeSet.has(i) ? COLOR.write : COLOR.idle, String(i), true);
+      wCircle.addEventListener('click', () => {
+        if (writeSet.has(i)) writeSet.delete(i); else writeSet.add(i);
+        draw();
+      });
+
+      const rCircle = nodeCircle(x, READ_Y, readSet.has(i) ? COLOR.read : COLOR.idle, String(i), true);
+      rCircle.addEventListener('click', () => {
+        if (readSet.has(i)) readSet.delete(i); else readSet.add(i);
+        draw();
+      });
+
+      const inW = writeSet.has(i), inR = readSet.has(i);
+      const combinedColor = inW && inR ? COLOR.both : inW ? COLOR.write : inR ? COLOR.read : COLOR.idle;
+      nodeCircle(x, COMBINED_Y, combinedColor, String(i), false, inW && inR);
+    }
+
+    setStatus(statusMessage(result), result.overlaps ? 'ok' : (result.arithmeticGuarantee ? 'error' : ''));
+  }
+
+  root.querySelectorAll('[data-viz-action="setn"]').forEach((btn) => {
+    btn.addEventListener('click', () => {
+      n = parseInt(btn.getAttribute('data-n'), 10);
+      writeSet = new Set();
+      readSet = new Set();
+      draw();
+    });
+  });
+
+  root.querySelector('[data-viz-action="applyn"]').addEventListener('click', () => {
+    const v = parseInt(nInput.value, 10);
+    if (!v || v < 2 || v > 9) {
+      setStatus('Enter a custom N between 2 and 9.', 'error');
+      return;
+    }
+    n = v;
+    writeSet = new Set();
+    readSet = new Set();
+    nInput.value = '';
+    draw();
+  });
+
+  root.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    writeSet = new Set();
+    readSet = new Set();
+    draw();
+  });
+
+  draw();
+})();
+</script>
+
+**Try this:** set N=5. Pick W = {0, 1} and R = {2, 3} — sizes 2 and 2, W+R=4,
+which is not greater than N=5, and these two picks share no node: no overlap.
+Now, keeping the same sizes, try W = {0, 1} and R = {0, 2} instead — still
+W+R=4 ≤ N=5, but this particular pair *does* share node 0. That's the point:
+below the W+R>N threshold, overlap is possible but not guaranteed — whether
+any given pair overlaps depends entirely on which specific nodes got picked,
+which is luck unless a protocol enforces it. Now expand the read set to
+{2, 3, 4} (R=3) — still W+R=5, not greater than N=5, and you can still find
+non-overlapping picks. Finally grow the read set to 4 nodes (W+R=6 > N=5) and
+try several completely different node choices for both sets: every single one
+overlaps, no matter which specific nodes you pick — with only 5 nodes total,
+2 write nodes and 4 read nodes can't help but share one. That's pigeonhole,
+not luck, and it's exactly the guarantee a real quorum protocol enforces on
+every request by construction (see "Why Consensus Gives You CP" above),
+rather than leaving it to chance the way this toy does.
+
 ---
 
 ## 9. Vector Clocks and Version Vectors

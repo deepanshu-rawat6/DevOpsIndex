@@ -710,6 +710,300 @@ Try it against the MVCC demo above: begin two overlapping transactions there, an
   <div class="quiz-a" hidden>Because SSI's predicate-lock (SIREAD) checking is a commit-time check, not a per-statement one. SIREAD locks only record which data a transaction's reads depended on as it goes — they don't block anything in the moment. Only at COMMIT does Postgres have the full picture needed to tell whether a genuinely non-serializable dependency cycle formed among the concurrent transactions involved, so that's the only point where it can safely say "one of these can't be allowed to commit."</div>
 </div>
 
+**Try it yourself — SSI dependency-graph simulator.** The MVCC visibility simulator above answers "which row version does a snapshot see." This one answers a different question: given a set of concurrent transactions and the rows each one reads and writes, does PostgreSQL's SSI implementation consider them dangerous? Add 2–4 transactions, type in which rows each one reads and writes (e.g. `A`, `A, B`), and watch the rw-antidependency graph get built live. The important thing to notice: SSI does *not* abort on just any conflict, or even on any graph cycle — it specifically watches for a **pivot** transaction sitting between one inbound and one outbound rw-antidependency edge. A lone rw-antidependency edge is normal and harmless under snapshot isolation; only a pivot with both edges present triggers the risk of a `40001` at commit.
+
+<div class="structure-viz" id="ssi-dependency-viz">
+  <svg class="viz-canvas" viewBox="0 0 700 260"></svg>
+  <div class="viz-controls">
+    <button class="viz-btn" data-viz-action="add">Add transaction</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div id="ssi-txn-panel"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#1e3a8a"></span> transaction</span>
+    <span><span class="viz-swatch" style="background:#7f1d1d"></span> pivot (at risk of 40001)</span>
+    <span><span class="viz-swatch" style="background:#475569"></span> rw-antidependency edge</span>
+    <span><span class="viz-swatch" style="background:#f87171"></span> the two edges forming the dangerous structure</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root = document.getElementById('ssi-dependency-viz');
+  const svg = root.querySelector('.viz-canvas');
+  const status = root.querySelector('.viz-status');
+  const panel = root.querySelector('#ssi-txn-panel');
+
+  // ---- core logic: pure, no DOM, verified standalone (classic 3-txn danger
+  // example, single-edge negative case, and a pure write-write "cycle" that
+  // must NOT be flagged) before any rendering code was written. ----
+
+  function parseRowList(str) {
+    return String(str || '')
+      .split(/[\s,]+/)
+      .map((s) => s.trim().toUpperCase())
+      .filter(Boolean);
+  }
+
+  // An rw-antidependency edge Ti -> Tj exists when Ti's read set overlaps
+  // Tj's write set (Ti read a row version that Tj's write later makes
+  // obsolete). This graph deliberately only models THIS kind of edge — not
+  // write-write conflicts, not same-direction read/write dependencies —
+  // because SSI's dangerous-structure check specifically cares about
+  // rw-antidependencies.
+  function buildRwAntidependencyEdges(transactions) {
+    const edges = [];
+    for (const ti of transactions) {
+      for (const tj of transactions) {
+        if (ti.id === tj.id) continue;
+        const sharedRows = ti.reads.filter((r) => tj.writes.includes(r));
+        if (sharedRows.length > 0) {
+          edges.push({ from: ti.id, to: tj.id, rows: sharedRows });
+        }
+      }
+    }
+    return edges;
+  }
+
+  // SSI's actual "dangerous structure" heuristic (Cahill et al.; this is
+  // what Postgres's predicate-lock graph check implements). This is NOT
+  // generic cycle detection, and that distinction matters: a transaction is
+  // at risk of a 40001 serialization failure specifically when it is the
+  // PIVOT of two *consecutive* rw-antidependency edges among potentially-
+  // concurrent transactions — one inbound, one outbound. A lone
+  // rw-antidependency edge is completely normal under snapshot isolation
+  // and never aborts anything by itself; a full cycle built from other kinds
+  // of dependencies (write-write, read-write same direction) isn't what SSI
+  // watches for either. Only a pivot with BOTH an in-edge and an out-edge,
+  // both rw-antidependencies, is dangerous.
+  function detectDangerousStructure(transactions) {
+    const edges = buildRwAntidependencyEdges(transactions);
+    for (const t of transactions) {
+      const incoming = edges.filter((e) => e.to === t.id);
+      const outgoing = edges.filter((e) => e.from === t.id);
+      if (incoming.length === 0 || outgoing.length === 0) continue;
+
+      // Prefer to report the textbook T1 -> T2 -> T3 shape (three distinct
+      // transactions) if such an in/out pair exists; otherwise fall back to
+      // any pair (a 2-cycle through the pivot is also dangerous).
+      let chosenIn = incoming[0];
+      let chosenOut = outgoing[0];
+      outer:
+      for (const inEdge of incoming) {
+        for (const outEdge of outgoing) {
+          if (inEdge.from !== outEdge.to) {
+            chosenIn = inEdge;
+            chosenOut = outEdge;
+            break outer;
+          }
+        }
+      }
+      return { dangerous: true, pivot: t.id, inEdge: chosenIn, outEdge: chosenOut, edges };
+    }
+    return { dangerous: false, pivot: null, inEdge: null, outEdge: null, edges };
+  }
+
+  // ---- DOM / SVG rendering ----
+  let idCounter = 4;
+  let state = [
+    { id: 'T1', reads: 'A', writes: '' },
+    { id: 'T2', reads: 'B', writes: 'A' },
+    { id: 'T3', reads: '', writes: 'B' },
+  ];
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function readState() {
+    return state.map((t) => ({ id: t.id, reads: parseRowList(t.reads), writes: parseRowList(t.writes) }));
+  }
+
+  function edgeKey(e) {
+    return [e.from, e.to].sort().join('|');
+  }
+
+  function isSameEdge(a, b) {
+    return !!a && !!b && a.from === b.from && a.to === b.to;
+  }
+
+  function renderGraph(transactions, result) {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    const n = transactions.length;
+    const cx = 350, cy = 130, radius = n <= 2 ? 90 : 105;
+    const nodeR = 30;
+    const positions = new Map();
+    transactions.forEach((t, i) => {
+      const angle = -Math.PI / 2 + i * (2 * Math.PI / n);
+      positions.set(t.id, { x: cx + radius * Math.cos(angle), y: cy + radius * Math.sin(angle) });
+    });
+
+    // Group edges by unordered pair so a two-way pair (Ti -> Tj and Tj -> Ti)
+    // gets drawn as two distinct curves instead of one line on top of another.
+    const groups = new Map();
+    result.edges.forEach((e) => {
+      const k = edgeKey(e);
+      if (!groups.has(k)) groups.set(k, []);
+      groups.get(k).push(e);
+    });
+
+    const defs = document.createElementNS(svgNS, 'defs');
+    ['normal', 'danger'].forEach((kind) => {
+      const marker = el('marker', {
+        id: 'ssi-arrow-' + kind,
+        viewBox: '0 0 10 10',
+        refX: '9',
+        refY: '5',
+        markerWidth: '6',
+        markerHeight: '6',
+        orient: 'auto-start-reverse',
+      });
+      const path = el('path', { d: 'M0,0 L10,5 L0,10 z', fill: kind === 'danger' ? '#f87171' : '#64748b' });
+      marker.appendChild(path);
+      defs.appendChild(marker);
+    });
+    svg.appendChild(defs);
+
+    result.edges.forEach((e) => {
+      const isDanger = isSameEdge(e, result.inEdge) || isSameEdge(e, result.outEdge);
+      const from = positions.get(e.from);
+      const to = positions.get(e.to);
+      const dx = to.x - from.x, dy = to.y - from.y;
+      const dist = Math.hypot(dx, dy) || 1;
+      const ux = dx / dist, uy = dy / dist;
+      const sx = from.x + ux * nodeR, sy = from.y + uy * nodeR;
+      const ex = to.x - ux * (nodeR + 8), ey = to.y - uy * (nodeR + 8);
+
+      const group = groups.get(edgeKey(e));
+      const curve = group.length > 1 ? (group[0] === e ? 16 : -16) : 0;
+      const midx = (sx + ex) / 2 - uy * curve;
+      const midy = (sy + ey) / 2 + ux * curve;
+
+      const path = el('path', {
+        d: curve === 0 ? `M${sx},${sy} L${ex},${ey}` : `M${sx},${sy} Q${midx},${midy} ${ex},${ey}`,
+        class: isDanger ? 'viz-edge-active' : 'viz-edge',
+        stroke: isDanger ? '#f87171' : undefined,
+        'stroke-width': isDanger ? '2.5' : undefined,
+        'marker-end': `url(#ssi-arrow-${isDanger ? 'danger' : 'normal'})`,
+      });
+      if (!isDanger) path.removeAttribute('stroke');
+      if (!isDanger) path.removeAttribute('stroke-width');
+      svg.appendChild(path);
+
+      const labelText = e.rows.join(',');
+      const lt = el('text', { x: midx, y: midy - 6, class: 'viz-label-dim' });
+      lt.textContent = labelText;
+      svg.appendChild(lt);
+    });
+
+    transactions.forEach((t) => {
+      const pos = positions.get(t.id);
+      const isPivot = result.dangerous && t.id === result.pivot;
+      svg.appendChild(el('circle', {
+        cx: pos.x, cy: pos.y, r: nodeR,
+        class: isPivot ? 'viz-node-removing' : 'viz-node',
+      }));
+      const label = el('text', { x: pos.x, y: pos.y - 5 });
+      label.textContent = t.id;
+      svg.appendChild(label);
+      const sub = el('text', { x: pos.x, y: pos.y + 11, class: 'viz-label-dim' });
+      sub.textContent = `r:${t.reads.join(',') || '-'} w:${t.writes.join(',') || '-'}`;
+      svg.appendChild(sub);
+    });
+  }
+
+  function renderStatus(result) {
+    if (result.dangerous) {
+      const sameOuter = result.inEdge.from === result.outEdge.to;
+      const msg = sameOuter
+        ? `Dangerous structure: ${result.inEdge.from} → ${result.pivot} → ${result.inEdge.from} — ${result.pivot} sits between two rw-antidependencies with ${result.inEdge.from} on both ends (a 2-transaction pivot cycle). PostgreSQL SSI would abort one of these transactions with a 40001 serialization_failure at COMMIT.`
+        : `Dangerous structure: ${result.inEdge.from} → ${result.pivot} → ${result.outEdge.to} — ${result.pivot} is the pivot of two rw-antidependencies. If ${result.inEdge.from} and ${result.outEdge.to} run concurrently, PostgreSQL SSI would abort one of these transactions with a 40001 serialization_failure at COMMIT.`;
+      setStatus(msg, 'error');
+    } else if (result.edges.length === 0) {
+      setStatus('No rw-antidependency edges yet — give two transactions overlapping reads/writes (one reads a row another writes) to build the graph.', '');
+    } else {
+      setStatus(`${result.edges.length} rw-antidependency edge(s) so far, but no pivot — no transaction has both an incoming and an outgoing edge, so SSI has nothing to abort here.`, 'ok');
+    }
+  }
+
+  function refreshAnalysis() {
+    const transactions = readState();
+    const result = detectDangerousStructure(transactions);
+    renderGraph(transactions, result);
+    renderStatus(result);
+  }
+
+  function renderPanel() {
+    const canRemove = state.length > 2;
+    const canAdd = state.length < 4;
+    root.querySelector('[data-viz-action="add"]').disabled = !canAdd;
+    panel.innerHTML = state.map((t) => `
+      <div style="margin-top:0.6rem;padding:0.5rem 0.7rem;border-left:3px solid #475569;background:rgba(148,163,184,0.06);border-radius:0.25rem;display:flex;flex-wrap:wrap;gap:0.5rem;align-items:center;">
+        <strong style="min-width:2rem;">${t.id}</strong>
+        <label style="font-size:0.72rem;color:#94a3b8;">reads
+          <input class="viz-input ssi-field" type="text" data-id="${t.id}" data-field="reads" value="${t.reads}" placeholder="e.g. A, B" style="width:6rem" />
+        </label>
+        <label style="font-size:0.72rem;color:#94a3b8;">writes
+          <input class="viz-input ssi-field" type="text" data-id="${t.id}" data-field="writes" value="${t.writes}" placeholder="e.g. A" style="width:6rem" />
+        </label>
+        <button class="viz-btn viz-btn-danger ssi-remove" data-id="${t.id}" ${canRemove ? '' : 'disabled'}>Remove</button>
+      </div>`).join('');
+  }
+
+  panel.addEventListener('input', (e) => {
+    const input = e.target.closest('.ssi-field');
+    if (!input) return;
+    const id = input.getAttribute('data-id');
+    const field = input.getAttribute('data-field');
+    const entry = state.find((t) => t.id === id);
+    if (entry) entry[field] = input.value;
+    refreshAnalysis();
+  });
+
+  panel.addEventListener('click', (e) => {
+    const btn = e.target.closest('.ssi-remove');
+    if (!btn) return;
+    if (state.length <= 2) return;
+    const id = btn.getAttribute('data-id');
+    state = state.filter((t) => t.id !== id);
+    renderPanel();
+    refreshAnalysis();
+  });
+
+  root.querySelector('[data-viz-action="add"]').addEventListener('click', () => {
+    if (state.length >= 4) return;
+    state.push({ id: 'T' + idCounter++, reads: '', writes: '' });
+    renderPanel();
+    refreshAnalysis();
+  });
+
+  root.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    idCounter = 4;
+    state = [
+      { id: 'T1', reads: 'A', writes: '' },
+      { id: 'T2', reads: 'B', writes: 'A' },
+      { id: 'T3', reads: '', writes: 'B' },
+    ];
+    renderPanel();
+    refreshAnalysis();
+    setStatus('Reset to the classic 3-transaction dangerous structure — T1 reads a row T2 writes, T2 reads a row T3 writes.', '');
+  });
+
+  renderPanel();
+  refreshAnalysis();
+})();
+</script>
+
 ---
 
 ## Replication — Sync vs Async in Detail
