@@ -777,11 +777,21 @@ VPC, subnets, firewall rules, Cloud NAT, VPC Peering, Shared VPC, Private Google
 | [observability.md](./observability.md) | Cloud Monitoring (metrics, alerting, uptime), Cloud Logging (LQL, sinks, retention), Cloud Trace, Cloud Audit Logs, Error Reporting, Profiler |
 | [cicd.md](./cicd.md) | Cloud Build (cloudbuild.yaml, triggers, caching), Artifact Registry (Docker/Helm, scanning), Cloud Deploy (canary, approval gates), GHA integration |
 
+### Solutions-Architect Deep Dives
+| File | Topics |
+|------|--------|
+| [security-compliance.md](./security-compliance.md) | VPC Service Controls, Cloud KMS/CMEK, Secret Manager, Binary Authorization, Security Command Center, IAM Deny policies, IAM Conditions, Org Policy constraints |
+| [reliability-dr.md](./reliability-dr.md) | RTO/RPO-driven design, Google's 4 DR patterns (backup-restore, pilot light, warm standby, multi-site active/active), multi-zone vs multi-region, multi-region failover walkthrough |
+| [cost-optimization.md](./cost-optimization.md) | CUD vs SUD, Recommender/Active Assist, BigQuery pricing (on-demand vs Editions), FinOps toolchain (budgets, billing export, labels), hidden network-egress costs |
+| [data-pipelines.md](./data-pipelines.md) | Dataflow (Apache Beam), Dataproc (managed Spark/Hadoop), Cloud Composer vs Workflows, Data Fusion, pipeline-tool decision guide |
+| [migration-methodology.md](./migration-methodology.md) | Migration strategy taxonomy, Migrate to Virtual Machines, Database Migration Service, BigQuery Migration Service, Storage Transfer Service/Transfer Appliance, Anthos hybrid migration |
+| [request-flow-glb-to-pod.md](./request-flow-glb-to-pod.md) | End-to-end request walkthrough: Cloud DNS → Global External LB → Cloud Armor → NEG → GKE pod, LB-type tradeoffs, traffic-not-reaching-pod debugging flowchart |
+
 ### Comparison & Scenarios
 | File | Topics |
 |------|--------|
 | [gcp-vs-aws.md](./gcp-vs-aws.md) | Service-by-service mapping, global VPC vs regional, BigQuery vs Redshift, GKE vs EKS, when to choose which |
-| [scenarios.md](./scenarios.md) | 7 debugging scenarios: Workload Identity 403, autoscaler not scaling, BigQuery cost spike, cold starts, Spanner hotspot, Pub/Sub backlog, GCS access denied |
+| [scenarios.md](./scenarios.md) | 10 debugging scenarios: Workload Identity 403, autoscaler not scaling, BigQuery cost spike, cold starts, Spanner hotspot, Pub/Sub backlog, GCS access denied, Cloud SQL connection exhaustion, AlloyDB/Cloud SQL failover DNS caching, Bigtable hot row key |
 
 ---
 
@@ -789,12 +799,17 @@ VPC, subnets, firewall rules, Cloud NAT, VPC Peering, Shared VPC, Private Google
 
 ```
 Coming from AWS:
-  from-aws.md → README.md → compute.md → gke.md → storage.md
-  → databases.md → bigquery.md → serverless.md → messaging.md
-  → observability.md → cicd.md → gcp-vs-aws.md → scenarios.md
+  from-aws.md → README.md → services-overview.md → security-compliance.md
+  → compute.md → gke.md → request-flow-glb-to-pod.md → storage.md
+  → databases.md → bigquery.md → bigtable.md → data-pipelines.md
+  → serverless.md → messaging.md → reliability-dr.md → cost-optimization.md
+  → migration-methodology.md → observability.md → cicd.md
+  → gcp-vs-aws.md → scenarios.md
 
 GCP-first learner:
-  README.md → services-overview.md → compute.md → gke.md
-  → storage.md → databases.md → serverless.md → messaging.md
-  → observability.md → cicd.md → scenarios.md
+  README.md → services-overview.md → security-compliance.md → compute.md
+  → gke.md → request-flow-glb-to-pod.md → storage.md → databases.md
+  → data-pipelines.md → serverless.md → messaging.md → reliability-dr.md
+  → cost-optimization.md → migration-methodology.md → observability.md
+  → cicd.md → scenarios.md
 ```

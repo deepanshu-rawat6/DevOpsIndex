@@ -78,7 +78,7 @@ graph TD
     NEWBINDING["New binding added directly<br/>on prod-backend project"]:::binding -.->|"additive only — cannot revoke<br/>what Org/Folder already granted"| PROJ1
 ```
 
-IAM policies **inherit downward** — a binding at the Organization level applies to all folders, projects, and resources within it. This is additive; you can't deny at a lower level what's allowed higher up (no deny overrides like AWS explicit deny). The dashed edge above shows why: a narrower binding added directly on `prod-backend` layers on top of everything inherited from Org and Folder — it can only add access, never take away what a higher level already granted.
+IAM policies **inherit downward** — a binding at the Organization level applies to all folders, projects, and resources within it. Allow bindings are additive; an Allow binding at a lower level can't revoke what's allowed higher up. The dashed edge above shows why: a narrower binding added directly on `prod-backend` layers on top of everything inherited from Org and Folder — it can only add access, never take away what a higher level already granted. GCP does have a separate override for exactly this gap — **IAM Deny policies**, which always win over any Allow regardless of hierarchy level — see [`security-compliance.md`](./security-compliance.md) for how they work.
 
 **AWS parallel:** AWS doesn't have a native Organization → Folder → Account hierarchy at the IAM policy level in the same way. GCP's hierarchy maps loosely to AWS Organizations + SCPs.
 
@@ -161,16 +161,16 @@ gcloud iam service-accounts add-iam-policy-binding my-app-sa@project.iam.gservic
 | | GCP IAM | AWS IAM |
 |--|---------|---------|
 | **Model** | member + role → resource | principal + policy (identity or resource-based) |
-| **Deny rules** | No explicit deny (additive only) | Yes — explicit Deny overrides Allow |
+| **Deny rules** | Allow bindings: additive only, no deny. Separate **IAM Deny policies** always override Allow (see security-compliance.md) | Yes — explicit Deny overrides Allow |
 | **Resource hierarchy** | Org → Folder → Project → Resource | Account → Resource (no Folder concept) |
 | **Cross-account** | Workload Identity Federation | AssumeRole via STS |
 | **Machine identity** | Service Account (vm/pod runs as SA) | IAM Role (EC2 instance profile, IRSA) |
 | **Policy attachment** | Binding on resource | Policy attached to identity or resource |
 
 <div class="quiz-card">
-  <p class="quiz-q">A team lead argues: "let's add a DENY policy at the prod-backend project level to block the intern's overly broad Editor role, which was granted at the Org level." Does this work the way it would in AWS?</p>
+  <p class="quiz-q">A team lead argues: "let's add an IAM Deny policy at the prod-backend project level to block the intern's overly broad Editor role, which was granted at the Org level." Does this actually work?</p>
   <button class="quiz-reveal">Reveal answer</button>
-  <div class="quiz-a" hidden>No. GCP IAM bindings are purely additive — there's no explicit-deny mechanism at a lower level (Folder, Project, Resource) that can revoke or override a broader grant made higher up the resource hierarchy. The only way to fix this is to remove or narrow the binding at the level where it was actually granted (the Org), not to counter it with a deny below. AWS IAM is different: it supports explicit Deny statements that do override any Allow, regardless of where each is attached.</div>
+  <div class="quiz-a" hidden>Yes — this is exactly the case IAM Deny policies exist for. A Deny policy attached at the project level, denying the relevant permissions for that intern's principal, is checked before and independently of any Allow binding, so it overrides the Org-level Editor grant for those permissions without touching the Org-level binding at all. That's different from an ordinary IAM binding: you can't tack a "deny" clause onto an ordinary Allow binding (those stay purely additive), and a Deny policy targets specific permissions rather than a named role, so fully neutralizing Editor means enumerating its dangerous permissions rather than denying "roles/editor" as a unit. It's also not identical to AWS: GCP's Deny is a separate policy object attached to a hierarchy node, not a Deny statement living inside the same policy as the Allow — but the net effect, Deny always beats Allow regardless of level, is the same idea. See <code>security-compliance.md</code> for the full mechanics.</div>
 </div>
 
 ---

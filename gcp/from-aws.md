@@ -20,7 +20,7 @@ Everything you know from AWS transfers — but several core abstractions work di
 | Security Groups on ENI | Firewall rules on the network, filtered by tag or service account |
 | NACLs at subnet | No NACLs in GCP — stateful firewall rules only |
 | Regions are siloed | Regions share one VPC natively |
-| IAM explicit Deny wins | GCP IAM is additive only — no explicit deny |
+| IAM explicit Deny wins | GCP Allow bindings are additive only — but a separate IAM Deny policy always overrides any Allow |
 | Reserved Instances for discounts | Sustained use discounts auto-apply — no commitment |
 | Account = isolation boundary | Project = isolation boundary |
 
@@ -148,7 +148,7 @@ gcloud config set project my-company-prod-backend
 
 ---
 
-## 2. IAM — Additive Only
+## 2. IAM — Additive Allow, Plus a Separate Deny
 
 GCP IAM = **member + role → resource**. Three rule types:
 
@@ -162,7 +162,7 @@ GCP IAM = **member + role → resource**. Three rule types:
 
 **AWS**: explicit `Deny` overrides `Allow`. You can grant `*` then deny specific actions.
 
-**GCP**: policies are **additive**. If one binding grants read and another grants write, the user has both. There is no explicit Deny in standard IAM. You cannot revoke a permission granted at a higher level.
+**GCP**: standard IAM **Allow** bindings are additive. If one binding grants read and another grants write, the user has both, and no Allow binding can revoke a permission granted by another Allow binding at a higher level. GCP does have a separate mechanism for a hard override — **IAM Deny policies** — which always win over any Allow regardless of where it's granted; see [`security-compliance.md`](./security-compliance.md) for how they actually work.
 
 <div class="toggle-switch">
   <div class="toggle-buttons">
@@ -176,14 +176,14 @@ Deny: iam:DeleteRole</code></pre>
     The explicit <code>Deny</code> wins no matter which policy granted the <code>Allow</code>, or at what level it was attached.
   </div>
   <div class="toggle-panel" data-toggle-panel="gcp-iam">
-    That pattern <strong>does not exist</strong> in standard GCP IAM. There is no explicit Deny — every binding, from every source, at every level, only ever adds permissions, and you cannot revoke a permission granted at a higher level. The only way to keep access narrow is the GCP approach: grant only what's needed, nothing more.
+    That exact pattern doesn't exist inside a standard IAM <strong>Allow</strong> binding — every Allow binding, from every source, at every level, only ever adds permissions, and one Allow can't revoke what another granted higher up. GCP does have a separate, purpose-built override for this — <strong>IAM Deny policies</strong>, which always win over any Allow regardless of where it's granted (see <code>security-compliance.md</code>) — but Allow bindings themselves stay additive-only. Default to the GCP approach: grant only what's needed, and reach for a Deny policy only when you need a guardrail no future Allow can undo.
   </div>
 </div>
 
 <div class="quiz-card">
   <p class="quiz-q">You grant a service account <code>roles/editor</code> on a project, then try to lock it down by adding a binding that denies <code>iam.serviceAccounts.delete</code> — the way you'd bolt an explicit Deny onto an AWS IAM policy. Does this narrow the service account's access in GCP?</p>
   <button class="quiz-reveal">Reveal answer</button>
-  <div class="quiz-a" hidden>No — and this is the single biggest IAM gotcha coming from AWS. Standard GCP IAM has no explicit Deny; every binding, at every level, only ever adds permissions, and you cannot revoke a permission granted at a higher level. The only real fix is to never grant the broad role in the first place — design least-privilege from the start, since there's no "deny-all and punch holes" escape hatch in GCP.</div>
+  <div class="quiz-a" hidden>No — a binding can't deny anything; a binding only ever grants a role, so there's no "deny" clause to bolt onto one the way you'd add an explicit Deny statement to an AWS IAM policy. Standard IAM Allow bindings are purely additive: every binding, at every level, only adds permissions, and none of them can revoke what a higher level granted. GCP does have a real mechanism for this — a separate <strong>IAM Deny policy</strong>, which always wins over any Allow no matter where it's granted (see <code>security-compliance.md</code> for how they work) — but that's a distinct policy object attached to the hierarchy, not a special binding tacked onto the role grant itself. To actually lock this down: avoid granting <code>roles/editor</code> in the first place, or attach a proper IAM Deny policy blocking <code>iam.serviceAccounts.delete</code> for that service account.</div>
 </div>
 
 ### Policy Binding Example
@@ -496,4 +496,4 @@ Week 5 — Comparison & Scenarios
 
 The two concepts that take the longest to internalize coming from AWS:
 1. **Global VPC** — stop thinking about cross-region connectivity as something you configure
-2. **Additive IAM** — design least-privilege from the start; there is no "deny-all and punch holes" escape hatch
+2. **Additive IAM** — design least-privilege from the start for standard Allow bindings; reach for a real IAM Deny policy (see `security-compliance.md`) only when you need a hard override no Allow can undo

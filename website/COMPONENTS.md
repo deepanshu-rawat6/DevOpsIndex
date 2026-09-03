@@ -385,3 +385,18 @@ all — a reader will trust the wrong belief it's animating.
 - Don't nest one interactive component inside another (the structure-viz's
   own `<script>` sibling is the one deliberate exception to "inside a single
   top-level div" — see its rule above for why).
+- **A code sample inside a tab-group/toggle-switch/stepper panel must be
+  written as `<pre><code class="language-x">...</code></pre>` raw HTML, not a
+  ` ```language ` fence.** A fenced code block only parses as code when
+  CommonMark can see it as its own block — which requires the blank line on
+  either side that fences conventionally get — but that same blank line
+  terminates the panel's own raw-HTML block first (this is the general
+  blank-line rule above, just easy to forget the moment the content is "a
+  code sample" instead of "an HTML component"). The failure is quiet: no
+  visible `&lt;div` text leaks, div open/close *counts* can even still match by
+  coincidence, but the nesting is wrong and a `<div>` deeper in the same
+  component silently fails to close. Escape `<`/`>`/`&` by hand
+  (`&lt;`/`&gt;`/`&amp;`) and keep every line of the snippet non-blank —
+  syntax highlighting still applies automatically (`initSyntaxHighlighting()`
+  runs on any `pre > code`, fenced or not) so nothing is lost by skipping the
+  fence.

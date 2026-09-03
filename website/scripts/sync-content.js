@@ -38,7 +38,7 @@ const SECTIONS = [
   },
   {
     slug: 'gcp', title: 'GCP', order: 8,
-    readOrder: ['README', 'from-aws', 'services-overview', 'compute', 'gke', 'storage', 'databases', 'bigquery', 'bigtable', 'serverless', 'messaging', 'observability', 'cicd', 'gcp-vs-aws', 'scenarios'],
+    readOrder: ['README', 'from-aws', 'services-overview', 'security-compliance', 'compute', 'gke', 'request-flow-glb-to-pod', 'storage', 'databases', 'bigquery', 'bigtable', 'data-pipelines', 'serverless', 'messaging', 'reliability-dr', 'cost-optimization', 'migration-methodology', 'observability', 'cicd', 'gcp-vs-aws', 'scenarios'],
   },
   {
     slug: 'monitoring', title: 'Monitoring', order: 9,

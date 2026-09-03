@@ -224,20 +224,26 @@ Language and concurrency fluency for infra tooling, backend services, and coding
 | [gcp/from-aws.md](./gcp/from-aws.md) | Mental model shifts for AWS engineers, resource hierarchy (Org/Folder/Project), additive IAM, global VPC, pricing quirks, gcloud vs aws CLI cheatsheet | SDE-1/2 |
 | [gcp/README.md](./gcp/README.md) | Global VPC, subnets, firewall rules, Cloud NAT, VPC Peering, Shared VPC, Private Google Access, Private Service Connect | SDE-1/2 |
 | [gcp/services-overview.md](./gcp/services-overview.md) | IAM, Workload Identity, Cloud LB, Cloud DNS, Cloud Run vs GKE | SDE-1/2 |
+| [gcp/security-compliance.md](./gcp/security-compliance.md) | VPC Service Controls, Cloud KMS/CMEK, Secret Manager, Binary Authorization, Security Command Center, IAM Deny policies, IAM Conditions, Org Policy constraints | SDE-2 |
 | [gcp/compute.md](./gcp/compute.md) | GCE vs EC2, machine families, custom machine types, disk types, Preemptible/Spot VMs, Managed vs Unmanaged Instance Groups, auto-healing/scaling, rolling updates, serial ports 1–4, live migration, IAP SSH | SDE-1/2 |
 | [gcp/gke.md](./gcp/gke.md) | GKE Standard vs Autopilot, Workload Identity, VPC-native networking, container-native LB (NEG), GPU pools, upgrade channels | SDE-2 |
+| [gcp/request-flow-glb-to-pod.md](./gcp/request-flow-glb-to-pod.md) | End-to-end request walkthrough: Cloud DNS → Global External LB → Cloud Armor → NEG → GKE pod, LB-type tradeoffs, traffic-not-reaching-pod debugging flowchart | SDE-2 |
 | [gcp/storage.md](./gcp/storage.md) | GCS vs S3 (storage classes, Autoclass, lifecycle, versioning), Persistent Disk, Local SSD, Filestore (NFS), Storage Transfer Service | SDE-1/2 |
 | [gcp/databases.md](./gcp/databases.md) | Cloud SQL, AlloyDB, Cloud Spanner (TrueTime), Firestore, Memorystore (Redis), database selection guide | SDE-1/2 |
 | [gcp/bigquery.md](./gcp/bigquery.md) | Columnar storage, partitioning, clustering, slots, streaming vs batch, external tables, time travel, cost optimization | SDE-1/2 |
 | [gcp/bigtable.md](./gcp/bigtable.md) | Wide-column model, row key design (hotspot prevention), LSM tree, HBase API, monitoring | SDE-2 |
+| [gcp/data-pipelines.md](./gcp/data-pipelines.md) | Dataflow (Apache Beam), Dataproc (managed Spark/Hadoop), Cloud Composer vs Workflows, Data Fusion, pipeline-tool decision guide | SDE-2 |
 | [gcp/serverless.md](./gcp/serverless.md) | Cloud Run (concurrency, traffic splitting, VPC, triggers), Cloud Functions Gen2, Cloud Run Jobs, Cloud Scheduler, Secret Manager | SDE-1/2 |
 | [gcp/messaging.md](./gcp/messaging.md) | Pub/Sub (topic/subscription, DLQ, Lite), Cloud Tasks (rate-limited queues), Eventarc (event routing), service selection guide | SDE-1/2 |
+| [gcp/reliability-dr.md](./gcp/reliability-dr.md) | RTO/RPO-driven design, Google's 4 DR patterns, multi-zone vs multi-region, multi-region failover walkthrough | SDE-2 |
+| [gcp/cost-optimization.md](./gcp/cost-optimization.md) | CUD vs SUD, Recommender/Active Assist, BigQuery pricing models, FinOps toolchain, hidden network-egress costs | SDE-2 |
+| [gcp/migration-methodology.md](./gcp/migration-methodology.md) | Migration strategy taxonomy, Migrate to Virtual Machines, Database Migration Service, BigQuery Migration Service, Storage Transfer Service/Transfer Appliance, Anthos hybrid migration | SDE-2 |
 | [gcp/observability.md](./gcp/observability.md) | Cloud Monitoring, Cloud Logging (LQL, sinks, retention), Cloud Trace, Cloud Audit Logs, Error Reporting, Profiler | SDE-1/2 |
 | [gcp/cicd.md](./gcp/cicd.md) | Cloud Build (cloudbuild.yaml, triggers, caching), Artifact Registry (Docker/Helm, scanning), Cloud Deploy (canary, approval gates), GitHub Actions + Workload Identity Federation | SDE-1/2 |
 | [gcp/gcp-vs-aws.md](./gcp/gcp-vs-aws.md) | Full service mapping, global VPC vs regional VPC, BigQuery vs Redshift, GKE vs EKS, TPUs, when to choose | SDE-1/2 |
-| [gcp/scenarios.md](./gcp/scenarios.md) | 7 scenarios with Prevention: Workload Identity 403, autoscaler stuck, BigQuery cost spike, Cloud Run cold start, Spanner hotspot, Pub/Sub backlog, GCS 403 | SDE-1/2 |
+| [gcp/scenarios.md](./gcp/scenarios.md) | 10 scenarios with Prevention: Workload Identity 403, autoscaler stuck, BigQuery cost spike, Cloud Run cold start, Spanner hotspot, Pub/Sub backlog, GCS 403, Cloud SQL connection exhaustion, AlloyDB/Cloud SQL failover DNS caching, Bigtable hot row key | SDE-1/2 |
 
-**Read order:** from-aws → README → services-overview → compute → gke → storage → databases → bigquery → bigtable → serverless → messaging → observability → cicd → gcp-vs-aws → scenarios
+**Read order:** from-aws → README → services-overview → security-compliance → compute → gke → request-flow-glb-to-pod → storage → databases → bigquery → bigtable → data-pipelines → serverless → messaging → reliability-dr → cost-optimization → migration-methodology → observability → cicd → gcp-vs-aws → scenarios
 
 ---
 
