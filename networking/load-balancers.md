@@ -139,6 +139,300 @@ graph TD
   <div class="quiz-a" hidden>IP Hash keys off the client's source IP, and behind NAT every one of those employees looks like the same single IP to the load balancer — so IP Hash sends all of them to one backend instead of spreading load. "Power of two choices" doesn't have this failure mode: it picks two backends at random per request and sends it to whichever is less loaded, so it stays well-balanced regardless of how many distinct client IPs are actually behind the request stream.</div>
 </div>
 
+### Try It Yourself: Live Algorithm Routing
+
+The tabs above describe each algorithm in the abstract. This is live: add backends with whatever weights you want, pick an algorithm, and fire requests one at a time (or many, fast). Each backend's corner badge is a running connection count that increments the moment it's routed to. Kill a backend mid-run and watch every algorithm route around it immediately — then revive it and watch it rejoin rotation.
+
+<div class="structure-viz" id="lb-routing-viz">
+  <svg class="viz-canvas" viewBox="0 0 502 104"></svg>
+  <div class="viz-controls">
+    <input class="viz-input" id="lb-weight-input" type="number" min="1" max="10" value="1" placeholder="weight 1-10" />
+    <button class="viz-btn" data-viz-action="add">Add backend</button>
+    <select class="viz-input" id="lb-algo-select">
+      <option value="rr" selected>Round Robin</option>
+      <option value="wrr">Weighted Round Robin</option>
+      <option value="lc">Least Connections</option>
+    </select>
+    <button class="viz-btn" data-viz-action="fire">Fire request</button>
+    <select class="viz-input" id="lb-target-select"></select>
+    <button class="viz-btn viz-btn-danger" data-viz-action="kill">Kill / revive selected</button>
+    <button class="viz-btn" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#1e3a8a"></span> healthy backend</span>
+    <span><span class="viz-swatch" style="background:#78350f"></span> just routed</span>
+    <span><span class="viz-swatch" style="background:#7f1d1d"></span> killed / down</span>
+    <span><span class="viz-swatch" style="background:#1e293b"></span> connection-count badge</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root = document.getElementById('lb-routing-viz');
+  const svg = root.querySelector('.viz-canvas');
+  const status = root.querySelector('.viz-status');
+  const weightInput = root.querySelector('#lb-weight-input');
+  const algoSelect = root.querySelector('#lb-algo-select');
+  const targetSelect = root.querySelector('#lb-target-select');
+  const addBtn = root.querySelector('[data-viz-action="add"]');
+  const fireBtn = root.querySelector('[data-viz-action="fire"]');
+  const killBtn = root.querySelector('[data-viz-action="kill"]');
+  const resetBtn = root.querySelector('[data-viz-action="reset"]');
+
+  // ---- Pure routing-decision logic (no DOM) ----
+  // Given the algorithm, the current backend list (weights/health/conn
+  // counts), and persistent per-algorithm routing state, returns which
+  // backend id receives the next request. A killed backend (healthy:
+  // false) is filtered out before any algorithm's own logic runs, so
+  // "never route to a dead backend" holds structurally for every branch.
+  function pickBackend(backends, algorithm, routingState) {
+    const healthy = backends.filter((b) => b.healthy);
+    if (healthy.length === 0) {
+      return { id: null, routingState: routingState };
+    }
+    if (algorithm === 'lc') {
+      let best = null;
+      for (const b of backends) {
+        if (!b.healthy) continue;
+        if (best === null || b.conns < best.conns) best = b;
+      }
+      return { id: best.id, routingState: routingState };
+    }
+    if (algorithm === 'rr') {
+      const n = backends.length;
+      const pointer = routingState.rrPointer;
+      for (let i = 1; i <= n; i++) {
+        const idx = (pointer + i) % n;
+        if (backends[idx].healthy) {
+          return { id: backends[idx].id, routingState: Object.assign({}, routingState, { rrPointer: idx }) };
+        }
+      }
+      return { id: null, routingState: routingState };
+    }
+    if (algorithm === 'wrr') {
+      // Smooth weighted round robin (same scheme nginx uses): every
+      // healthy backend's "current weight" accumulates by its configured
+      // weight each round; whoever has the highest current weight wins
+      // and then gets docked the total healthy weight. This converges to
+      // exact weight proportions without ever bursting one backend.
+      const cw = Object.assign({}, routingState.wrrCw);
+      for (const b of backends) if (!(b.id in cw)) cw[b.id] = 0;
+      let total = 0;
+      let best = null;
+      for (const b of backends) {
+        if (!b.healthy) continue;
+        total += b.weight;
+        cw[b.id] += b.weight;
+        if (best === null || cw[b.id] > cw[best.id]) best = b;
+      }
+      if (best) cw[best.id] -= total;
+      return { id: best ? best.id : null, routingState: Object.assign({}, routingState, { wrrCw: cw }) };
+    }
+    return { id: null, routingState: routingState };
+  }
+
+  // ---- Pure layout math (no DOM) ----
+  // Fixed-column grid (max 4/row) that WRAPS to new rows as backends are
+  // added, instead of growing the canvas wider without bound. Only the
+  // viewBox HEIGHT grows as rows are added; width is capped, so adding
+  // 10-15+ backends never overflows or overlaps.
+  function computeLayout(backends) {
+    const n = backends.length;
+    const COLS = Math.max(1, Math.min(4, n || 1));
+    const nodeW = 130, nodeH = 56, gapX = 34, gapY = 42, marginX = 22, marginTop = 30, marginBottom = 18;
+    const rows = Math.max(1, Math.ceil(n / COLS));
+    const width = marginX * 2 + COLS * nodeW + (COLS - 1) * gapX;
+    const height = marginTop + rows * nodeH + (rows - 1) * gapY + marginBottom;
+    const positions = backends.map((b, i) => {
+      const col = i % COLS;
+      const row = Math.floor(i / COLS);
+      return {
+        id: b.id,
+        x: marginX + col * (nodeW + gapX),
+        y: marginTop + row * (nodeH + gapY),
+        w: nodeW,
+        h: nodeH,
+      };
+    });
+    return { width: width, height: height, positions: positions };
+  }
+
+  // Connection counts badge display is capped at "999+" so the badge's
+  // own width stays bounded no matter how many requests get fired at one
+  // backend (100s, 1000s+) — the real internal count is never capped,
+  // only what's drawn.
+  function formatCount(n) {
+    return n > 999 ? '999+' : String(n);
+  }
+
+  function badgeGeometry(pos, conns) {
+    const text = formatCount(conns);
+    const bw = 14 + text.length * 8;
+    const bh = 18;
+    const cx = pos.x + pos.w - 12;
+    const cy = pos.y; // straddles the node's top edge, like a notification badge
+    return { x: cx - bw / 2, y: cy - bh / 2, w: bw, h: bh, cx: cx, cy: cy, text: text };
+  }
+
+  function algoLabel(v) {
+    return v === 'rr' ? 'Round Robin' : v === 'wrr' ? 'Weighted Round Robin' : 'Least Connections';
+  }
+
+  // ---- Mutable state ----
+  let backends = [];
+  let nextNum = 1;
+  let routingState = { rrPointer: -1, wrrCw: {} };
+  let lastRoutedId = null;
+  let flashTimer = null;
+
+  function seed() {
+    backends = [
+      { id: 'B1', weight: 1, healthy: true, conns: 0 },
+      { id: 'B2', weight: 2, healthy: true, conns: 0 },
+      { id: 'B3', weight: 3, healthy: true, conns: 0 },
+    ];
+    nextNum = 4;
+    routingState = { rrPointer: -1, wrrCw: { B1: 0, B2: 0, B3: 0 } };
+    lastRoutedId = null;
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function populateTargetSelect() {
+    const prev = targetSelect.value;
+    while (targetSelect.firstChild) targetSelect.removeChild(targetSelect.firstChild);
+    backends.forEach((b) => {
+      const opt = document.createElement('option');
+      opt.value = b.id;
+      opt.textContent = b.id + ' (' + (b.healthy ? 'up' : 'down') + ', w=' + b.weight + ')';
+      targetSelect.appendChild(opt);
+    });
+    if (backends.some((b) => b.id === prev)) targetSelect.value = prev;
+  }
+
+  function draw() {
+    const layout = computeLayout(backends);
+    svg.setAttribute('viewBox', '0 0 ' + layout.width + ' ' + layout.height);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    layout.positions.forEach((pos) => {
+      const b = backends.find((x) => x.id === pos.id);
+      let cls = 'viz-node';
+      if (!b.healthy) cls = 'viz-node-removing';
+      else if (b.id === lastRoutedId) cls = 'viz-node-highlight';
+
+      svg.appendChild(el('rect', { x: pos.x, y: pos.y, width: pos.w, height: pos.h, rx: 8, class: cls }));
+
+      const idText = el('text', { x: pos.x + pos.w / 2, y: pos.y + pos.h / 2 - 10 });
+      idText.textContent = b.id;
+      svg.appendChild(idText);
+
+      const subText = el('text', { x: pos.x + pos.w / 2, y: pos.y + pos.h / 2 + 10, class: 'viz-label-dim' });
+      subText.textContent = b.healthy ? ('weight ' + b.weight) : 'DOWN';
+      svg.appendChild(subText);
+
+      const badge = badgeGeometry(pos, b.conns);
+      svg.appendChild(el('rect', {
+        x: badge.x, y: badge.y, width: badge.w, height: badge.h, rx: badge.h / 2,
+        fill: '#1e293b', stroke: '#0f172a', 'stroke-width': 1,
+      }));
+      const badgeText = el('text', { x: badge.cx, y: badge.cy, fill: '#f8fafc', 'font-size': 10 });
+      badgeText.textContent = badge.text;
+      svg.appendChild(badgeText);
+    });
+
+    populateTargetSelect();
+    const disabled = backends.length === 0;
+    fireBtn.disabled = disabled;
+    killBtn.disabled = disabled;
+    targetSelect.disabled = disabled;
+  }
+
+  function scheduleFlashClear() {
+    clearTimeout(flashTimer);
+    flashTimer = setTimeout(function () {
+      lastRoutedId = null;
+      draw();
+    }, 1200);
+  }
+
+  addBtn.addEventListener('click', function () {
+    const w = parseInt(weightInput.value, 10);
+    if (isNaN(w) || w < 1 || w > 10) {
+      setStatus('Enter a weight between 1 and 10.', 'error');
+      return;
+    }
+    const id = 'B' + nextNum++;
+    backends.push({ id: id, weight: w, healthy: true, conns: 0 });
+    routingState.wrrCw[id] = 0;
+    setStatus('Added ' + id + ' with weight ' + w + '.', 'ok');
+    draw();
+  });
+
+  fireBtn.addEventListener('click', function () {
+    if (backends.length === 0) {
+      setStatus('Add a backend first.', 'error');
+      return;
+    }
+    const algo = algoSelect.value;
+    const result = pickBackend(backends, algo, routingState);
+    routingState = result.routingState;
+    if (result.id === null) {
+      lastRoutedId = null;
+      setStatus('No healthy backends available — this request would fail (503).', 'error');
+      draw();
+      return;
+    }
+    const b = backends.find((x) => x.id === result.id);
+    b.conns++;
+    lastRoutedId = result.id;
+    setStatus('Routed to ' + result.id + ' via ' + algoLabel(algo) + ' — now at ' + b.conns + ' connection' + (b.conns === 1 ? '' : 's') + '.', 'ok');
+    draw();
+    scheduleFlashClear();
+  });
+
+  killBtn.addEventListener('click', function () {
+    if (backends.length === 0) return;
+    const id = targetSelect.value;
+    const b = backends.find((x) => x.id === id);
+    if (!b) {
+      setStatus('Pick a backend to kill or revive.', 'error');
+      return;
+    }
+    b.healthy = !b.healthy;
+    if (!b.healthy) {
+      routingState.wrrCw[id] = 0; // clear accrued weight so a revive can't burst-favor it later
+      if (lastRoutedId === id) lastRoutedId = null;
+      setStatus(id + ' marked DOWN — every algorithm will skip it until revived.', 'error');
+    } else {
+      setStatus(id + ' revived — back in rotation.', 'ok');
+    }
+    draw();
+  });
+
+  resetBtn.addEventListener('click', function () {
+    seed();
+    setStatus('Reset to 3 backends (weights 1, 2, 3). Fire a request to begin.', '');
+    draw();
+  });
+
+  seed();
+  setStatus('Loaded with 3 backends (weights 1, 2, 3). Add more, pick an algorithm, and fire away.', '');
+  draw();
+})();
+</script>
+
 ---
 
 ## 5. Health Checks

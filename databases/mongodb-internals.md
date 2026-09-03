@@ -735,6 +735,329 @@ sh.getBalancerState()  // is the auto-balancer currently moving chunks?
   </div>
 </div>
 
+### Try It Yourself: Live Chunk Split &amp; Migration
+
+Pick a shard-key type, then insert values yourself. Try a monotonically
+increasing sequence (1, 2, 3, 4, …) under each mode and watch what happens to
+where the documents land — this is the same mechanism the toggle above
+describes and the quiz below tests, just running live instead of asserted in
+prose. Once one shard is visibly overloaded, click "Run balancer" and watch it
+split that shard's biggest chunk and migrate half of it to the least-loaded
+shard.
+
+<div class="structure-viz" id="mongo-sharding-viz">
+  <svg class="viz-canvas" viewBox="0 0 720 250"></svg>
+  <div class="viz-controls">
+    <button class="viz-btn" data-viz-action="set-mode" data-viz-mode="hashed">Hashed shard key</button>
+    <button class="viz-btn" data-viz-action="set-mode" data-viz-mode="ranged">Ranged shard key</button>
+    <input class="viz-input" type="number" placeholder="shard key value" data-viz-field="key" style="width:9rem" />
+    <button class="viz-btn" data-viz-action="insert">Insert doc</button>
+    <button class="viz-btn" data-viz-action="balance">Run balancer</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:var(--warn)"></span> Just inserted</span>
+    <span><span class="viz-swatch" style="background:var(--ok)"></span> Just split/migrated</span>
+    <span>Each box is a chunk (key range + doc count); the bar shows load relative to the busiest chunk. Past 4 chunks on one shard, extras collapse into a "+N chunks" summary so the layout never overflows.</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root = document.getElementById('mongo-sharding-viz');
+  const svg = root.querySelector('.viz-canvas');
+  const status = root.querySelector('.viz-status');
+  const keyField = root.querySelector('[data-viz-field="key"]');
+  const modeButtons = root.querySelectorAll('[data-viz-action="set-mode"]');
+
+  // ---- Core sharding logic (no DOM) --------------------------------------
+  // Mirrors this section's own toggle copy: a hashed key scatters writes
+  // evenly across shards regardless of insertion order; a ranged key keeps
+  // chunks as contiguous ranges of the real value, so a monotonically
+  // increasing key always lands in whichever chunk currently owns the
+  // highest range -- a hotspot the balancer can migrate but never fully
+  // prevent, since every *new* write still targets the same "latest" chunk.
+
+  const RANGED_BOUNDARIES = [1000, 2000]; // 2 interior boundaries -> 3 ranges
+  const HASH_SPACE = 1000;
+  const HASH_BOUNDARIES = [334, 667];
+
+  function knuthHash(n) {
+    // Fibonacci/multiplicative hashing: scatters sequential integers across
+    // buckets even though the input keys are monotonically increasing.
+    const x = Math.imul(n | 0, 2654435761) >>> 0;
+    return x % HASH_SPACE;
+  }
+
+  function effectiveKey(value, mode) {
+    const n = Math.trunc(Number(value));
+    return mode === 'hashed' ? knuthHash(n) : n;
+  }
+
+  function fmtBound(v) {
+    if (v === -Infinity) return '-∞';
+    if (v === Infinity) return '+∞';
+    return String(v);
+  }
+
+  function makeInitialShards(mode) {
+    const bounds = mode === 'hashed' ? HASH_BOUNDARIES : RANGED_BOUNDARIES;
+    const shards = [];
+    for (let i = 0; i < 3; i++) {
+      shards.push({
+        chunks: [{
+          min: i === 0 ? -Infinity : bounds[i - 1],
+          max: i === bounds.length ? Infinity : bounds[i],
+          keys: [],
+        }],
+      });
+    }
+    return shards;
+  }
+
+  function cloneShards(shards) {
+    return shards.map((s) => ({ chunks: s.chunks.map((c) => ({ min: c.min, max: c.max, keys: c.keys.slice() })) }));
+  }
+
+  function locateChunk(shards, key) {
+    for (let s = 0; s < shards.length; s++) {
+      const chunks = shards[s].chunks;
+      for (let c = 0; c < chunks.length; c++) {
+        const ch = chunks[c];
+        if (key >= ch.min && key < ch.max) return { shardIndex: s, chunkIndex: c };
+      }
+    }
+    return null;
+  }
+
+  function insertDocLogic(shards, value, mode) {
+    const key = effectiveKey(value, mode);
+    const loc = locateChunk(shards, key);
+    if (!loc) return { shards: shards, ok: false, message: 'No chunk owns key ' + key + ' (unexpected).' };
+    const next = cloneShards(shards);
+    next[loc.shardIndex].chunks[loc.chunkIndex].keys.push(key);
+    return { shards: next, ok: true, shardIndex: loc.shardIndex, chunkIndex: loc.chunkIndex, key: key };
+  }
+
+  function shardTotals(shards) {
+    return shards.map((s) => s.chunks.reduce((sum, c) => sum + c.keys.length, 0));
+  }
+
+  function runBalancerLogic(shards) {
+    const totals = shardTotals(shards);
+    const totalDocs = totals.reduce((a, b) => a + b, 0);
+    const maxTotal = Math.max.apply(null, totals);
+    const minTotal = Math.min.apply(null, totals);
+    const maxShardIdx = totals.indexOf(maxTotal);
+    const minShardIdx = totals.indexOf(minTotal);
+    const fairShare = totalDocs / shards.length;
+
+    const imbalanced = totalDocs >= 3 && (maxTotal - minTotal) >= 2 && maxTotal > fairShare + 1;
+    if (!imbalanced) {
+      return { shards: shards, changed: false, message: 'Balanced — no migration needed (max ' + maxTotal + ' docs, min ' + minTotal + ' docs, fair share ~' + fairShare.toFixed(1) + ').' };
+    }
+
+    const next = cloneShards(shards);
+    const sourceShard = next[maxShardIdx];
+    let biggestIdx = 0;
+    sourceShard.chunks.forEach((c, i) => { if (c.keys.length > sourceShard.chunks[biggestIdx].keys.length) biggestIdx = i; });
+    const chunk = sourceShard.chunks[biggestIdx];
+
+    if (chunk.keys.length < 2) {
+      return { shards: shards, changed: false, message: 'Largest chunk on shard ' + maxShardIdx + ' only has ' + chunk.keys.length + ' doc(s) — nothing left to split.' };
+    }
+
+    const sortedKeys = chunk.keys.slice().sort((a, b) => a - b);
+    const mid = sortedKeys[Math.floor(sortedKeys.length / 2)];
+    const leftKeys = chunk.keys.filter((k) => k < mid);
+    const rightKeys = chunk.keys.filter((k) => k >= mid);
+
+    if (leftKeys.length === 0 || rightKeys.length === 0) {
+      return { shards: shards, changed: false, message: 'Shard ' + maxShardIdx + '\'s largest chunk holds all-identical shard-key values — a "jumbo chunk" that cannot be split further (this is a real MongoDB failure mode too).' };
+    }
+
+    const leftChunk = { min: chunk.min, max: mid, keys: leftKeys };
+    const rightChunk = { min: mid, max: chunk.max, keys: rightKeys };
+
+    sourceShard.chunks.splice(biggestIdx, 1, leftChunk);
+    next[minShardIdx].chunks.push(rightChunk);
+    next.forEach((s) => s.chunks.sort((a, b) => a.min - b.min));
+
+    const message = 'Split shard ' + maxShardIdx + '\'s chunk [' + fmtBound(chunk.min) + ', ' + fmtBound(chunk.max) + ') at ' + mid +
+      ' — kept [' + fmtBound(leftChunk.min) + ', ' + fmtBound(mid) + ') (' + leftKeys.length + ' docs) on shard ' + maxShardIdx +
+      ', migrated [' + fmtBound(mid) + ', ' + fmtBound(rightChunk.max) + ') (' + rightKeys.length + ' docs) to shard ' + minShardIdx + '.';
+
+    return {
+      shards: next,
+      changed: true,
+      message: message,
+      left: { shardIndex: maxShardIdx, min: leftChunk.min, max: leftChunk.max },
+      right: { shardIndex: minShardIdx, min: rightChunk.min, max: rightChunk.max },
+    };
+  }
+
+  // ---- State --------------------------------------------------------------
+  let mode = 'hashed';
+  let state = { hashed: makeInitialShards('hashed'), ranged: makeInitialShards('ranged') };
+  let lastInsert = null; // {shardIndex, min, max}
+  let lastBalance = null; // {touched: [{shardIndex, min, max}, ...]}
+
+  // ---- Rendering ------------------------------------------------------------
+  const MAX_SLOTS = 4; // cap rendered chunk boxes per shard row so the layout
+  // never overflows no matter how many splits accumulate in one session.
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function text(x, y, str, cls) {
+    const t = el('text', cls ? { x: x, y: y, class: cls } : { x: x, y: y });
+    t.textContent = str;
+    return t;
+  }
+
+  function currentModeLabel() {
+    return mode === 'hashed' ? 'HASHED' : 'RANGED';
+  }
+
+  function refreshModeButtons() {
+    modeButtons.forEach((btn) => {
+      btn.disabled = btn.getAttribute('data-viz-mode') === mode;
+    });
+  }
+
+  function displaySlots(chunks) {
+    if (chunks.length <= MAX_SLOTS) {
+      return chunks
+        .slice()
+        .sort((a, b) => a.min - b.min)
+        .map((c) => ({ label: '[' + fmtBound(c.min) + ', ' + fmtBound(c.max) + ')', count: c.keys.length, real: c }));
+    }
+    const sorted = chunks.slice().sort((a, b) => b.keys.length - a.keys.length);
+    const shown = sorted.slice(0, MAX_SLOTS - 1).sort((a, b) => a.min - b.min);
+    const rest = sorted.slice(MAX_SLOTS - 1);
+    const restCount = rest.reduce((sum, c) => sum + c.keys.length, 0);
+    const slots = shown.map((c) => ({ label: '[' + fmtBound(c.min) + ', ' + fmtBound(c.max) + ')', count: c.keys.length, real: c }));
+    slots.push({ label: '+' + rest.length + ' chunks', count: restCount, real: null });
+    return slots;
+  }
+
+  function draw() {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+    const shards = state[mode];
+    const totals = shardTotals(shards);
+    const allCounts = [];
+    shards.forEach((s) => s.chunks.forEach((c) => allCounts.push(c.keys.length)));
+    const maxCount = Math.max(1, ...allCounts);
+
+    const labelW = 108;
+    const rightMargin = 12;
+    const canvasW = 720;
+    const rowH = 66;
+    const rowGap = 14;
+    const topMargin = 14;
+    const innerW = canvasW - labelW - rightMargin;
+
+    shards.forEach((shard, si) => {
+      const rowY = topMargin + si * (rowH + rowGap);
+      svg.appendChild(text(labelW / 2, rowY + rowH / 2 - 8, 'Shard ' + si));
+      svg.appendChild(text(labelW / 2, rowY + rowH / 2 + 10, totals[si] + ' docs', 'viz-label-dim'));
+
+      const slots = displaySlots(shard.chunks);
+      const n = slots.length;
+      const gap = 8;
+      const boxW = (innerW - (n + 1) * gap) / n;
+      const boxH = rowH - 12;
+      const boxY = rowY + 6;
+
+      slots.forEach((slot, i) => {
+        const x = labelW + gap + i * (boxW + gap);
+        const cx = x + boxW / 2;
+
+        let cls = 'viz-node';
+        if (slot.real && lastInsert && lastInsert.shardIndex === si && lastInsert.min === slot.real.min && lastInsert.max === slot.real.max) {
+          cls = 'viz-node-highlight';
+        }
+        if (slot.real && lastBalance && lastBalance.touched.some((t) => t.shardIndex === si && t.min === slot.real.min && t.max === slot.real.max)) {
+          cls = 'viz-node-new';
+        }
+
+        svg.appendChild(el('rect', { x: x, y: boxY, width: boxW, height: boxH, rx: 6, class: cls }));
+        svg.appendChild(text(cx, boxY + 14, slot.label, 'viz-label-dim'));
+        svg.appendChild(text(cx, boxY + 30, slot.real ? (slot.count + ' docs') : (slot.count + ' docs (agg.)')));
+
+        const barMaxW = Math.max(1, boxW - 16);
+        const ratio = maxCount > 0 ? Math.min(1, slot.count / maxCount) : 0;
+        svg.appendChild(el('rect', { x: cx - barMaxW / 2, y: boxY + boxH - 12, width: barMaxW, height: 6, style: 'fill:var(--border)' }));
+        svg.appendChild(el('rect', { x: cx - barMaxW / 2, y: boxY + boxH - 12, width: Math.max(1, barMaxW * ratio), height: 6, style: 'fill:var(--accent)' }));
+      });
+    });
+  }
+
+  modeButtons.forEach((btn) => {
+    btn.addEventListener('click', () => {
+      mode = btn.getAttribute('data-viz-mode');
+      lastInsert = null;
+      lastBalance = null;
+      refreshModeButtons();
+      setStatus('Switched to ' + currentModeLabel() + ' shard key. Each mode keeps its own chunk state, so switching back later picks up where you left it.', '');
+      draw();
+    });
+  });
+
+  root.querySelector('[data-viz-action="insert"]').addEventListener('click', () => {
+    const raw = keyField.value.trim();
+    if (raw === '' || !Number.isFinite(Number(raw))) {
+      setStatus('Enter a numeric shard key value first.', 'error');
+      return;
+    }
+    const res = insertDocLogic(state[mode], raw, mode);
+    if (!res.ok) {
+      setStatus(res.message, 'error');
+      return;
+    }
+    state[mode] = res.shards;
+    const chunk = state[mode][res.shardIndex].chunks[res.chunkIndex];
+    lastInsert = { shardIndex: res.shardIndex, min: chunk.min, max: chunk.max };
+    lastBalance = null;
+    const hashNote = mode === 'hashed' ? ' (hashed to ' + res.key + ')' : '';
+    setStatus('Inserted key=' + raw + hashNote + ' into shard ' + res.shardIndex + ', chunk [' + fmtBound(chunk.min) + ', ' + fmtBound(chunk.max) + ').', 'ok');
+    keyField.value = '';
+    draw();
+  });
+
+  root.querySelector('[data-viz-action="balance"]').addEventListener('click', () => {
+    const res = runBalancerLogic(state[mode]);
+    state[mode] = res.shards;
+    lastInsert = null;
+    lastBalance = res.changed ? { touched: [res.left, res.right] } : null;
+    setStatus(res.message, res.changed ? 'ok' : '');
+    draw();
+  });
+
+  root.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    state[mode] = makeInitialShards(mode);
+    lastInsert = null;
+    lastBalance = null;
+    setStatus(currentModeLabel() + ' shards reset to 3 empty chunks. The other mode\'s state is untouched.', '');
+    draw();
+  });
+
+  refreshModeButtons();
+  setStatus('HASHED shard key loaded — 3 empty chunks. Insert a monotonically increasing sequence (1, 2, 3, …) and compare against Ranged.', '');
+  draw();
+})();
+</script>
+
 <div class="quiz-card">
   <p class="quiz-q">A collection is sharded on {createdAt: 1} (ranged) because "we need to query recent orders fast." Six months in, one shard is consistently at 90% disk while the others sit at 20%. Why?</p>
   <button class="quiz-reveal">Reveal answer</button>

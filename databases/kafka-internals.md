@@ -580,6 +580,198 @@ Step through a compaction pass on the log shown above:
   </div>
 </div>
 
+### Try It Yourself: Live Log Compaction
+
+The stepper above narrates one fixed, scripted pass. This one is live: append your own keyed records (the same key can land at many offsets — that's the whole point), tombstone a key to mark it for deletion, then run Compact and watch only the highest offset per key survive.
+
+<div class="structure-viz" id="kafka-compaction-viz">
+  <svg class="viz-canvas" viewBox="0 0 640 130"></svg>
+  <div class="viz-controls">
+    <input class="viz-input" type="text" placeholder="key (e.g. user:1)" />
+    <input class="viz-input" type="text" placeholder="value (e.g. Alice)" />
+    <button class="viz-btn" data-viz-action="append">Append</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="tombstone">Tombstone</button>
+    <button class="viz-btn" data-viz-action="compact">Compact</button>
+    <button class="viz-btn" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend"></div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root0 = document.getElementById('kafka-compaction-viz');
+  const svg = root0.querySelector('.viz-canvas');
+  const inputs = root0.querySelectorAll('.viz-input');
+  const keyInput = inputs[0];
+  const valueInput = inputs[1];
+  const status = root0.querySelector('.viz-status');
+  const legend = root0.querySelector('.viz-legend');
+
+  const WIDTH = 640;
+  const ROW_H = 26, ROW_GAP = 8, TOP_PAD = 34, BOTTOM_PAD = 14, SIDE_MARGIN = 20;
+  const MAX_VISIBLE_ROWS = 24;
+  const COMPACT_FADE_MS = 500;
+
+  let log;             // full ordered list of {offset, key, value} -- value === null is a tombstone
+  let nextOffset;
+  let removingOffsets; // offsets currently mid-fade after Compact (visual only)
+  let compacting;
+
+  // ---- Pure compaction logic (no DOM) ------------------------------------
+  // Tombstone policy: REMOVED IMMEDIATELY. If a key's highest offset is a
+  // tombstone, that key has no surviving offset at all after this pass --
+  // real Kafka delays this via delete.retention.ms so slow consumers still
+  // see the delete marker first; this demo simplifies to "gone same pass".
+  function compactLog(records) {
+    const latest = new Map();
+    for (const r of records) {
+      const cur = latest.get(r.key);
+      if (!cur || r.offset > cur.offset) latest.set(r.key, r);
+    }
+    const survivors = new Set();
+    for (const rec of latest.values()) {
+      if (rec.value === null) continue;
+      survivors.add(rec.offset);
+    }
+    return survivors;
+  }
+
+  // ---- Pure layout logic (no DOM) -----------------------------------------
+  // viewBox height grows with the number of rows actually drawn, and the
+  // number of rows drawn is capped at MAX_VISIBLE_ROWS -- together these
+  // keep the log from ever overlapping or overflowing as it grows.
+  function computeRowLayout(n) {
+    const rows = [];
+    for (let i = 0; i < n; i++) {
+      rows.push({ x: SIDE_MARGIN, y: TOP_PAD + i * (ROW_H + ROW_GAP), width: WIDTH - SIDE_MARGIN * 2, height: ROW_H });
+    }
+    const contentHeight = n === 0 ? 0 : n * (ROW_H + ROW_GAP) - ROW_GAP;
+    return { rows, viewBoxHeight: TOP_PAD + contentHeight + BOTTOM_PAD };
+  }
+
+  function reset() {
+    log = [
+      { offset: 0, key: 'user:1', value: 'Alice' },
+      { offset: 1, key: 'user:2', value: 'Bob' },
+    ];
+    nextOffset = 2;
+    removingOffsets = new Set();
+    compacting = false;
+  }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function fmtValue(v) {
+    return v === null ? '∅ (tombstone)' : v;
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function draw() {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    const total = log.length;
+    const visible = log.slice(Math.max(0, total - MAX_VISIBLE_ROWS));
+    const { rows, viewBoxHeight } = computeRowLayout(visible.length);
+    svg.setAttribute('viewBox', `0 0 ${WIDTH} ${viewBoxHeight}`);
+
+    const header = el('text', { x: WIDTH / 2, y: 16, class: 'viz-label-dim' });
+    header.textContent = total > MAX_VISIBLE_ROWS
+      ? `offset log (showing latest ${MAX_VISIBLE_ROWS} of ${total} offsets)`
+      : `offset log (${total} offset${total === 1 ? '' : 's'})`;
+    svg.appendChild(header);
+
+    visible.forEach((rec, i) => {
+      const box = rows[i];
+      const cls = removingOffsets.has(rec.offset) ? 'viz-node-removing' : 'viz-node';
+      svg.appendChild(el('rect', { x: box.x, y: box.y, width: box.width, height: box.height, rx: 5, class: cls }));
+      const t = el('text', { x: WIDTH / 2, y: box.y + box.height / 2 });
+      t.textContent = `offset ${rec.offset}: ${rec.key} → ${fmtValue(rec.value)}`;
+      svg.appendChild(t);
+    });
+  }
+
+  function renderLegend() {
+    while (legend.firstChild) legend.removeChild(legend.firstChild);
+    const keys = new Set(log.map((r) => r.key));
+    const span = document.createElement('span');
+    span.textContent = `${log.length} offset(s) appended so far across ${keys.size} distinct key(s). Tombstone policy: removed immediately -- a tombstone and every earlier offset for that key vanish together in the same Compact pass.`;
+    legend.appendChild(span);
+  }
+
+  root0.querySelector('[data-viz-action="append"]').addEventListener('click', () => {
+    const key = keyInput.value.trim();
+    const value = valueInput.value.trim();
+    if (!key) { setStatus('Enter a key first.', 'error'); return; }
+    if (!value) { setStatus('Enter a value first (use Tombstone to delete a key instead).', 'error'); return; }
+    removingOffsets = new Set();
+    log.push({ offset: nextOffset, key, value });
+    setStatus(`Appended offset ${nextOffset}: ${key} → ${value}.`, 'ok');
+    nextOffset++;
+    keyInput.value = '';
+    valueInput.value = '';
+    draw();
+    renderLegend();
+  });
+
+  root0.querySelector('[data-viz-action="tombstone"]').addEventListener('click', () => {
+    const key = keyInput.value.trim();
+    if (!key) { setStatus('Enter a key first.', 'error'); return; }
+    removingOffsets = new Set();
+    log.push({ offset: nextOffset, key, value: null });
+    setStatus(`Appended offset ${nextOffset}: ${key} → ∅ (tombstone). It still occupies the log until Compact removes it.`, 'ok');
+    nextOffset++;
+    keyInput.value = '';
+    draw();
+    renderLegend();
+  });
+
+  root0.querySelector('[data-viz-action="compact"]').addEventListener('click', () => {
+    if (compacting) return;
+    if (log.length === 0) { setStatus('Nothing to compact -- the log is empty.', 'error'); return; }
+    const survivors = compactLog(log);
+    const toRemove = log.filter((r) => !survivors.has(r.offset));
+    if (toRemove.length === 0) {
+      setStatus('Already fully compacted -- every key is already at its latest offset.', 'ok');
+      return;
+    }
+    compacting = true;
+    removingOffsets = new Set(toRemove.map((r) => r.offset));
+    setStatus(`Compacting: removing ${toRemove.length} superseded offset(s) across ${new Set(toRemove.map((r) => r.key)).size} key(s)...`, '');
+    draw();
+    setTimeout(() => {
+      log = log.filter((r) => survivors.has(r.offset));
+      removingOffsets = new Set();
+      compacting = false;
+      setStatus(`Compacted. ${survivors.size} record(s) survive -- one per live key, each at its highest offset. Tombstoned keys are fully gone (removed immediately policy).`, 'ok');
+      draw();
+      renderLegend();
+    }, COMPACT_FADE_MS);
+  });
+
+  root0.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    reset();
+    setStatus('Reset to 2 starter records. Tombstone policy: removed immediately on Compact.', '');
+    draw();
+    renderLegend();
+  });
+
+  reset();
+  setStatus('Loaded with 2 starter records. Tombstone policy: a tombstone removes its key immediately on the same Compact pass. Append keys/values, tombstone a key, then Compact.', '');
+  draw();
+  renderLegend();
+})();
+</script>
+
 <div class="quiz-card">
   <p class="quiz-q">A topic uses cleanup.policy=compact. Does a record get removed because it's old, or for some other reason?</p>
   <button class="quiz-reveal">Reveal answer</button>

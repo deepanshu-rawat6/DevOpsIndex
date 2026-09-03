@@ -884,9 +884,7 @@ The fixed walkthrough above always uses the same table (rows at 10 and 20) and t
   }
 
   function draw() {
-    while (svg.firstChild) svg.removeChild(svg.firstChild);
-
-    const leftX = 60, rightX = 590, baseY = 110;
+    const leftX = 60, baseY = 110;
 
     const domainValues = rows.slice();
     if (lockRange) domainValues.push(lockRange.start, lockRange.end);
@@ -898,7 +896,34 @@ The fixed walkthrough above always uses the same table (rows at 10 and 20) and t
     const span = dMax - dMin;
     const pad = Math.max(2, span * 0.15);
     const domainMin = dMin - pad, domainMax = dMax + pad;
-    const x = (v) => leftX + ((v - domainMin) / (domainMax - domainMin)) * (rightX - leftX);
+    const domainSpan = domainMax - domainMin;
+
+    // Rows are drawn as same-baseline circles (r=16). A fixed pixel-per-unit
+    // scale is fine when rows are spread out, but two rows that are close
+    // together in *value* (e.g. adjacent ids inserted next to an existing
+    // row) would otherwise land close together in *pixels* too and their
+    // circles would overlap, no matter how wide the overall value range is.
+    // Widen the plot itself (viewBox grows with it, same pattern as the
+    // WAL/MVCC visualizers' segment/version count) so the closest pair of
+    // rows always ends up at least MIN_ROW_GAP pixels apart.
+    const MIN_ROW_GAP = 40; // > 2 * node radius (16), plus a small margin
+    const BASE_PLOT_WIDTH = 530; // matches the original fixed 60..590 span
+    const MAX_PLOT_WIDTH = 4000; // sane ceiling for pathological value spans
+    const sortedRows = sortedUnique(rows);
+    let minRowDelta = Infinity;
+    for (let i = 1; i < sortedRows.length; i++) {
+      minRowDelta = Math.min(minRowDelta, sortedRows[i] - sortedRows[i - 1]);
+    }
+    const plotWidth = Number.isFinite(minRowDelta) && minRowDelta > 0
+      ? Math.min(MAX_PLOT_WIDTH, Math.max(BASE_PLOT_WIDTH, (MIN_ROW_GAP * domainSpan) / minRowDelta))
+      : BASE_PLOT_WIDTH;
+    const rightX = leftX + plotWidth;
+    const vbW = rightX + 30;
+    const vbH = 190;
+    svg.setAttribute('viewBox', `0 0 ${vbW} ${vbH}`);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    const x = (v) => leftX + ((v - domainMin) / domainSpan) * (rightX - leftX);
 
     // Baseline
     svg.appendChild(el('line', { x1: leftX, y1: baseY, x2: rightX, y2: baseY, class: 'viz-edge' }));

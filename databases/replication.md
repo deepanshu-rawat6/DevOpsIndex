@@ -96,7 +96,7 @@ sequenceDiagram
 
 The diagram above shows the write path once. This one's live — flip between sync and async, hammer the Write button, and watch the offsets either stay glued together or drift apart. Async's queue is exactly the window of acknowledged-but-not-yet-durable-on-a-second-node writes that a "Kill Master" would expose as gone.
 
-<div class="toggle-switch">
+<div class="toggle-switch" id="replication-lag-toggle">
   <div class="toggle-buttons">
     <button data-mode-btn="sync" class="active state-ok">Sync</button>
     <button data-mode-btn="async" class="state-warn">Async</button>
@@ -120,7 +120,7 @@ The diagram above shows the write path once. This one's live — flip between sy
   const root = document.getElementById('replication-lag-viz');
   const svg = root.querySelector('.viz-canvas');
   const status = root.querySelector('.viz-status');
-  const modeButtons = document.querySelectorAll('[data-mode-btn]');
+  const modeButtons = document.getElementById('replication-lag-toggle').querySelectorAll('[data-mode-btn]');
 
   // --- Core logic (state machine) -----------------------------------
   // Mirrors databases/replication.md section 2: master offset increments
@@ -264,14 +264,20 @@ The diagram above shows the write path once. This one's live — flip between sy
     lagText.textContent = 'lag = ' + lag();
     svg.appendChild(lagText);
 
-    // Pending queue, shown as a row of boxes under the edge (async only)
+    // Pending queue, shown as a row of boxes under the edge (async only).
+    // Capped at MAX_QUEUE_SHOWN so the row can never grow wide enough to
+    // overlap the master/replica node circles on either side, or spill
+    // past the canvas — an unbounded queue (repeated Writes in async mode)
+    // otherwise would. Overflow is called out in the label instead.
     if (state.mode === 'async' && state.replicaDelayQueue.length > 0) {
       const boxSize = 24, boxGap = 8;
-      const totalWidth = state.replicaDelayQueue.length * boxSize + (state.replicaDelayQueue.length - 1) * boxGap;
+      const MAX_QUEUE_SHOWN = 8;
+      const shown = state.replicaDelayQueue.slice(0, MAX_QUEUE_SHOWN);
+      const totalWidth = shown.length * boxSize + (shown.length - 1) * boxGap;
       const startX = (masterX + replicaX) / 2 - totalWidth / 2;
       const boxY = cy + 30;
 
-      state.replicaDelayQueue.forEach((offset, i) => {
+      shown.forEach((offset, i) => {
         const x = startX + i * (boxSize + boxGap);
         const box = document.createElementNS(svgNS, 'rect');
         box.setAttribute('x', x);
@@ -289,10 +295,12 @@ The diagram above shows the write path once. This one's live — flip between sy
         svg.appendChild(boxLabel);
       });
 
+      const overflow = state.replicaDelayQueue.length - shown.length;
       const queueLabel = document.createElementNS(svgNS, 'text');
       queueLabel.setAttribute('x', (masterX + replicaX) / 2);
       queueLabel.setAttribute('y', boxY + boxSize + 18);
-      queueLabel.textContent = 'pending queue (' + state.replicaDelayQueue.length + ')';
+      queueLabel.textContent = 'pending queue (' + state.replicaDelayQueue.length + ')' +
+        (overflow > 0 ? ' — showing oldest ' + MAX_QUEUE_SHOWN + ', +' + overflow + ' more' : '');
       svg.appendChild(queueLabel);
     }
 

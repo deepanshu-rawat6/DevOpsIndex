@@ -713,7 +713,7 @@ Try it against the MVCC demo above: begin two overlapping transactions there, an
 **Try it yourself — SSI dependency-graph simulator.** The MVCC visibility simulator above answers "which row version does a snapshot see." This one answers a different question: given a set of concurrent transactions and the rows each one reads and writes, does PostgreSQL's SSI implementation consider them dangerous? Add 2–4 transactions, type in which rows each one reads and writes (e.g. `A`, `A, B`), and watch the rw-antidependency graph get built live. The important thing to notice: SSI does *not* abort on just any conflict, or even on any graph cycle — it specifically watches for a **pivot** transaction sitting between one inbound and one outbound rw-antidependency edge. A lone rw-antidependency edge is normal and harmless under snapshot isolation; only a pivot with both edges present triggers the risk of a `40001` at commit.
 
 <div class="structure-viz" id="ssi-dependency-viz">
-  <svg class="viz-canvas" viewBox="0 0 700 260"></svg>
+  <svg class="viz-canvas" viewBox="0 0 700 290"></svg>
   <div class="viz-controls">
     <button class="viz-btn" data-viz-action="add">Add transaction</button>
     <button class="viz-btn viz-btn-danger" data-viz-action="reset">Reset</button>
@@ -840,7 +840,12 @@ Try it against the MVCC demo above: begin two overlapping transactions there, an
     while (svg.firstChild) svg.removeChild(svg.firstChild);
 
     const n = transactions.length;
-    const cx = 350, cy = 130, radius = n <= 2 ? 90 : 105;
+    // cy=145 (not the viewBox's vertical midpoint of a shorter box) leaves
+    // enough headroom above and below the ring: at the largest radius (105,
+    // for n=3 or 4) the top/bottom-most node's circle (nodeR=30) needs
+    // 105+30=135px of clearance each way, so cy must be >= 135 and the
+    // viewBox height >= 2*135 -- 145/290 keeps a small margin on top of that.
+    const cx = 350, cy = 145, radius = n <= 2 ? 90 : 105;
     const nodeR = 30;
     const positions = new Map();
     transactions.forEach((t, i) => {

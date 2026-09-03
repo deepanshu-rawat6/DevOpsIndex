@@ -367,7 +367,236 @@ cat /etc/cni/net.d/10-flannel.conflist | jq '.plugins[0].mtu'
 
 ---
 
-## 6. Inspecting the Network on a Node
+## 6. Live Simulator: Packet Path + MTU
+
+The four walkthroughs above each trace one hardcoded packet. This one's live: pick same-node or cross-node, pick a CNI mode, then try packet sizes on either side of that mode's effective MTU from the table above and watch where the packet actually gets through.
+
+<div class="structure-viz" id="cni-mtu-viz">
+  <svg class="viz-canvas" viewBox="0 0 470 120"></svg>
+  <div class="viz-controls">
+    <button class="viz-btn" data-viz-action="pp-samenode">Same-node</button>
+    <button class="viz-btn" data-viz-action="pp-crossnode">Cross-node</button>
+    <button class="viz-btn" data-viz-action="mode-vxlan">VXLAN (Flannel)</button>
+    <button class="viz-btn" data-viz-action="mode-bgp">BGP (Calico)</button>
+    <button class="viz-btn" data-viz-action="mode-vpccni">VPC CNI (AWS)</button>
+    <input class="viz-input" type="number" min="1" value="1400" />
+    <span>bytes</span>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#78350f"></span> traversed hop</span>
+    <span><span class="viz-swatch" style="background:#7f1d1d"></span> MTU-limited hop</span>
+    <span><span class="viz-swatch" style="background:#1e3a8a"></span> not reached / not on path</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  var svgNS = 'http://www.w3.org/2000/svg';
+  var root = document.getElementById('cni-mtu-viz');
+  var svg = root.querySelector('.viz-canvas');
+  var status = root.querySelector('.viz-status');
+  var input = root.querySelector('.viz-input');
+  var ppButtons = Array.prototype.slice.call(root.querySelectorAll('[data-viz-action^="pp-"]'));
+  var modeButtons = Array.prototype.slice.call(root.querySelectorAll('[data-viz-action^="mode-"]'));
+
+  var MTU_TABLE = {
+    vxlan: { name: 'Flannel VXLAN', crossNodeMtu: 1450 },
+    bgp: { name: 'Calico BGP', crossNodeMtu: 1500 },
+    vpccni: { name: 'AWS VPC CNI', crossNodeMtu: 9001 }
+  };
+  var SAME_NODE_MTU = 1500;
+
+  function effectiveMtu(mode, podPair) {
+    if (podPair === 'samenode') return SAME_NODE_MTU;
+    return MTU_TABLE[mode].crossNodeMtu;
+  }
+
+  // Policy: at/under effective MTU -&gt; delivered; up to 2x -&gt; fragmented
+  // (DF bit unset, kernel splits into IP fragments); beyond 2x -&gt; dropped
+  // (treated as exceeding what fragmentation can reasonably recover).
+  function classifyPacket(mode, podPair, size) {
+    var mtu = effectiveMtu(mode, podPair);
+    var outcome;
+    if (size <= mtu) outcome = 'delivered';
+    else if (size <= mtu * 2) outcome = 'fragmented';
+    else outcome = 'dropped';
+    return { outcome: outcome, mtu: mtu };
+  }
+
+  function getHops(mode, podPair) {
+    if (podPair === 'samenode') {
+      return {
+        hops: [
+          { label: 'Pod A', sub: 'sender' },
+          { label: 'Bridge', sub: 'L2 (cbr0)' },
+          { label: 'Pod B', sub: 'receiver' }
+        ],
+        problemIndex: 1
+      };
+    }
+    var byMode = {
+      vxlan: [
+        { label: 'Pod A', sub: '10.0.1.2' },
+        { label: 'flannel.1', sub: '+50B encap' },
+        { label: 'Underlay', sub: 'UDP 4789' },
+        { label: 'flannel.1', sub: 'decap' },
+        { label: 'Pod B', sub: '10.0.2.3' }
+      ],
+      bgp: [
+        { label: 'Pod A', sub: '10.0.1.2' },
+        { label: 'Route table', sub: 'BGP-learned' },
+        { label: 'Underlay', sub: 'no encap' },
+        { label: 'Route table', sub: 'Node 2' },
+        { label: 'Pod B', sub: '10.0.2.3' }
+      ],
+      vpccni: [
+        { label: 'Pod A', sub: '10.0.1.20' },
+        { label: 'ENI', sub: 'kernel routes' },
+        { label: 'VPC routes', sub: 'no CNI' },
+        { label: 'ENI', sub: 'ENI match' },
+        { label: 'Pod C', sub: '10.0.2.30' }
+      ]
+    };
+    return { hops: byMode[mode], problemIndex: 1 };
+  }
+
+  function computeLayout(hopCount) {
+    var SLOT_W = 110, SLOT_H = 50, GAP = 50, MARGIN = 40;
+    var vbW = hopCount * SLOT_W + (hopCount - 1) * GAP + 2 * MARGIN;
+    var positions = [];
+    for (var i = 0; i < hopCount; i++) positions.push({ x: MARGIN + i * (SLOT_W + GAP) });
+    return { vbW: vbW, positions: positions, SLOT_W: SLOT_W, SLOT_H: SLOT_H };
+  }
+
+  var state = { podPair: 'crossnode', mode: 'vxlan' };
+
+  function el(tag, attrs) {
+    var e = document.createElementNS(svgNS, tag);
+    for (var k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function setActive(buttons, activeBtn) {
+    buttons.forEach(function (b) {
+      if (b === activeBtn) {
+        b.style.background = 'var(--accent)';
+        b.style.color = 'var(--on-accent)';
+        b.style.borderColor = 'var(--accent)';
+      } else {
+        b.style.background = '';
+        b.style.color = '';
+        b.style.borderColor = '';
+      }
+    });
+  }
+
+  function updateStatus(outcome, mtu, size, validSize, hops, problemIndex) {
+    if (!validSize) {
+      status.textContent = 'Enter a packet size in bytes.';
+      status.className = 'viz-status viz-status-error';
+      return;
+    }
+    var modeName = MTU_TABLE[state.mode].name;
+    var topoNote = state.podPair === 'samenode'
+      ? 'same-node traffic bypasses CNI encapsulation entirely, so MTU is the plain link MTU regardless of mode'
+      : modeName + '’s effective MTU';
+    if (outcome === 'delivered') {
+      status.textContent = 'Delivered. ' + size + 'B fits within ' + mtu + 'B (' + topoNote + ').';
+      status.className = 'viz-status viz-status-ok';
+    } else if (outcome === 'fragmented') {
+      status.textContent = 'Fragmented. ' + size + 'B exceeds ' + mtu + 'B (' + topoNote + ') — split into multiple IP fragments at "' + hops[problemIndex].label + '" (hop ' + (problemIndex + 1) + ').';
+      status.className = 'viz-status viz-status-error';
+    } else {
+      status.textContent = 'Dropped. ' + size + 'B is more than double ' + mtu + 'B (' + topoNote + ') — never reaches "' + hops[hops.length - 1].label + '"; unrecoverable at "' + hops[problemIndex].label + '" (hop ' + (problemIndex + 1) + ').';
+      status.className = 'viz-status viz-status-error';
+    }
+  }
+
+  function draw() {
+    var hopData = getHops(state.mode, state.podPair);
+    var hops = hopData.hops;
+    var problemIndex = hopData.problemIndex;
+    var size = parseInt(input.value, 10);
+    var validSize = !isNaN(size) && size > 0;
+    var result = validSize
+      ? classifyPacket(state.mode, state.podPair, size)
+      : { outcome: null, mtu: effectiveMtu(state.mode, state.podPair) };
+    var outcome = result.outcome;
+    var mtu = result.mtu;
+
+    var layout = computeLayout(hops.length);
+    var vbH = 120;
+    svg.setAttribute('viewBox', '0 0 ' + layout.vbW + ' ' + vbH);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    var y = 34;
+    hops.forEach(function (hop, i) {
+      var pos = layout.positions[i];
+      if (i < hops.length - 1) {
+        var edgeCls = 'viz-edge';
+        if (outcome === 'delivered' || outcome === 'fragmented') edgeCls = 'viz-edge-active';
+        else if (outcome === 'dropped' && i < problemIndex) edgeCls = 'viz-edge-active';
+        svg.appendChild(el('line', {
+          x1: pos.x + layout.SLOT_W, y1: y + layout.SLOT_H / 2,
+          x2: pos.x + layout.SLOT_W + 50, y2: y + layout.SLOT_H / 2,
+          class: edgeCls
+        }));
+      }
+      var nodeCls = 'viz-node';
+      if (outcome === null) {
+        nodeCls = 'viz-node';
+      } else if (outcome === 'delivered') {
+        nodeCls = 'viz-node-highlight';
+      } else if (i < problemIndex) {
+        nodeCls = 'viz-node-highlight';
+      } else if (i === problemIndex) {
+        nodeCls = 'viz-node-removing';
+      } else {
+        nodeCls = outcome === 'fragmented' ? 'viz-node-highlight' : 'viz-node';
+      }
+      svg.appendChild(el('rect', { x: pos.x, y: y, width: layout.SLOT_W, height: layout.SLOT_H, rx: 8, class: nodeCls }));
+      var t = el('text', { x: pos.x + layout.SLOT_W / 2, y: y + layout.SLOT_H / 2 });
+      t.textContent = hop.label;
+      svg.appendChild(t);
+      var sub = el('text', { x: pos.x + layout.SLOT_W / 2, y: y + layout.SLOT_H + 16, class: 'viz-label-dim' });
+      sub.textContent = hop.sub;
+      svg.appendChild(sub);
+      var step = el('text', { x: pos.x + layout.SLOT_W / 2, y: 14, class: 'viz-label-dim' });
+      step.textContent = 'hop ' + (i + 1);
+      svg.appendChild(step);
+    });
+
+    updateStatus(outcome, mtu, size, validSize, hops, problemIndex);
+  }
+
+  ppButtons.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      state.podPair = btn.getAttribute('data-viz-action').replace('pp-', '');
+      setActive(ppButtons, btn);
+      draw();
+    });
+  });
+
+  modeButtons.forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      state.mode = btn.getAttribute('data-viz-action').replace('mode-', '');
+      setActive(modeButtons, btn);
+      draw();
+    });
+  });
+
+  input.addEventListener('input', draw);
+
+  setActive(ppButtons, ppButtons[1]);
+  setActive(modeButtons, modeButtons[0]);
+  draw();
+})();
+</script>
+
+---
+
+## 7. Inspecting the Network on a Node
 
 ```bash
 # All veth pairs (one per pod)

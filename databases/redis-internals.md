@@ -1040,10 +1040,18 @@ Set a key with a short TTL (try 3 seconds), then leave it alone — watch its ro
   }
 
   function draw() {
-    svg.setAttribute('viewBox', '0 0 640 220');
     while (svg.firstChild) svg.removeChild(svg.firstChild);
     const now = Date.now();
     const rows = Array.from(keys.entries());
+
+    // viewBox height grows with the key count -- unlike bucket/partition
+    // counts elsewhere in this file, `keys` has no cap (every "Set key"
+    // click adds one), so a fixed height clips rows off-canvas once there
+    // are more than ~5 of them. 220 matches the original fixed canvas for
+    // the common small-key-count case; it grows from there.
+    const rowH = 34, startY = 24;
+    const height = rows.length === 0 ? 220 : Math.max(220, startY + rows.length * rowH + 40);
+    svg.setAttribute('viewBox', `0 0 640 ${height}`);
 
     if (rows.length === 0) {
       const t = el('text', { x: 320, y: 100, class: 'viz-label-dim', 'text-anchor': 'middle' });
@@ -1052,7 +1060,6 @@ Set a key with a short TTL (try 3 seconds), then leave it alone — watch its ro
       return;
     }
 
-    const rowH = 34, startY = 24;
     rows.forEach(([key, entry], i) => {
       const y = startY + i * rowH;
       const expiredNotSwept = isEntryExpired(entry, now);

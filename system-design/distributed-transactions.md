@@ -425,6 +425,234 @@ sequenceDiagram
   <div class="quiz-a" hidden>The Saga Orchestrator would have called InventoryService.release() explicitly — it's the one tracking full saga state and knows step 2 needs undoing when step 3 fails. In choreography there is no such central caller: InventoryService has to independently subscribe to PaymentFailed and know that it means "release my reservation." That's the tradeoff called out for choreography — no single point of failure, but overall saga state is now implicit, scattered across each service's own event subscriptions.</div>
 </div>
 
+### Try It: Live Saga Simulator
+
+Same Order → Inventory → Payment → Shipping chain as the diagram above, except this one's live. Click through it step by step, then pick exactly when to fail — after 1 step, after 2, or all the way to the end with no failure at all. Everything already committed compensates automatically, backward, one step at a time, in reverse order — anything that hasn't run yet is never touched.
+
+<div class="structure-viz" id="saga-live-viz">
+  <svg class="viz-canvas" viewBox="0 0 700 230"></svg>
+  <div class="viz-controls">
+    <button class="viz-btn" data-viz-action="run-next">Run next step</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="fail-here">Fail here</button>
+    <button class="viz-btn" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#1e3a8a"></span> pending</span>
+    <span><span class="viz-swatch" style="background:#14532d"></span> committed</span>
+    <span><span class="viz-swatch" style="background:#78350f"></span> current step / compensating</span>
+    <span><span class="viz-swatch" style="background:#7f1d1d"></span> failed / compensated</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root = document.getElementById('saga-live-viz');
+  const svg = root.querySelector('.viz-canvas');
+  const status = root.querySelector('.viz-status');
+  const runBtn = root.querySelector('[data-viz-action="run-next"]');
+  const failBtn = root.querySelector('[data-viz-action="fail-here"]');
+  const resetBtn = root.querySelector('[data-viz-action="reset"]');
+
+  const NAMES = ['Order', 'Inventory', 'Payment', 'Shipping'];
+  const S = {
+    PENDING: 'pending',
+    COMMITTED: 'committed',
+    COMPENSATING: 'compensating',
+    COMPENSATED: 'compensated',
+    FAILED: 'failed',
+  };
+
+  // ---- Pure saga state machine (no DOM touched below this point) ----
+  function initSagaState(names) {
+    return {
+      steps: names.map((name) => ({ name, status: S.PENDING })),
+      cursor: 0,
+      finished: false,
+    };
+  }
+
+  function commitNextStep(state) {
+    if (state.finished || state.cursor >= state.steps.length) return state;
+    const steps = state.steps.map((s, i) =>
+      i === state.cursor ? { ...s, status: S.COMMITTED } : s
+    );
+    const cursor = state.cursor + 1;
+    return { steps, cursor, finished: cursor >= steps.length };
+  }
+
+  function snapshot(steps, cursor, finished) {
+    return { steps: steps.map((s) => ({ ...s })), cursor, finished };
+  }
+
+  // Returns the ordered sequence of state snapshots the saga passes through
+  // when the current step fails: it flips to FAILED, then every already
+  // COMMITTED step compensates one at a time, strictly in reverse order
+  // (COMMITTED -> COMPENSATING -> COMPENSATED). Steps that never committed
+  // are never touched. Pure — does not mutate the input state.
+  function computeFailureFrames(state) {
+    if (state.finished || state.cursor >= state.steps.length) return [state];
+    const frames = [];
+    let steps = state.steps.map((s) => ({ ...s }));
+    steps[state.cursor] = { ...steps[state.cursor], status: S.FAILED };
+    frames.push(snapshot(steps, state.cursor, false));
+    for (let i = state.cursor - 1; i >= 0; i--) {
+      if (steps[i].status !== S.COMMITTED) continue; // defensive
+      steps[i] = { ...steps[i], status: S.COMPENSATING };
+      frames.push(snapshot(steps, state.cursor, false));
+      steps[i] = { ...steps[i], status: S.COMPENSATED };
+      frames.push(snapshot(steps, state.cursor, false));
+    }
+    frames[frames.length - 1] = { ...frames[frames.length - 1], finished: true };
+    return frames;
+  }
+
+  // Pure layout: divides the canvas into N equal slots and sizes each box
+  // as a fixed fraction of its slot, so adjacent boxes can never overlap
+  // and every box stays within the viewBox regardless of step count.
+  function computeStepLayout(n, opts) {
+    const {
+      width = 700, height = 230, marginX = 40, maxBoxW = 130, minBoxW = 70,
+      boxH = 56, centerY = 100,
+    } = opts || {};
+    const usableWidth = width - marginX * 2;
+    const gap = n > 0 ? usableWidth / n : usableWidth;
+    const boxW = Math.max(minBoxW, Math.min(maxBoxW, gap * 0.72));
+    const y = centerY - boxH / 2;
+    const positions = [];
+    for (let i = 0; i < n; i++) {
+      const cx = marginX + gap * i + gap / 2;
+      positions.push({ x: cx - boxW / 2, y, width: boxW, height: boxH, cx, cy: y + boxH / 2 });
+    }
+    return { positions, width, height };
+  }
+
+  // ---- Rendering / interaction (DOM-only from here on) ----
+  let state = initSagaState(NAMES);
+  let playing = false;
+  let playTimer = null;
+
+  function svgEl(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function nodeClass(step, idx) {
+    if (step.status === S.COMMITTED) return 'viz-node-new';
+    if (step.status === S.COMPENSATING) return 'viz-node-highlight';
+    if (step.status === S.COMPENSATED) return 'viz-node-removing';
+    if (step.status === S.FAILED) return 'viz-node-removing';
+    if (idx === state.cursor && !state.finished) return 'viz-node-highlight'; // "up next"
+    return 'viz-node';
+  }
+
+  function displayLabel(step, idx) {
+    if (step.status === S.PENDING && idx === state.cursor && !state.finished) return 'up next';
+    return step.status;
+  }
+
+  function draw() {
+    const { positions, width, height } = computeStepLayout(state.steps.length, {});
+    svg.setAttribute('viewBox', `0 0 ${width} ${height}`);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    for (let i = 0; i < positions.length - 1; i++) {
+      const a = positions[i];
+      const b = positions[i + 1];
+      svg.appendChild(svgEl('line', {
+        x1: a.x + a.width, y1: a.cy, x2: b.x, y2: b.cy, class: 'viz-edge',
+      }));
+    }
+
+    state.steps.forEach((step, i) => {
+      const p = positions[i];
+      svg.appendChild(svgEl('rect', {
+        x: p.x, y: p.y, width: p.width, height: p.height, rx: 8,
+        class: nodeClass(step, i),
+      }));
+      const nameT = svgEl('text', { x: p.cx, y: p.cy - 9 });
+      nameT.textContent = step.name;
+      svg.appendChild(nameT);
+      const statusT = svgEl('text', { x: p.cx, y: p.cy + 10, class: 'viz-label-dim' });
+      statusT.textContent = displayLabel(step, i);
+      svg.appendChild(statusT);
+    });
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function setButtonsDisabled(extra) {
+    runBtn.disabled = extra || state.finished;
+    failBtn.disabled = extra || state.finished;
+  }
+
+  function playFrames(frames, onDone) {
+    playing = true;
+    setButtonsDisabled(true);
+    let i = 0;
+    clearInterval(playTimer);
+    playTimer = setInterval(() => {
+      state = frames[i];
+      draw();
+      i++;
+      if (i >= frames.length) {
+        clearInterval(playTimer);
+        playing = false;
+        setButtonsDisabled(false);
+        if (onDone) onDone();
+      }
+    }, 350);
+  }
+
+  runBtn.addEventListener('click', () => {
+    if (playing || state.finished) return;
+    const stepName = state.steps[state.cursor].name;
+    state = commitNextStep(state);
+    draw();
+    setStatus(
+      state.finished
+        ? `Committed ${stepName} — all ${state.steps.length} steps committed, saga completed with no compensation needed.`
+        : `Committed ${stepName} — local transaction done and visible immediately.`,
+      'ok'
+    );
+    setButtonsDisabled(false);
+  });
+
+  failBtn.addEventListener('click', () => {
+    if (playing || state.finished) return;
+    const failedName = state.steps[state.cursor].name;
+    const committedBefore = state.cursor;
+    const frames = computeFailureFrames(state);
+    setStatus(`${failedName} failed — cascading compensation backward through ${committedBefore} committed step(s)...`, 'error');
+    playFrames(frames, () => {
+      setStatus(
+        committedBefore === 0
+          ? `${failedName} failed before anything committed — nothing to compensate.`
+          : `${failedName} failed. All ${committedBefore} previously committed step(s) compensated in reverse order — saga aborted.`,
+        'error'
+      );
+    });
+  });
+
+  resetBtn.addEventListener('click', () => {
+    clearInterval(playTimer);
+    playing = false;
+    state = initSagaState(NAMES);
+    draw();
+    setStatus('Reset. Run steps forward, then fail whenever you like.', '');
+    setButtonsDisabled(false);
+  });
+
+  draw();
+  setStatus('Run steps forward, then hit "Fail here" at any point before the chain completes.', '');
+})();
+</script>
+
 ---
 
 ## 8. Outbox Pattern

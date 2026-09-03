@@ -519,7 +519,10 @@ A ResourceQuota's `hard` limits aren't just a display number — every pod creat
   }
 
   function draw() {
-    const cols = 8, chipW = 70, chipH = 40, gapX = 10, gapY = 10;
+    // 8 columns of chipW(70)+gapX(10) starting at x=20 overruns the fixed
+    // 640-wide viewBox by 10px (rightmost chip's right edge lands at 650);
+    // 7 columns keeps the row inside the canvas with margin to spare.
+    const cols = 7, chipW = 70, chipH = 40, gapX = 10, gapY = 10;
     const chipsTop = 140;
     const rows = Math.max(1, Math.ceil(pods.length / cols));
     const height = chipsTop + rows * (chipH + gapY) + 20;

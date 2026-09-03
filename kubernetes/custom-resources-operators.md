@@ -272,6 +272,313 @@ graph TD
   <div class="quiz-a" hidden>No — as long as ownerReferences was set correctly when the Secret was created, Kubernetes' built-in garbage collector cascades the delete on its own. This is the same mechanism that deletes Pods when their ReplicaSet is deleted; nothing operator-specific about it. Bespoke cleanup code is only needed for things that AREN'T themselves Kubernetes objects — an external cloud resource, for instance — which is what finalizers are for instead.</div>
 </div>
 
+### Try It Yourself: Owner References, Cascade Delete, and Finalizers
+
+Grow a small owned tree and then delete the root CR under each deletion propagation policy. **Foreground** marks the CR `Terminating` and holds it there until every child is actually gone. **Background** removes the CR immediately (etcd's record of it disappears right away) and lets the garbage collector clean up children afterward, without waiting on them at all. A finalizer on the CR blocks its real removal in *either* mode until something explicitly clears it — exactly the "external cleanup" case from earlier in this section.
+
+<div class="structure-viz" id="gc-cascade-viz">
+  <svg class="viz-canvas" viewBox="0 0 620 160"></svg>
+  <div class="viz-controls">
+    <button class="viz-btn" data-viz-action="addChild">Add child</button>
+    <button class="viz-btn" data-viz-action="addFinalizer">Add finalizer</button>
+    <button class="viz-btn" data-mode="foreground">Foreground</button>
+    <button class="viz-btn" data-mode="background">Background</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="requestDelete">Delete CR</button>
+    <button class="viz-btn" data-viz-action="completeCleanup">Complete external cleanup</button>
+    <button class="viz-btn" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:#1e3a8a"></span> active</span>
+    <span><span class="viz-swatch" style="background:#78350f"></span> Terminating (blocked)</span>
+    <span><span class="viz-swatch" style="background:#7f1d1d"></span> mid-delete / pending GC</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root0 = document.getElementById('gc-cascade-viz');
+  const svg = root0.querySelector('.viz-canvas');
+  const status = root0.querySelector('.viz-status');
+
+  // ---- Core logic: pure, DOM-free reducer over a plain state object. ----
+  // This section has no idea an SVG exists — every function here takes a
+  // state and returns a new state (or a fact about one), which is what
+  // makes it independently testable from the rendering code below.
+
+  function initialState() {
+    return {
+      children: [],        // [{ id, status: 'active' | 'removing' | 'pending-gc' }]
+      nextChildId: 1,
+      finalizer: false,    // finalizer present on the root CR
+      mode: null,          // 'foreground' | 'background' | null
+      crStatus: 'active',  // 'active' | 'terminating' | 'deleted'
+      log: 'Add a few children, optionally a finalizer, then delete the CR.',
+    };
+  }
+
+  function withLog(state, log) {
+    return Object.assign({}, state, { log: log });
+  }
+
+  function addChildLogic(state) {
+    if (state.crStatus !== 'active') {
+      return withLog(state, 'Cannot add a child — the CR is already terminating or deleted.');
+    }
+    const id = state.nextChildId;
+    const child = { id: id, status: 'active' };
+    return withLog(
+      Object.assign({}, state, { children: state.children.concat([child]), nextChildId: id + 1 }),
+      'Added child-' + id + ' with an ownerReference back to the root CR.'
+    );
+  }
+
+  function addFinalizerLogic(state) {
+    if (state.crStatus !== 'active') {
+      return withLog(state, 'Cannot add a finalizer — the CR is already terminating or deleted.');
+    }
+    if (state.finalizer) return withLog(state, 'A finalizer is already present.');
+    return withLog(Object.assign({}, state, { finalizer: true }), 'Finalizer attached to the root CR.');
+  }
+
+  // Synchronous part of a delete request. Any further child cleanup happens
+  // through repeated advanceLogic() calls, mirroring how real GC/finalizer
+  // processing plays out over subsequent reconciles, not in one atomic step.
+  function requestDeleteLogic(state, mode) {
+    if (state.crStatus !== 'active') return withLog(state, 'Delete already requested.');
+
+    let next = Object.assign({}, state, { mode: mode });
+
+    if (mode === 'foreground') {
+      // CR goes Terminating immediately. It is NOT actually removed until
+      // every child is gone AND any finalizer has cleared.
+      next = Object.assign({}, next, {
+        crStatus: 'terminating',
+        children: next.children.map(function (c) { return { id: c.id, status: 'removing' }; }),
+      });
+      if (next.children.length === 0 && !next.finalizer) {
+        next = Object.assign({}, next, { crStatus: 'deleted' });
+        return withLog(next, 'Foreground delete — no children and no finalizer, CR removed immediately.');
+      }
+      return withLog(next, 'Foreground delete requested — CR is Terminating; children will be removed first.');
+    }
+
+    // Background: the CR is removed immediately unless a finalizer blocks
+    // it. Children are not waited on at all — they're garbage-collected
+    // afterward, asynchronously, regardless of whether they still exist.
+    if (next.finalizer) {
+      next = Object.assign({}, next, { crStatus: 'terminating' });
+      return withLog(next, 'Background delete requested — blocked by finalizer; children are untouched for now.');
+    }
+    next = Object.assign({}, next, {
+      crStatus: 'deleted',
+      children: next.children.map(function (c) { return { id: c.id, status: 'pending-gc' }; }),
+    });
+    return withLog(next, 'Background delete — CR removed immediately; children queued for async garbage collection.');
+  }
+
+  // "Complete external cleanup" — the only way a finalizer ever clears.
+  function completeCleanupLogic(state) {
+    if (!state.finalizer) return withLog(state, 'No finalizer present to clear.');
+    let next = Object.assign({}, state, { finalizer: false });
+
+    if (next.crStatus !== 'terminating') {
+      return withLog(next, 'External cleanup complete — finalizer cleared.');
+    }
+
+    if (next.mode === 'foreground') {
+      if (next.children.length === 0) {
+        next = Object.assign({}, next, { crStatus: 'deleted' });
+        return withLog(next, 'External cleanup complete — finalizer cleared and all children already gone, CR removed.');
+      }
+      return withLog(next, 'External cleanup complete — finalizer cleared, but still waiting on remaining children.');
+    }
+
+    // Background mode never waits on children, only on the finalizer.
+    next = Object.assign({}, next, {
+      crStatus: 'deleted',
+      children: next.children.map(function (c) { return { id: c.id, status: 'pending-gc' }; }),
+    });
+    return withLog(next, 'External cleanup complete — finalizer cleared, CR removed; children queued for async GC.');
+  }
+
+  // Advances one discrete unit of async work: removes one child that's
+  // mid-removal/pending-gc, or (foreground only) flips a fully-cleared CR
+  // from terminating to deleted. A no-op once settled, so it's safe to poll.
+  function advanceLogic(state) {
+    const idx = state.children.findIndex(function (c) { return c.status === 'removing' || c.status === 'pending-gc'; });
+    if (idx !== -1) {
+      const removed = state.children[idx];
+      const children = state.children.filter(function (_, i) { return i !== idx; });
+      let next = Object.assign({}, state, { children: children });
+      if (next.crStatus === 'terminating' && next.mode === 'foreground' && children.length === 0) {
+        if (!next.finalizer) {
+          next = Object.assign({}, next, { crStatus: 'deleted' });
+          return withLog(next, 'Removed child-' + removed.id + ' — all children gone, CR removed.');
+        }
+        return withLog(next, 'Removed child-' + removed.id + ' — all children gone, but CR still waiting on its finalizer.');
+      }
+      return withLog(next, 'Removed child-' + removed.id + '.');
+    }
+    return withLog(state, isSettledLogic(state) ? 'Nothing left to do.' : 'Waiting.');
+  }
+
+  function isSettledLogic(state) {
+    return !state.children.some(function (c) { return c.status === 'removing' || c.status === 'pending-gc'; });
+  }
+
+  // ---- Layout: pure tree-position math, also DOM-free. ----
+  // Root CR centered on top; children flow left-to-right and wrap into new
+  // rows once a row would exceed the canvas's usable width. This is what
+  // keeps a growing family of 15+ children from overlapping or overflowing
+  // a fixed-width canvas — the canvas grows *taller*, never wider, and each
+  // row re-centers under the root.
+  const NODE_W = 96, NODE_H = 40, H_GAP = 14, V_GAP = 46, MARGIN = 16, MIN_CANVAS_W = 620;
+
+  function layoutTree(childCount, canvasW) {
+    canvasW = Math.max(canvasW || MIN_CANVAS_W, MIN_CANVAS_W);
+    const usableW = canvasW - 2 * MARGIN;
+    const perRow = Math.max(1, Math.floor((usableW + H_GAP) / (NODE_W + H_GAP)));
+    const rows = childCount === 0 ? 0 : Math.ceil(childCount / perRow);
+
+    const rootX = canvasW / 2 - NODE_W / 2;
+    const rootY = MARGIN;
+
+    const positions = [];
+    for (let i = 0; i < childCount; i++) {
+      const row = Math.floor(i / perRow);
+      const col = i % perRow;
+      const countInRow = Math.min(perRow, childCount - row * perRow);
+      const rowW = countInRow * NODE_W + (countInRow - 1) * H_GAP;
+      const rowStartX = canvasW / 2 - rowW / 2;
+      const x = rowStartX + col * (NODE_W + H_GAP);
+      const y = rootY + NODE_H + V_GAP + row * (NODE_H + V_GAP);
+      positions.push({ x: x, y: y, w: NODE_W, h: NODE_H });
+    }
+
+    const viewBoxH = rootY + NODE_H + (rows > 0 ? rows * (NODE_H + V_GAP) : V_GAP / 2) + MARGIN;
+    return { root: { x: rootX, y: rootY, w: NODE_W, h: NODE_H }, children: positions, viewBoxW: canvasW, viewBoxH: viewBoxH };
+  }
+
+  // ---- Rendering: everything below here touches the DOM/SVG. ----
+  let state = initialState();
+  let mode = 'foreground';
+  let gcTimer = null;
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function setStatus(msg) {
+    const isError = /^(Cannot|No finalizer|Delete already requested|A finalizer is already present)/.test(msg);
+    status.textContent = msg;
+    status.className = 'viz-status' + (isError ? ' viz-status-error' : ' viz-status-ok');
+  }
+
+  function updateControls() {
+    const active = state.crStatus === 'active';
+    root0.querySelector('[data-viz-action="addChild"]').disabled = !active;
+    root0.querySelector('[data-viz-action="addFinalizer"]').disabled = !active;
+    root0.querySelectorAll('[data-mode]').forEach(function (btn) {
+      btn.disabled = !active;
+      btn.style.fontWeight = btn.dataset.mode === mode ? '700' : '400';
+      btn.style.borderColor = btn.dataset.mode === mode ? 'var(--accent)' : '';
+    });
+    root0.querySelector('[data-viz-action="requestDelete"]').disabled = !active;
+    root0.querySelector('[data-viz-action="completeCleanup"]').disabled = !state.finalizer;
+  }
+
+  function draw() {
+    const layout = layoutTree(state.children.length);
+    svg.setAttribute('viewBox', '0 0 ' + layout.viewBoxW + ' ' + layout.viewBoxH);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    const rootDrawn = state.crStatus !== 'deleted';
+    if (rootDrawn) {
+      const r = layout.root;
+      const cls = state.crStatus === 'terminating' ? 'viz-node-highlight' : 'viz-node';
+      state.children.forEach(function (c, i) {
+        const cp = layout.children[i];
+        svg.appendChild(el('line', {
+          x1: r.x + r.w / 2, y1: r.y + r.h, x2: cp.x + cp.w / 2, y2: cp.y, class: 'viz-edge',
+        }));
+      });
+      svg.appendChild(el('rect', { x: r.x, y: r.y, width: r.w, height: r.h, rx: 6, class: cls }));
+      const t = el('text', { x: r.x + r.w / 2, y: r.y + r.h / 2 });
+      t.textContent = 'Root CR';
+      svg.appendChild(t);
+      if (state.finalizer) {
+        const ft = el('text', { x: r.x + r.w / 2, y: r.y + r.h + 14, class: 'viz-label-dim' });
+        ft.textContent = 'finalizer set';
+        svg.appendChild(ft);
+      }
+    }
+
+    state.children.forEach(function (c, i) {
+      const cp = layout.children[i];
+      const cls = c.status === 'active' ? 'viz-node' : 'viz-node-removing';
+      svg.appendChild(el('rect', { x: cp.x, y: cp.y, width: cp.w, height: cp.h, rx: 6, class: cls }));
+      const t = el('text', { x: cp.x + cp.w / 2, y: cp.y + cp.h / 2 });
+      t.textContent = 'child-' + c.id;
+      svg.appendChild(t);
+    });
+
+    updateControls();
+    setStatus(state.log);
+  }
+
+  function scheduleAdvance() {
+    if (gcTimer) return;
+    gcTimer = setInterval(function () {
+      if (isSettledLogic(state)) { clearInterval(gcTimer); gcTimer = null; return; }
+      state = advanceLogic(state);
+      draw();
+    }, 300);
+  }
+
+  root0.querySelector('[data-viz-action="addChild"]').addEventListener('click', function () {
+    state = addChildLogic(state);
+    draw();
+  });
+
+  root0.querySelector('[data-viz-action="addFinalizer"]').addEventListener('click', function () {
+    state = addFinalizerLogic(state);
+    draw();
+  });
+
+  root0.querySelectorAll('[data-mode]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      mode = btn.dataset.mode;
+      updateControls();
+    });
+  });
+
+  root0.querySelector('[data-viz-action="requestDelete"]').addEventListener('click', function () {
+    state = requestDeleteLogic(state, mode);
+    draw();
+    scheduleAdvance();
+  });
+
+  root0.querySelector('[data-viz-action="completeCleanup"]').addEventListener('click', function () {
+    state = completeCleanupLogic(state);
+    draw();
+    scheduleAdvance();
+  });
+
+  root0.querySelector('[data-viz-action="reset"]').addEventListener('click', function () {
+    if (gcTimer) { clearInterval(gcTimer); gcTimer = null; }
+    state = initialState();
+    mode = 'foreground';
+    draw();
+  });
+
+  draw();
+})();
+</script>
+
 ---
 
 ## 7. Real-World Examples — Three Different Shapes of the Same Pattern

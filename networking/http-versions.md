@@ -565,12 +565,19 @@ the exact same set of resources.
 
     const lanes = lanesFor(schedule);
     const vbH = MARGIN_TOP + Math.max(lanes.length, 1) * ROW_H + 16;
-    svg.setAttribute('viewBox', `0 0 640 ${vbH}`);
+    // Width has to grow with the schedule too, not just height: enough
+    // stacked slow/lost resources on one HTTP/1.1 connection (their
+    // transfer times sum serially) can push a bar's right edge well past
+    // a fixed 640, off the visible canvas. Never shrink below the
+    // original 640 so small resource counts keep their familiar layout.
+    const maxFinish = schedule.length ? Math.max.apply(null, schedule.map((s) => s.finish)) : 0;
+    const vbW = Math.max(640, MARGIN_LEFT + maxFinish * PX_PER_UNIT + 20);
+    svg.setAttribute('viewBox', `0 0 ${vbW} ${vbH}`);
     while (svg.firstChild) svg.removeChild(svg.firstChild);
 
     if (protocol === 'http2' && resources.length > 0) {
       svg.appendChild(el('rect', {
-        x: 8, y: 6, width: 624, height: vbH - 12, rx: 8,
+        x: 8, y: 6, width: vbW - 16, height: vbH - 12, rx: 8,
         class: 'viz-edge', 'fill-opacity': '0', 'stroke-dasharray': '4,3',
       }));
       const bracket = el('text', { x: 16, y: 16, class: 'viz-label-dim' });

@@ -157,6 +157,156 @@ The receiver advertises how much buffer space it has (window size). Sender never
   <div class="quiz-a" hidden>Not immediately, but soon. The receive buffer keeps filling with unread data, so the window size advertised in each ACK shrinks. Once it hits 0, the sender must stop &mdash; it can never have more unacknowledged bytes in flight than the last advertised window. That's backpressure propagating from a slow reader all the way back to the sender, with no application-level signaling involved.</div>
 </div>
 
+### Try It Yourself: Live Receive Window
+
+Drive both sides yourself. "Send N bytes" is the sender pushing data into flight; "App reads N bytes" is the receiving application draining its buffer at whatever pace *you* choose, completely independent of the sends. Try starving the reads for a while and watch the window hit 0 and sends start getting rejected &mdash; then read to reopen it.
+
+<div class="structure-viz" id="flowctrl-viz">
+  <svg class="viz-canvas" viewBox="0 0 460 170"></svg>
+  <div class="viz-controls">
+    <input class="viz-input" id="flowctrl-send-n" type="number" min="1" value="16" placeholder="bytes" />
+    <button class="viz-btn" data-viz-action="send">Send N bytes</button>
+    <input class="viz-input" id="flowctrl-read-n" type="number" min="1" value="16" placeholder="bytes" />
+    <button class="viz-btn" data-viz-action="read">App reads N bytes</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background: color-mix(in srgb, var(--bad) 20%, var(--surface)); border: 1.5px solid var(--bad);"></span>unread bytes in buffer</span>
+    <span><span class="viz-swatch" style="background: color-mix(in srgb, var(--ok) 20%, var(--surface)); border: 1.5px solid var(--ok);"></span>advertised window (space left)</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root = document.getElementById('flowctrl-viz');
+  const svg = root.querySelector('.viz-canvas');
+  const status = root.querySelector('.viz-status');
+  const sendInput = root.querySelector('#flowctrl-send-n');
+  const readInput = root.querySelector('#flowctrl-read-n');
+
+  const CAPACITY = 64;
+
+  // --- Pure state-transition logic (no DOM) ---
+  function makeState() { return { unread: 0, capacity: CAPACITY }; }
+  function advertisedWindow(state) { return state.capacity - state.unread; }
+  function send(state, n) {
+    if (!Number.isFinite(n) || n <= 0) return { state, accepted: false, reason: 'invalid' };
+    const window = advertisedWindow(state);
+    if (n > window) return { state, accepted: false, reason: 'window-exceeded' };
+    return { state: { unread: state.unread + n, capacity: state.capacity }, accepted: true, reason: 'ok' };
+  }
+  function read(state, n) {
+    if (!Number.isFinite(n) || n <= 0) return { state, read: 0, reason: 'invalid' };
+    const actual = Math.min(n, state.unread);
+    return { state: { unread: state.unread - actual, capacity: state.capacity }, read: actual, reason: actual > 0 ? 'ok' : 'empty' };
+  }
+
+  let state = makeState();
+
+  // --- Layout geometry (matches viewBox 0 0 460 170) ---
+  const BAR_X = 130, BAR_W = 260;
+  const UNREAD_BAR_Y = 30, UNREAD_BAR_H = 34;
+  const WINDOW_BAR_Y = 96, WINDOW_BAR_H = 34;
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function draw() {
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    const window = advertisedWindow(state);
+    const unreadFillW = Math.max(0, Math.min(BAR_W, (state.unread / state.capacity) * BAR_W));
+    const windowFillW = Math.max(0, Math.min(BAR_W, (window / state.capacity) * BAR_W));
+
+    // Row 1: unread/in-flight bytes
+    const l1 = el('text', { x: 10, y: UNREAD_BAR_Y + UNREAD_BAR_H / 2, 'text-anchor': 'start' });
+    l1.textContent = 'In-flight / unread:';
+    svg.appendChild(l1);
+    svg.appendChild(el('rect', { x: BAR_X, y: UNREAD_BAR_Y, width: BAR_W, height: UNREAD_BAR_H, rx: 5, class: 'viz-edge', fill: 'none' }));
+    svg.appendChild(el('rect', {
+      x: BAR_X, y: UNREAD_BAR_Y, width: unreadFillW, height: UNREAD_BAR_H, rx: 5,
+      class: state.unread >= state.capacity ? 'viz-node-removing' : 'viz-node',
+    }));
+    const t1 = el('text', { x: BAR_X + BAR_W + 12, y: UNREAD_BAR_Y + UNREAD_BAR_H / 2, 'text-anchor': 'start' });
+    t1.textContent = state.unread + ' / ' + state.capacity;
+    svg.appendChild(t1);
+
+    // Row 2: advertised window
+    const l2 = el('text', { x: 10, y: WINDOW_BAR_Y + WINDOW_BAR_H / 2, 'text-anchor': 'start' });
+    l2.textContent = 'Advertised window:';
+    svg.appendChild(l2);
+    svg.appendChild(el('rect', { x: BAR_X, y: WINDOW_BAR_Y, width: BAR_W, height: WINDOW_BAR_H, rx: 5, class: 'viz-edge', fill: 'none' }));
+    svg.appendChild(el('rect', {
+      x: BAR_X, y: WINDOW_BAR_Y, width: windowFillW, height: WINDOW_BAR_H, rx: 5,
+      class: window <= 0 ? 'viz-node-highlight' : 'viz-node-new',
+    }));
+    const t2 = el('text', { x: BAR_X + BAR_W + 12, y: WINDOW_BAR_Y + WINDOW_BAR_H / 2, 'text-anchor': 'start' });
+    t2.textContent = window + ' / ' + state.capacity;
+    svg.appendChild(t2);
+
+    // Capacity footer
+    const cap = el('text', { x: BAR_X + BAR_W / 2, y: WINDOW_BAR_Y + WINDOW_BAR_H + 22, class: 'viz-label-dim' });
+    cap.textContent = 'receive buffer capacity: ' + state.capacity + ' units';
+    svg.appendChild(cap);
+  }
+
+  root.querySelector('[data-viz-action="send"]').addEventListener('click', () => {
+    const n = parseInt(sendInput.value, 10);
+    if (!Number.isFinite(n) || n <= 0) {
+      setStatus('Enter a positive number of bytes to send.', 'error');
+      return;
+    }
+    const window = advertisedWindow(state);
+    const result = send(state, n);
+    if (!result.accepted) {
+      setStatus(
+        `Send of ${n} bytes REJECTED — advertised window is only ${window}. Sender must stall until the app reads more.`,
+        'error'
+      );
+      return;
+    }
+    state = result.state;
+    setStatus(`Sent ${n} bytes. Buffer now ${state.unread}/${state.capacity} unread, window shrank to ${advertisedWindow(state)}.`, 'ok');
+    draw();
+  });
+
+  root.querySelector('[data-viz-action="read"]').addEventListener('click', () => {
+    const n = parseInt(readInput.value, 10);
+    if (!Number.isFinite(n) || n <= 0) {
+      setStatus('Enter a positive number of bytes to read.', 'error');
+      return;
+    }
+    if (state.unread === 0) {
+      setStatus('Nothing to read — buffer is already empty.', '');
+      return;
+    }
+    const result = read(state, n);
+    state = result.state;
+    setStatus(`App read ${result.read} bytes. Buffer now ${state.unread}/${state.capacity} unread, window reopened to ${advertisedWindow(state)}.`, 'ok');
+    draw();
+  });
+
+  root.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    state = makeState();
+    setStatus('Reset — buffer empty, full window advertised.', '');
+    draw();
+  });
+
+  setStatus('Buffer starts empty (window = ' + CAPACITY + '). Try sending more than the buffer can hold, or starve the reads to watch the window hit 0 and sends get rejected.', '');
+  draw();
+})();
+</script>
+
 ### Congestion Control — CUBIC / BBR
 
 Congestion control prevents a sender from overwhelming the network. The sender maintains a **congestion window (cwnd)** — the maximum number of unacknowledged bytes in flight.
@@ -195,6 +345,209 @@ Same four phases, flip through them one at a time:
     </div>
   </div>
 </div>
+
+**Live simulator — drive the state machine yourself:**
+
+<div class="structure-viz" id="cwnd-demo">
+  <svg class="viz-canvas" viewBox="0 0 300 194"></svg>
+  <div class="viz-controls">
+    <button class="viz-btn" data-viz-action="ack">ACK</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="dupack3">3 Dup ACKs</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="timeout">Timeout</button>
+    <button class="viz-btn" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background: color-mix(in srgb, var(--ok) 20%, var(--surface)); border: 1.5px solid var(--ok);"></span>Slow Start (exponential)</span>
+    <span><span class="viz-swatch" style="background: color-mix(in srgb, var(--accent) 16%, var(--surface)); border: 1.5px solid var(--accent);"></span>Congestion Avoidance (linear)</span>
+    <span><span class="viz-swatch" style="background: color-mix(in srgb, var(--warn) 20%, var(--surface)); border: 1.5px solid var(--warn);"></span>3 Dup ACKs &rarr; Fast Recovery</span>
+    <span><span class="viz-swatch" style="background: color-mix(in srgb, var(--bad) 20%, var(--surface)); border: 1.5px solid var(--bad);"></span>Timeout</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root = document.getElementById('cwnd-demo');
+  const svg = root.querySelector('.viz-canvas');
+  const status = root.querySelector('.viz-status');
+
+  // ---- Layout constants ----
+  const WINDOW = 20;
+  const BAR_STEP = 44;
+  const BAR_GAP = 10;
+  const LEFT_MARGIN = 44;
+  const RIGHT_MARGIN = 16;
+  const TOP_MARGIN = 24;
+  const CHART_H = 140;
+  const BOTTOM_MARGIN = 30;
+
+  const INITIAL_STATE = { phase: 'slow-start', cwnd: 1, ssthresh: 64 };
+  let state = { ...INITIAL_STATE };
+  let history = []; // full history; chart renders only the last WINDOW entries
+
+  // ---- Pure state machine: (state, event) -> new state ----
+  function transition(s, event) {
+    const { cwnd, ssthresh, phase } = s;
+
+    if (event === 'timeout') {
+      const newSsthresh = Math.max(1, Math.floor(cwnd / 2));
+      return { phase: 'slow-start', cwnd: 1, ssthresh: newSsthresh };
+    }
+
+    if (event === 'dupack3') {
+      const newSsthresh = Math.max(1, Math.floor(cwnd / 2));
+      return { phase: 'fast-recovery', cwnd: newSsthresh + 3, ssthresh: newSsthresh };
+    }
+
+    if (event === 'ack') {
+      if (phase === 'fast-recovery') {
+        // First new ACK after fast recovery deflates cwnd to ssthresh and
+        // resumes congestion avoidance.
+        return { phase: 'congestion-avoidance', cwnd: ssthresh, ssthresh };
+      }
+      if (cwnd < ssthresh) {
+        // Slow start: exponential growth (doubles cwnd per ACK).
+        const grown = cwnd * 2;
+        const newPhase = grown >= ssthresh ? 'congestion-avoidance' : 'slow-start';
+        return { phase: newPhase, cwnd: grown, ssthresh };
+      }
+      // Congestion avoidance: linear growth (+1 MSS per ACK).
+      return { phase: 'congestion-avoidance', cwnd: cwnd + 1, ssthresh };
+    }
+
+    throw new Error('unknown event: ' + event);
+  }
+
+  function phaseLabel(phase) {
+    if (phase === 'slow-start') return 'Slow Start';
+    if (phase === 'congestion-avoidance') return 'Congestion Avoidance';
+    if (phase === 'fast-recovery') return 'Fast Recovery';
+    return phase;
+  }
+
+  // ---- Pure layout: (history, currentSsthresh) -> drawing instructions ----
+  // Two independent safeguards against unbounded growth, both required:
+  //  1. Only the last WINDOW events are drawn -> canvas WIDTH is bounded.
+  //  2. Bar heights are scaled against the current max value in that
+  //     window -> canvas HEIGHT never needs to grow no matter how large
+  //     cwnd gets.
+  function computeLayout(fullHistory, currentSsthresh) {
+    const visible = fullHistory.slice(-WINDOW);
+    const count = visible.length;
+    const width = LEFT_MARGIN + RIGHT_MARGIN + Math.max(count, 1) * BAR_STEP;
+    const height = TOP_MARGIN + CHART_H + BOTTOM_MARGIN;
+    const maxCwnd = visible.reduce((m, e) => Math.max(m, e.cwnd), 0);
+    const maxVal = Math.max(maxCwnd, currentSsthresh, 1) * 1.15;
+
+    const bars = visible.map((entry, i) => {
+      const x = LEFT_MARGIN + i * BAR_STEP;
+      const w = BAR_STEP - BAR_GAP;
+      const h = Math.max(2, (entry.cwnd / maxVal) * CHART_H);
+      const y = TOP_MARGIN + (CHART_H - h);
+      let color;
+      if (entry.event === 'timeout') color = 'viz-node-removing';
+      else if (entry.event === 'dupack3') color = 'viz-node-highlight';
+      else color = entry.phase === 'slow-start' ? 'viz-node-new' : 'viz-node';
+      const tickLabel = entry.event === 'ack' ? 'A' : entry.event === 'dupack3' ? '3D' : 'TO';
+      return { x, y, w, h, color, tickLabel, tickX: x + w / 2, tickY: TOP_MARGIN + CHART_H + 16, cwnd: entry.cwnd };
+    });
+
+    const ssthreshFrac = Math.min(1, currentSsthresh / maxVal);
+    const ssthreshY = TOP_MARGIN + CHART_H - ssthreshFrac * CHART_H;
+    const lastBar = bars[bars.length - 1] || null;
+
+    return {
+      width,
+      height,
+      bars,
+      ssthreshLine: count > 0 ? { x1: LEFT_MARGIN - 4, x2: width - RIGHT_MARGIN, y: ssthreshY, label: currentSsthresh } : null,
+      maxLabel: 'max ' + Math.round(maxVal),
+      lastValueLabel: lastBar ? { x: lastBar.x + lastBar.w / 2, y: lastBar.y - 8, text: String(lastBar.cwnd) } : null,
+      truncated: fullHistory.length > WINDOW,
+      totalEvents: fullHistory.length,
+    };
+  }
+
+  function el(tag, attrs, text) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    if (text !== undefined) e.textContent = text;
+    return e;
+  }
+
+  function draw() {
+    svg.innerHTML = '';
+    const layout = computeLayout(history, state.ssthresh);
+    svg.setAttribute('viewBox', `0 0 ${layout.width} ${layout.height}`);
+
+    if (history.length === 0) {
+      svg.appendChild(el('text', { x: layout.width / 2, y: layout.height / 2, class: 'viz-label-dim' }, 'No events yet — click ACK to begin.'));
+      return;
+    }
+
+    // ssthresh reference line (drawn first, under the bars).
+    if (layout.ssthreshLine) {
+      const line = el('line', {
+        x1: layout.ssthreshLine.x1, x2: layout.ssthreshLine.x2,
+        y1: layout.ssthreshLine.y, y2: layout.ssthreshLine.y,
+        class: 'viz-edge-active',
+      });
+      line.setAttribute('stroke-dasharray', '4 3');
+      svg.appendChild(line);
+      svg.appendChild(el('text', {
+        x: layout.ssthreshLine.x2 - 2, y: layout.ssthreshLine.y - 7, class: 'viz-label-dim',
+        style: 'text-anchor: end;',
+      }, 'ssthresh=' + layout.ssthreshLine.label));
+    }
+
+    // max-value scale reference, top-left corner.
+    svg.appendChild(el('text', { x: 4, y: 14, class: 'viz-label-dim', style: 'text-anchor: start;' }, layout.maxLabel));
+
+    // Bars + per-bar event tick.
+    for (const bar of layout.bars) {
+      svg.appendChild(el('rect', { x: bar.x, y: bar.y, width: bar.w, height: bar.h, rx: 2, class: bar.color }));
+      svg.appendChild(el('text', { x: bar.tickX, y: bar.tickY, class: 'viz-label-dim' }, bar.tickLabel));
+    }
+
+    // Numeric cwnd label on only the most recent bar (avoids label overlap
+    // as more bars appear; the status line always shows the exact number).
+    if (layout.lastValueLabel) {
+      svg.appendChild(el('text', { x: layout.lastValueLabel.x, y: layout.lastValueLabel.y }, layout.lastValueLabel.text));
+    }
+  }
+
+  function updateStatus(event) {
+    const names = { ack: 'ACK', dupack3: '3 duplicate ACKs', timeout: 'Timeout' };
+    const windowNote = history.length > WINDOW ? ` (chart showing last ${WINDOW} of ${history.length} events)` : '';
+    status.textContent = `${names[event]} → phase: ${phaseLabel(state.phase)}, cwnd = ${state.cwnd}, ssthresh = ${state.ssthresh}${windowNote}`;
+    status.className = event === 'timeout' ? 'viz-status viz-status-error'
+      : event === 'dupack3' ? 'viz-status'
+      : 'viz-status viz-status-ok';
+  }
+
+  function fire(event) {
+    state = transition(state, event);
+    history.push({ event, cwnd: state.cwnd, ssthresh: state.ssthresh, phase: state.phase });
+    updateStatus(event);
+    draw();
+  }
+
+  root.querySelector('[data-viz-action="ack"]').addEventListener('click', () => fire('ack'));
+  root.querySelector('[data-viz-action="dupack3"]').addEventListener('click', () => fire('dupack3'));
+  root.querySelector('[data-viz-action="timeout"]').addEventListener('click', () => fire('timeout'));
+  root.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    state = { ...INITIAL_STATE };
+    history = [];
+    status.textContent = 'Reset. Phase: Slow Start, cwnd = 1, ssthresh = 64.';
+    status.className = 'viz-status';
+    draw();
+  });
+
+  status.textContent = 'Phase: Slow Start, cwnd = 1, ssthresh = 64. Click ACK, 3 Dup ACKs, or Timeout to drive the state machine.';
+  draw();
+})();
+</script>
 
 **Phase 1 — Slow Start:**
 ```

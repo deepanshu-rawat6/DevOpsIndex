@@ -607,6 +607,206 @@ Each node maintains a counter per node. On every event:
 
 C cannot determine which write happened first → **conflict detected**. System must reconcile (last-write-wins, merge, or surface to application).
 
+### Try It: Live Vector Clocks
+
+The stepper above walks through one scripted sequence. Below, drive three
+real vector clocks yourself — write on any node, replicate in either
+direction between any pair, and watch the status line classify the two
+clocks it just compared as **concurrent** or **causally ordered**. Reproduce
+the stepper's exact scenario (Write @ A, Write @ B, Replicate A→C, Replicate
+B→C — watch the last step report "concurrent"), then try other orderings:
+what happens if you replicate A→C *before* B ever writes?
+
+<div class="structure-viz" id="vector-clock-live-viz">
+  <svg class="viz-canvas" viewBox="0 0 620 140"></svg>
+  <div class="viz-controls">
+    <button class="viz-btn" data-viz-action="write" data-node="A">Write @ A</button>
+    <button class="viz-btn" data-viz-action="write" data-node="B">Write @ B</button>
+    <button class="viz-btn" data-viz-action="write" data-node="C">Write @ C</button>
+  </div>
+  <div class="viz-controls">
+    <button class="viz-btn" data-viz-action="replicate" data-from="A" data-to="B">Replicate A→B</button>
+    <button class="viz-btn" data-viz-action="replicate" data-from="B" data-to="A">Replicate B→A</button>
+    <button class="viz-btn" data-viz-action="replicate" data-from="A" data-to="C">Replicate A→C</button>
+    <button class="viz-btn" data-viz-action="replicate" data-from="C" data-to="A">Replicate C→A</button>
+    <button class="viz-btn" data-viz-action="replicate" data-from="B" data-to="C">Replicate B→C</button>
+    <button class="viz-btn" data-viz-action="replicate" data-from="C" data-to="B">Replicate C→B</button>
+    <button class="viz-btn viz-btn-danger" data-viz-action="reset">Reset</button>
+  </div>
+  <div class="viz-status"></div>
+  <div class="viz-legend">
+    <span><span class="viz-swatch" style="background:var(--ok)"></span> just changed</span>
+    <span><span class="viz-swatch" style="background:var(--warn)"></span> most recently compared</span>
+  </div>
+</div>
+
+<script>
+(function () {
+  const svgNS = 'http://www.w3.org/2000/svg';
+  const root = document.getElementById('vector-clock-live-viz');
+  const svg = root.querySelector('.viz-canvas');
+  const status = root.querySelector('.viz-status');
+
+  const NODES = ['A', 'B', 'C'];
+
+  function makeClock() {
+    const c = {};
+    NODES.forEach((n) => { c[n] = 0; });
+    return c;
+  }
+
+  // --- Core vector-clock logic: small, pure, DOM-free functions. ---
+
+  // Pure: a node's own write increments exactly its own component.
+  function writeClock(clock, node) {
+    return { ...clock, [node]: clock[node] + 1 };
+  }
+
+  // Pure: component-wise max merge of sender into receiver, then the
+  // receiver's own component is incremented (receiving is itself a local
+  // event on the receiver).
+  function mergeClocks(senderClock, receiverClock, receiverNode) {
+    const merged = {};
+    NODES.forEach((n) => { merged[n] = Math.max(senderClock[n], receiverClock[n]); });
+    merged[receiverNode] = merged[receiverNode] + 1;
+    return merged;
+  }
+
+  // Pure: compare two vector clocks for causal relationship.
+  // 'equal' | 'before' (a happened-before b) | 'after' (b happened-before a) | 'concurrent'
+  function compareClocks(a, b) {
+    let aLeqB = true;
+    let bLeqA = true;
+    NODES.forEach((n) => {
+      if (a[n] > b[n]) aLeqB = false;
+      if (b[n] > a[n]) bLeqA = false;
+    });
+    if (aLeqB && bLeqA) return 'equal';
+    if (aLeqB) return 'before';
+    if (bLeqA) return 'after';
+    return 'concurrent';
+  }
+
+  function formatClock(clock) {
+    return '[' + NODES.map((n) => n + ':' + clock[n]).join(', ') + ']';
+  }
+
+  // Pure layout: given clocks + a display order, compute non-overlapping
+  // chip boxes sized to fit their own label text, so arbitrarily large
+  // counters (dozens of writes to one node) never overflow their box or
+  // collide with a neighboring chip.
+  const CHAR_WIDTH = 7.2; // px/char estimate for the 12px monospace viz font
+  const CHIP_PAD_X = 14;
+  const CHIP_GAP = 18;
+  const CHIP_START_X = 20;
+  const CHIP_HEIGHT = 40;
+  const CHIP_Y = 55;
+
+  function computeChipLayout(clocks, order) {
+    let x = CHIP_START_X;
+    return order.map((id) => {
+      const label = id + '  ' + formatClock(clocks[id]);
+      const width = Math.max(70, label.length * CHAR_WIDTH + CHIP_PAD_X * 2);
+      const chip = { id, label, x, width, cx: x + width / 2 };
+      x += width + CHIP_GAP;
+      return chip;
+    });
+  }
+
+  // --- Rendering / interaction state (impure) ---
+
+  let clocks = { A: makeClock(), B: makeClock(), C: makeClock() };
+  let lastChanged = null;
+  let lastCompared = null; // { ids: [x, y], relation }
+
+  function el(tag, attrs) {
+    const e = document.createElementNS(svgNS, tag);
+    for (const k in attrs) e.setAttribute(k, attrs[k]);
+    return e;
+  }
+
+  function setStatus(msg, kind) {
+    status.textContent = msg;
+    status.className = 'viz-status' + (kind === 'ok' ? ' viz-status-ok' : kind === 'error' ? ' viz-status-error' : '');
+  }
+
+  function relationLabel(rel) {
+    return rel === 'concurrent' ? 'concurrent' : 'causally ordered';
+  }
+
+  function draw() {
+    const layout = computeChipLayout(clocks, NODES);
+    const last = layout[layout.length - 1];
+    const width = Math.max(360, last.x + last.width + CHIP_START_X);
+    svg.setAttribute('viewBox', `0 0 ${width} 140`);
+    while (svg.firstChild) svg.removeChild(svg.firstChild);
+
+    layout.forEach((chip) => {
+      let cls = 'viz-node';
+      if (lastCompared && lastCompared.ids.includes(chip.id)) cls += ' viz-node-highlight';
+      if (chip.id === lastChanged) cls += ' viz-node-new';
+
+      const rect = el('rect', {
+        x: chip.x, y: CHIP_Y, width: chip.width, height: CHIP_HEIGHT,
+        rx: 8, class: cls,
+      });
+      svg.appendChild(rect);
+
+      const text = el('text', { x: chip.cx, y: CHIP_Y + CHIP_HEIGHT / 2 });
+      text.textContent = chip.label;
+      svg.appendChild(text);
+    });
+  }
+
+  function doWrite(node) {
+    const before = clocks[node];
+    const after = writeClock(before, node);
+    clocks[node] = after;
+    lastChanged = node;
+    const rel = compareClocks(before, after);
+    lastCompared = { ids: [node, node], relation: rel };
+    setStatus(
+      `${node} wrote: ${formatClock(before)} → ${formatClock(after)}. Compared to its own prior state: ${relationLabel(rel)} (a write always happens-after its own history).`,
+      rel === 'concurrent' ? 'error' : 'ok'
+    );
+    draw();
+  }
+
+  function doReplicate(from, to) {
+    const senderBefore = clocks[from];
+    const receiverBefore = clocks[to];
+    const rel = compareClocks(senderBefore, receiverBefore);
+    const merged = mergeClocks(senderBefore, receiverBefore, to);
+    clocks[to] = merged;
+    lastChanged = to;
+    lastCompared = { ids: [from, to], relation: rel };
+    setStatus(
+      `Replicate ${from}→${to}: sender ${from}=${formatClock(senderBefore)} vs receiver ${to}=${formatClock(receiverBefore)} (before merge) were ${relationLabel(rel)}. ${to} now holds ${formatClock(merged)}.`,
+      rel === 'concurrent' ? 'error' : 'ok'
+    );
+    draw();
+  }
+
+  root.querySelectorAll('[data-viz-action="write"]').forEach((btn) => {
+    btn.addEventListener('click', () => doWrite(btn.getAttribute('data-node')));
+  });
+
+  root.querySelectorAll('[data-viz-action="replicate"]').forEach((btn) => {
+    btn.addEventListener('click', () => doReplicate(btn.getAttribute('data-from'), btn.getAttribute('data-to')));
+  });
+
+  root.querySelector('[data-viz-action="reset"]').addEventListener('click', () => {
+    clocks = { A: makeClock(), B: makeClock(), C: makeClock() };
+    lastChanged = null;
+    lastCompared = null;
+    setStatus('Reset. All three clocks are back to [A:0, B:0, C:0].');
+    draw();
+  });
+
+  draw();
+})();
+</script>
+
 ### Conflict Resolution Strategies
 
 | Strategy | Used By | Behavior |
