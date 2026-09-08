@@ -16,11 +16,12 @@ Core patterns for designing scalable, reliable distributed systems. Covers the b
 | [distributed-transactions.md](./distributed-transactions.md) | Dual-write problem, 2PC, Saga, outbox pattern, CDC/Debezium, distributed locking (Redlock), optimistic concurrency, TCC, Spanner/TrueTime commit-wait | SDE-2 |
 | [file-transfer-storage.md](./file-transfer-storage.md) | Presigned URLs, multipart/resumable upload (tus), chunking + content-addressable dedup, replication vs erasure coding, metadata service design, CDN delivery | SDE-2 |
 | [realtime-chat.md](./realtime-chat.md) | WebSocket/long-polling/SSE, connection registry + cross-server relay, delivery guarantees, presence, multi-device fan-out, MQTT, WebRTC calling | SDE-2 |
+| [end-to-end-encryption.md](./end-to-end-encryption.md) | Signal Protocol (X3DH, Double Ratchet), hybrid symmetric/asymmetric model, Sender Keys for group chat, multi-device encryption, encrypted backups, server-visibility architecture | SDE-2 |
 | [distributed-id-generation.md](./distributed-id-generation.md) | UUID v4 vs ULID/UUIDv7, Twitter Snowflake bit layout, clock-drift handling, ticket servers, range/segment allocation | SDE-2 |
 | [geospatial-services.md](./geospatial-services.md) | Geohashing, quadtrees, S2 geometry, Redis GEO commands, ride-hailing matching, KNN vs radius search | SDE-2 |
 | [probabilistic-data-structures.md](./probabilistic-data-structures.md) | Bloom filter recap, HyperLogLog cardinality estimation (live simulator), Count-Min Sketch frequency estimation | SDE-2 |
 
-**Read order:** scaling → cap-pacelc → rate-limiting → async-patterns → api-design → distributed-transactions → file-transfer-storage → realtime-chat → distributed-id-generation → geospatial-services → probabilistic-data-structures
+**Read order:** scaling → cap-pacelc → rate-limiting → async-patterns → api-design → distributed-transactions → file-transfer-storage → realtime-chat → end-to-end-encryption → distributed-id-generation → geospatial-services → probabilistic-data-structures
 
 ---
 

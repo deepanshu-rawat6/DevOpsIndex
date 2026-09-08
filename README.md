@@ -387,11 +387,12 @@ Running stateful databases on Kubernetes — system design, replication, failove
 | [system-design/distributed-transactions.md](./system-design/distributed-transactions.md) | Dual-write problem, 2PC, Saga, outbox pattern, CDC/Debezium, distributed locking (Redlock), optimistic concurrency, TCC | SDE-2 |
 | [system-design/file-transfer-storage.md](./system-design/file-transfer-storage.md) | Presigned URLs, multipart/resumable upload (tus), chunking + content-addressable dedup, replication vs erasure coding, metadata service design, CDN delivery | SDE-2 |
 | [system-design/realtime-chat.md](./system-design/realtime-chat.md) | WebSocket/long-polling/SSE, connection registry + cross-server relay, delivery guarantees, presence, multi-device fan-out, MQTT (QoS, retained/LWT, MQTTS), WebRTC calling (STUN/TURN, mesh/SFU/MCU, SRTP/DTLS-SRTP, E2E vs transport encryption) | SDE-2 |
+| [system-design/end-to-end-encryption.md](./system-design/end-to-end-encryption.md) | Signal Protocol (X3DH, Double Ratchet), hybrid symmetric/asymmetric model, Sender Keys for group chat, multi-device encryption, encrypted backups (HSM Backup Key Vault), server-visibility architecture, scale (Erlang/BEAM, FreeBSD) | SDE-2 |
 | [system-design/distributed-id-generation.md](./system-design/distributed-id-generation.md) | UUID v4 vs ULID/UUIDv7, Twitter Snowflake bit layout, clock-drift handling, ticket servers, range/segment allocation | SDE-2 |
 | [system-design/geospatial-services.md](./system-design/geospatial-services.md) | Geohashing, quadtrees, S2 geometry, Redis GEO commands, real-time location write-amplification, ride-hailing driver-rider matching, KNN vs radius search | SDE-2 |
 | [system-design/probabilistic-data-structures.md](./system-design/probabilistic-data-structures.md) | Bloom filter recap, HyperLogLog cardinality estimation (live simulator), Count-Min Sketch frequency estimation | SDE-2 |
 
-**Read order:** scaling → cap-pacelc → rate-limiting → async-patterns → api-design → distributed-transactions → file-transfer-storage → realtime-chat → distributed-id-generation → geospatial-services → probabilistic-data-structures
+**Read order:** scaling → cap-pacelc → rate-limiting → async-patterns → api-design → distributed-transactions → file-transfer-storage → realtime-chat → end-to-end-encryption → distributed-id-generation → geospatial-services → probabilistic-data-structures
 
 ---
 

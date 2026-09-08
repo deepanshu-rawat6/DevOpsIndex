@@ -74,7 +74,7 @@ const SECTIONS = [
   },
   {
     slug: 'system-design', title: 'System Design', order: 17,
-    readOrder: ['README', 'scaling', 'cap-pacelc', 'rate-limiting', 'async-patterns', 'api-design', 'distributed-transactions', 'file-transfer-storage', 'realtime-chat', 'distributed-id-generation', 'geospatial-services', 'probabilistic-data-structures'],
+    readOrder: ['README', 'scaling', 'cap-pacelc', 'rate-limiting', 'async-patterns', 'api-design', 'distributed-transactions', 'file-transfer-storage', 'realtime-chat', 'end-to-end-encryption', 'distributed-id-generation', 'geospatial-services', 'probabilistic-data-structures'],
   },
   {
     slug: 'sre', title: 'SRE & Debugging', order: 18,

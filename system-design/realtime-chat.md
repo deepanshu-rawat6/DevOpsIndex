@@ -860,6 +860,11 @@ Getting the second guarantee for a group call — the approach Signal and WhatsA
   <div class="quiz-a" hidden>Not by the usual meaning of end-to-end. SRTP encrypts each hop separately, client-to-SFU and SFU-to-client, which means the SFU has to terminate the DTLS-SRTP session on its side to forward packets at all — giving it keys capable of decrypting the media, even if it never actually inspects it. True end-to-end encryption for a group call needs an extra layer on top, like WebRTC's Insertable Streams, encrypting each frame with keys only the participants hold before it ever reaches the SFU, so the SFU only ever forwards ciphertext it has no key for. "Uses SRTP" describes hop-by-hop transport security; it doesn't by itself mean the routing server can't access the content.</div>
 </div>
 
+For the actual **message** (not call) encryption protocol this section only name-drops —
+Signal's X3DH handshake, the Double Ratchet, Sender Keys for groups, and how multi-device fits
+in — see [end-to-end-encryption.md](./end-to-end-encryption.md), which builds directly on this
+file's connection-registry and fan-out mechanics from Sections 7-8.
+
 ---
 
 ## Quick Reference
