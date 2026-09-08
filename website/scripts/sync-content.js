@@ -75,6 +75,35 @@ const SECTIONS = [
   {
     slug: 'system-design', title: 'System Design', order: 17,
     readOrder: ['README', 'scaling', 'cap-pacelc', 'rate-limiting', 'async-patterns', 'api-design', 'distributed-transactions', 'file-transfer-storage', 'realtime-chat', 'end-to-end-encryption', 'distributed-id-generation', 'geospatial-services', 'probabilistic-data-structures'],
+    prerequisites: {
+      'scaling':                       [{ title: 'Linux',             slug: 'linux' },
+                                        { title: 'Networking',        slug: 'networking' },
+                                        { title: 'Database Internals', slug: 'databases' }],
+      'cap-pacelc':                    [{ title: 'Scaling',           slug: 'system-design/scaling' },
+                                        { title: 'DB Replication',    slug: 'databases/replication' }],
+      'rate-limiting':                 [{ title: 'Scaling',           slug: 'system-design/scaling' },
+                                        { title: 'Redis Internals',   slug: 'databases/redis-internals' }],
+      'async-patterns':                [{ title: 'Scaling',           slug: 'system-design/scaling' },
+                                        { title: 'Kafka Internals',   slug: 'databases/kafka-internals' }],
+      'api-design':                    [{ title: 'HTTP Versions',     slug: 'networking/http-versions' },
+                                        { title: 'gRPC & GraphQL',    slug: 'networking/grpc-graphql' }],
+      'distributed-transactions':      [{ title: 'CAP & PACELC',     slug: 'system-design/cap-pacelc' },
+                                        { title: 'Async Patterns',    slug: 'system-design/async-patterns' }],
+      'file-transfer-storage':         [{ title: 'Scaling',           slug: 'system-design/scaling' },
+                                        { title: 'CDN',               slug: 'networking/cdn' },
+                                        { title: 'TLS & Encryption',  slug: 'networking/tls-encryption' }],
+      'realtime-chat':                 [{ title: 'Scaling',           slug: 'system-design/scaling' },
+                                        { title: 'HTTP Versions',     slug: 'networking/http-versions' },
+                                        { title: 'Redis Internals',   slug: 'databases/redis-internals' }],
+      'end-to-end-encryption':         [{ title: 'Realtime Chat',     slug: 'system-design/realtime-chat' },
+                                        { title: 'TLS & Encryption',  slug: 'networking/tls-encryption' }],
+      'distributed-id-generation':     [{ title: 'Scaling',           slug: 'system-design/scaling' },
+                                        { title: 'CAP & PACELC',      slug: 'system-design/cap-pacelc' }],
+      'geospatial-services':           [{ title: 'Scaling',           slug: 'system-design/scaling' },
+                                        { title: 'Redis Internals',   slug: 'databases/redis-internals' }],
+      'probabilistic-data-structures': [{ title: 'Scaling',           slug: 'system-design/scaling' },
+                                        { title: 'Rate Limiting',     slug: 'system-design/rate-limiting' }],
+    },
   },
   {
     slug: 'sre', title: 'SRE & Debugging', order: 18,
@@ -195,6 +224,7 @@ for (const section of SECTIONS) {
 
     // Write JSON manifest entry
     const jsonKey = pageSlug.replace(/\//g, '--');
+    const prerequisites = section.prerequisites?.[orderKey] ?? [];
     const meta = {
       section: section.slug,
       sectionTitle: section.title,
@@ -203,6 +233,7 @@ for (const section of SECTIONS) {
       title,
       filePath: path.join(section.slug, relPath).replace(/\\/g, '/'),
       pageOrder: finalOrder,
+      prerequisites,
     };
     fs.writeFileSync(path.join(CONTENT_DIR, `${jsonKey}.json`), JSON.stringify(meta, null, 2));
 

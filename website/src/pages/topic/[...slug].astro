@@ -56,6 +56,21 @@ const pageHref = (t: { pageSlug: string; section: string }) =>
       )}
     </nav>
 
+    <!-- Prerequisites -->
+    {topic.prerequisites && topic.prerequisites.length > 0 && (
+      <div class="flex flex-wrap items-center gap-2 mb-6 px-4 py-3 rounded-lg"
+           style="border: 1px solid var(--border); background: var(--surface)">
+        <span class="text-sm font-semibold mr-1" style="color: var(--text-muted)">Before you start:</span>
+        {topic.prerequisites.map((p: { title: string; slug: string }) => (
+          <a href={`/topic/${p.slug}`}
+             class="text-sm px-3 py-1 rounded-full font-medium"
+             style="background: color-mix(in srgb, var(--accent) 12%, transparent); color: var(--accent)">
+            {p.title}
+          </a>
+        ))}
+      </div>
+    )}
+
     <!-- Content -->
     <div class="prose max-w-none">
       <Fragment set:html={html} />

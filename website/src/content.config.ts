@@ -11,6 +11,7 @@ const topics = defineCollection({
     title: z.string(),
     filePath: z.string(),
     pageOrder: z.number(),
+    prerequisites: z.array(z.object({ title: z.string(), slug: z.string() })).optional().default([]),
   }),
 });
 
