@@ -14,7 +14,7 @@ const SECTIONS = [
   },
   {
     slug: 'networking', title: 'Networking', order: 2,
-    readOrder: ['README', 'osi-model', 'tcp-udp', 'tls-encryption', 'http-versions', 'grpc-graphql', 'grpc-deep-dive', 'linux-networking', 'bgp-routing', 'load-balancers', 'cdn', 'nslookup-vs-curl', 'zero-trust'],
+    readOrder: ['README', 'osi-model', 'tcp-udp', 'tls-encryption', 'acme-certificate-automation', 'http-versions', 'grpc-graphql', 'grpc-deep-dive', 'linux-networking', 'bgp-routing', 'load-balancers', 'cdn', 'nslookup-vs-curl', 'zero-trust'],
   },
   {
     slug: 'docker', title: 'Docker', order: 3,

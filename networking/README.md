@@ -9,6 +9,7 @@ Core networking concepts for backend engineers and platform engineers — from p
 | [osi-model.md](./osi-model.md) | 7 OSI layers, full HTTPS request flow (curl google.com), encapsulation/decapsulation, debugging by layer |
 | [tcp-udp.md](./tcp-udp.md) | TCP 3-way handshake, 4-way teardown, state machine, flow control, congestion control (CUBIC/BBR), TIME_WAIT, UDP, when to use each |
 | [tls-encryption.md](./tls-encryption.md) | Symmetric vs asymmetric, SSL history, TLS 1.2 (2 RTT), TLS 1.3 (1 RTT), certificate chain, certificate validation, debugging with openssl |
+| [acme-certificate-automation.md](./acme-certificate-automation.md) | PEM file format, ACME protocol (RFC 8555) lifecycle, HTTP-01 vs DNS-01, wildcard certs, acme.sh/certbot/lego/cert-manager, ECC vs RSA, Google Trust Services/EAB |
 | [http-versions.md](./http-versions.md) | HTTP/1.0 → HTTP/3, HOL blocking, binary framing, status codes, methods, important headers, caching (ETag), CORS, QUIC wire-level mechanics, WebSocket upgrade handshake/frame format |
 | [grpc-graphql.md](./grpc-graphql.md) | gRPC architecture, Protobuf encoding, 4 streaming modes, connection flow, status codes; GraphQL SDL, query vs REST, N+1, DataLoader |
 | [grpc-deep-dive.md](./grpc-deep-dive.md) | Protobuf wire format internals, all 4 streaming modes with full code, interceptors, deadline propagation, health checking, client-side load balancing, gRPC-Web, error code mapping |
@@ -25,6 +26,7 @@ Core networking concepts for backend engineers and platform engineers — from p
 osi-model.md         → understand the full picture
 tcp-udp.md           → transport layer (TCP state machine, TIME_WAIT)
 tls-encryption.md    → TLS 1.2 vs 1.3, certificate validation, mTLS
+acme-certificate-automation.md → ACME protocol, DNS-01/HTTP-01, acme.sh/certbot/lego, EAB
 http-versions.md     → HTTP/2 multiplexing, status codes, headers, QUIC, WebSocket
 grpc-graphql.md      → modern API protocols built on top
 grpc-deep-dive.md    → gRPC wire-level internals and production concerns

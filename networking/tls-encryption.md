@@ -1023,6 +1023,12 @@ Service meshes manage cert issuance and rotation for you. Sidecars hold the mTLS
 
 ### Let's Encrypt with cert-manager (public services)
 
+cert-manager is a Kubernetes-native way to drive the ACME protocol from inside a cluster — for
+the ACME protocol itself (the account/order/authorization/challenge lifecycle behind this YAML),
+the HTTP-01 vs DNS-01 tradeoff in more depth, non-Kubernetes ACME clients (acme.sh, certbot,
+lego), wildcard certs, ECC vs RSA certificate keys, and alternate CAs like Google Trust Services,
+see `networking/acme-certificate-automation.md`.
+
 ```yaml
 apiVersion: cert-manager.io/v1
 kind: ClusterIssuer

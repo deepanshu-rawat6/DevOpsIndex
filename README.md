@@ -92,6 +92,7 @@ Contributing a new guide or retrofitting an old one? [`website/COMPONENTS.md`](.
 | [networking/osi-model.md](./networking/osi-model.md) | 7 OSI layers, full HTTPS request flow layer-by-layer (curl google.com), encapsulation, debug by layer | SDE-1 |
 | [networking/tcp-udp.md](./networking/tcp-udp.md) | TCP 3-way handshake, 4-way teardown, state machine, flow/congestion control, TIME_WAIT, UDP, when to use each | SDE-1/2 |
 | [networking/tls-encryption.md](./networking/tls-encryption.md) | Symmetric vs asymmetric, TLS 1.2 vs 1.3 handshake (RTT comparison), certificate chain, validation steps, openssl debugging | SDE-1/2 |
+| [networking/acme-certificate-automation.md](./networking/acme-certificate-automation.md) | PEM file format, ACME protocol (RFC 8555), HTTP-01 vs DNS-01, wildcard certs, acme.sh/certbot/lego/cert-manager, ECC vs RSA, Google Trust Services/EAB | SDE-1/2 |
 | [networking/http-versions.md](./networking/http-versions.md) | HTTP/1.1 vs HTTP/2 vs HTTP/3, HOL blocking, binary framing, status codes, methods, caching (ETag), CORS, QUIC wire-level mechanics (independent congestion control, integrated TLS 1.3 handshake, connection migration), WebSocket upgrade handshake/frame format/masking | SDE-1/2 |
 | [networking/linux-networking.md](./networking/linux-networking.md) | Linux packet RX/TX path, netfilter hooks, conntrack, network namespaces, veth pairs, SO_REUSEPORT | SDE-2 |
 | [networking/grpc-graphql.md](./networking/grpc-graphql.md) | gRPC on HTTP/2, Protobuf encoding, 4 streaming modes, connection flow; GraphQL SDL, N+1 problem, DataLoader | SDE-1/2 |
@@ -102,7 +103,7 @@ Contributing a new guide or retrofitting an old one? [`website/COMPONENTS.md`](.
 | [networking/nslookup-vs-curl.md](./networking/nslookup-vs-curl.md) | DNS resolution vs HTTP request path, when nslookup succeeds but curl fails, layered debugging | SDE-1 |
 | [networking/zero-trust.md](./networking/zero-trust.md) | Zero Trust vs perimeter security, BeyondCorp model, GCP Identity-Aware Proxy (IAP), mTLS + Istio AuthorizationPolicy, PSC + IAP + mTLS composition | SDE-2 |
 
-**Read order:** osi-model → tcp-udp → tls-encryption → http-versions → grpc-graphql → grpc-deep-dive → linux-networking → bgp-routing → load-balancers → cdn → nslookup-vs-curl → zero-trust
+**Read order:** osi-model → tcp-udp → tls-encryption → acme-certificate-automation → http-versions → grpc-graphql → grpc-deep-dive → linux-networking → bgp-routing → load-balancers → cdn → nslookup-vs-curl → zero-trust
 
 ---
 
