@@ -112,9 +112,36 @@ WHERE DATE(created_at) = '2024-01-15';
 -- In BQ console: shows "This query will process X bytes" before running
 ```
 
+```mermaid
+graph LR
+    classDef query fill:#3498db,stroke:#2471a3,color:#fff,rx:6
+    classDef skip fill:#e74c3c,stroke:#c0392b,color:#fff,rx:6
+    classDef scan fill:#27ae60,stroke:#1e8449,color:#fff,rx:6
+    classDef block fill:#7f8c8d,stroke:#616a6b,color:#fff,rx:6
+
+    Q["SELECT amount FROM orders<br/>WHERE DATE(created_at) = '2024-01-15'<br/>  AND user_id = 123"]:::query
+
+    subgraph PARTS["Table partitioned by DATE(created_at)"]
+        P1["Partition: 2024-01-13<br/>(entire partition skipped)"]:::skip
+        P2["Partition: 2024-01-14<br/>(entire partition skipped)"]:::skip
+        P3["Partition: 2024-01-15 ✓<br/>(only this date read)"]:::scan
+        P4["Partition: 2024-01-16<br/>(entire partition skipped)"]:::skip
+    end
+
+    subgraph CLUSTER["Within 2024-01-15 — clustered by user_id"]
+        B1["Block: user_id 1–1000<br/>(block-level metadata: skip)"]:::skip
+        B2["Block: user_id 1001–5000<br/>(block-level metadata: skip)"]:::skip
+        B3["Block: user_id 5001–10000<br/>(contains user_id=123? no → skip)"]:::skip
+        B4["Block: user_id 100–200 ✓<br/>(min/max metadata matches → read)"]:::scan
+    end
+
+    Q -->|"partition pruning<br/>skip 3 of 4 partitions entirely"| PARTS
+    P3 -->|"clustering scan<br/>skip blocks by min/max statistics"| CLUSTER
+```
+
 **Cost = bytes scanned:**
 - Partition pruning: `WHERE DATE(created_at) = '2024-01-15'` → scans 1 day, not all history
-- Clustering: `WHERE user_id = 123` → BigQuery skips blocks that don't contain user_id=123
+- Clustering: `WHERE user_id = 123` → BigQuery skips blocks that don't contain user_id=123 (using per-block min/max statistics — not an index, but still effective)
 - Projected columns: `SELECT amount` costs less than `SELECT *`
 
 <div class="quiz-card">
@@ -294,6 +321,66 @@ SELECT order_id, SUM(item.qty * item.price) AS order_total
 FROM `project.dataset.orders`, UNNEST(items) AS item
 GROUP BY order_id;
 ```
+
+**UNNEST vs normalized JOIN — the same revenue query, two schemas:**
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="nested" class="active">Nested ARRAY (idiomatic BQ)</button>
+    <button data-tab="normalized">Normalized JOIN</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="nested">
+      <strong>One table, child rows embedded — UNNEST is a local operation, no shuffle.</strong>
+
+```sql
+-- Schema: orders(order_id, user_id, items ARRAY<STRUCT<sku, qty, price>>)
+-- Read: only the order_id, user_id, and items columns are touched on disk.
+-- UNNEST is a correlated cross join resolved locally — no network, no shuffle.
+
+SELECT
+    o.order_id,
+    o.user_id,
+    SUM(item.qty * item.price) AS order_total,
+    COUNT(item.sku)            AS line_count
+FROM `project.dataset.orders` AS o,
+     UNNEST(o.items) AS item
+WHERE o.user_id = 'u-42'
+GROUP BY o.order_id, o.user_id;
+
+-- Execution: BQ reads the orders column + items column only.
+-- UNNEST expands each row's array in place on the same leaf server.
+-- No inter-node data movement before the GROUP BY.
+-- Bytes scanned: (size of order_id + user_id + items columns) for matching rows.
+```
+    </div>
+    <div class="tab-panel" data-tab-panel="normalized">
+      <strong>Two tables, FK join — triggers a shuffle to co-locate matching rows.</strong>
+
+```sql
+-- Schema: orders(order_id, user_id)  +  order_items(order_id, sku, qty, price)
+-- The JOIN must redistribute order_items rows by order_id across the fleet.
+-- That redistribution is the shuffle — network traffic between leaf servers.
+
+SELECT
+    o.order_id,
+    o.user_id,
+    SUM(i.qty * i.price) AS order_total,
+    COUNT(i.sku)          AS line_count
+FROM `project.dataset.orders`      AS o
+JOIN `project.dataset.order_items` AS i  -- shuffle: send order_items rows to
+  ON o.order_id = i.order_id            --   the same slot as their parent order
+WHERE o.user_id = 'u-42'
+GROUP BY o.order_id, o.user_id;
+
+-- Execution: BQ scans both tables, then repartitions order_items by order_id
+-- across the worker fleet so each slot sees matching orders + items together.
+-- Bytes scanned: entire order_items table (no partition filter on it),
+-- plus the orders scan. Shuffle quota consumed proportional to order_items size.
+```
+    </div>
+  </div>
+</div>
 
 **Why idiomatic vs normalized relational:** in Postgres/MySQL you'd normalize into `orders` + `order_items` and JOIN on `order_id` — correct, but joins on billions of rows trigger a shuffle stage in Dremel. Nesting keeps the child rows physically co-located with the parent, so `UNNEST` is a local operation (no shuffle, no network). Use nesting for stable 1-to-many data owned by the parent; keep separate tables only when the child is independently queried or updated at high volume.
 

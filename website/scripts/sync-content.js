@@ -45,14 +45,29 @@ const SECTIONS = [
   {
     slug: 'iac', title: 'Infrastructure as Code', order: 6,
     readOrder: ['README', 'terraform', 'cloudformation', 'ansible', 'ansible/core-concepts', 'ansible/cloud-integration', 'ansible/advanced'],
+    sectionPrereqs: [
+      { title: 'Linux',      slug: 'linux' },
+      { title: 'Networking', slug: 'networking' },
+    ],
   },
   {
     slug: 'aws', title: 'AWS', order: 7,
     readOrder: ['README', 'ecs-fargate', 'request-flow-alb-to-pod', 'services-overview', 'storage-databases', 'databases-deep-dive', 'messaging-serverless-observability'],
+    sectionPrereqs: [
+      { title: 'Linux',      slug: 'linux' },
+      { title: 'Networking', slug: 'networking' },
+      { title: 'Docker',     slug: 'docker' },
+    ],
   },
   {
     slug: 'gcp', title: 'GCP', order: 8,
     readOrder: ['README', 'from-aws', 'services-overview', 'security-compliance', 'compute', 'gke', 'request-flow-glb-to-pod', 'storage', 'databases', 'bigquery', 'bigtable', 'data-pipelines', 'serverless', 'messaging', 'reliability-dr', 'cost-optimization', 'migration-methodology', 'observability', 'cicd', 'gcp-vs-aws', 'scenarios'],
+    sectionPrereqs: [
+      { title: 'Linux',      slug: 'linux' },
+      { title: 'Networking', slug: 'networking' },
+      { title: 'Docker',     slug: 'docker' },
+      { title: 'Kubernetes', slug: 'kubernetes' },
+    ],
   },
   {
     slug: 'monitoring', title: 'Monitoring', order: 9,
@@ -104,6 +119,10 @@ const SECTIONS = [
   {
     slug: 'databases', title: 'Database Internals', order: 14,
     readOrder: ['README', 'postgres-internals', 'mysql-internals', 'mongodb-internals', 'redis-internals', 'kafka-internals', 'clickhouse-internals', 'elasticsearch-internals', 'replication', 'caching'],
+    sectionPrereqs: [
+      { title: 'Linux',      slug: 'linux' },
+      { title: 'Networking', slug: 'networking' },
+    ],
   },
   {
     slug: 'on-prem-k8s', title: 'Databases on Kubernetes', order: 15,
@@ -116,6 +135,10 @@ const SECTIONS = [
   {
     slug: 'on-prem-vm', title: 'On-Prem VM Setup', order: 16,
     readOrder: ['README', 'mongodb'],
+    sectionPrereqs: [
+      { title: 'Linux',             slug: 'linux' },
+      { title: 'Database Internals', slug: 'databases' },
+    ],
   },
   {
     slug: 'system-design', title: 'System Design', order: 17,
