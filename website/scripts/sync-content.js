@@ -19,14 +19,28 @@ const SECTIONS = [
   {
     slug: 'docker', title: 'Docker', order: 3,
     readOrder: ['README', 'networking', 'buildkit', 'docker-security', 'internals', 'debugging'],
+    sectionPrereqs: [
+      { title: 'Linux',      slug: 'linux' },
+      { title: 'Networking', slug: 'networking' },
+    ],
   },
   {
     slug: 'kubernetes', title: 'Kubernetes', order: 4,
     readOrder: ['kubectl-cheatsheet', 'README', 'workloads', 'resource-limits', 'networking', 'coredns', 'storage', 'rbac', 'autoscaling', 'helm', 'eks-architecture', 'pod-lifecycle', 'controller-pattern', 'custom-resources-operators', 'kubeadm-bootstrap', 'kube-proxy-modes', 'cross-node-networking', 'hpa-vpa-internals', 'scheduler-internals', 'policy-security', 'node-shutdown'],
+    sectionPrereqs: [
+      { title: 'Docker',     slug: 'docker' },
+      { title: 'Linux',      slug: 'linux' },
+      { title: 'Networking', slug: 'networking' },
+    ],
   },
   {
     slug: 'cicd', title: 'CI/CD', order: 5,
     readOrder: ['README', 'github-actions', 'jenkins', 'jenkins/ecs-agents', 'argocd', 'gitops-secrets', 'pipeline-design', 'argo-rollouts'],
+    sectionPrereqs: [
+      { title: 'Docker',     slug: 'docker' },
+      { title: 'Kubernetes', slug: 'kubernetes' },
+      { title: 'Git',        slug: 'git' },
+    ],
   },
   {
     slug: 'iac', title: 'Infrastructure as Code', order: 6,
@@ -43,6 +57,10 @@ const SECTIONS = [
   {
     slug: 'monitoring', title: 'Monitoring', order: 9,
     readOrder: ['README', 'prometheus', 'alertmanager', 'grafana', 'opentelemetry', 'loki', 'performance-debugging', 'monitoring-scenarios', 'slo-sli', 'alerting-philosophy', 'thanos-mimir'],
+    sectionPrereqs: [
+      { title: 'Linux',      slug: 'linux' },
+      { title: 'Kubernetes', slug: 'kubernetes' },
+    ],
   },
   {
     slug: 'git', title: 'Git', order: 10,
@@ -51,14 +69,37 @@ const SECTIONS = [
   {
     slug: 'advanced', title: 'Advanced', order: 11,
     readOrder: ['README', 'service-mesh', 'ebpf-observability', 'chaos-engineering', 'backup-dr', 'low-latency-networking', 'fintech-security', 'trading-data-streaming'],
+    prerequisites: {
+      'service-mesh':           [{ title: 'Kubernetes',       slug: 'kubernetes' },
+                                  { title: 'Networking',      slug: 'networking' }],
+      'ebpf-observability':     [{ title: 'Linux (eBPF)',      slug: 'linux/ebpf-bpftrace' },
+                                  { title: 'Monitoring',      slug: 'monitoring' }],
+      'chaos-engineering':      [{ title: 'Kubernetes',       slug: 'kubernetes' },
+                                  { title: 'Monitoring',      slug: 'monitoring' }],
+      'backup-dr':              [{ title: 'Kubernetes',       slug: 'kubernetes' },
+                                  { title: 'AWS',             slug: 'aws' }],
+      'low-latency-networking': [{ title: 'Networking',       slug: 'networking' },
+                                  { title: 'Linux',           slug: 'linux' }],
+      'fintech-security':       [{ title: 'Networking',       slug: 'networking' },
+                                  { title: 'Kubernetes',      slug: 'kubernetes' }],
+      'trading-data-streaming': [{ title: 'Kafka Internals',  slug: 'databases/kafka-internals' },
+                                  { title: 'System Design',   slug: 'system-design' }],
+    },
   },
   {
     slug: 'ai-infra', title: 'AI Infrastructure', order: 12,
     readOrder: ['README', 'gpu-scheduling', 'kuberay', 'model-serving', 'llmops', 'networking'],
+    sectionPrereqs: [
+      { title: 'Kubernetes', slug: 'kubernetes' },
+    ],
   },
   {
     slug: 'mlops', title: 'MLOps', order: 13,
     readOrder: ['README', 'experiment-tracking', 'training-pipelines', 'data-drift', 'feature-stores'],
+    sectionPrereqs: [
+      { title: 'AI Infrastructure', slug: 'ai-infra' },
+      { title: 'Database Internals', slug: 'databases' },
+    ],
   },
   {
     slug: 'databases', title: 'Database Internals', order: 14,
@@ -67,6 +108,10 @@ const SECTIONS = [
   {
     slug: 'on-prem-k8s', title: 'Databases on Kubernetes', order: 15,
     readOrder: ['README', 'postgres', 'mysql', 'mongodb', 'redis-cluster', 'kafka', 'clickhouse'],
+    sectionPrereqs: [
+      { title: 'Kubernetes',         slug: 'kubernetes' },
+      { title: 'Database Internals', slug: 'databases' },
+    ],
   },
   {
     slug: 'on-prem-vm', title: 'On-Prem VM Setup', order: 16,
@@ -108,10 +153,24 @@ const SECTIONS = [
   {
     slug: 'sre', title: 'SRE & Debugging', order: 18,
     readOrder: ['README', 'k8s-debugging', 'k8s-scenarios', 'linux-debugging', 'aws-scenarios', 'cicd-scenarios', 'iac-scenarios', 'sre-concepts', 'self-healing-aiops', 'db-monitoring'],
+    sectionPrereqs: [
+      { title: 'Linux',      slug: 'linux' },
+      { title: 'Kubernetes', slug: 'kubernetes' },
+      { title: 'Monitoring', slug: 'monitoring' },
+    ],
   },
   {
     slug: 'coding-practice', title: 'Coding Practice', order: 19,
     readOrder: ['README', 'concurrent-patterns', 'btree', 'skip-list', 'lru-cache', 'rate-limiter-implementations', 'consistent-hashing', 'bloom-filter'],
+    prerequisites: {
+      'concurrent-patterns':         [{ title: 'Go — Concurrency',              slug: 'go/concurrency' }],
+      'btree':                       [{ title: 'PostgreSQL Internals',           slug: 'databases/postgres-internals' }],
+      'skip-list':                   [{ title: 'Probabilistic Data Structures',  slug: 'system-design/probabilistic-data-structures' }],
+      'lru-cache':                   [{ title: 'Database Internals',             slug: 'databases' }],
+      'rate-limiter-implementations': [{ title: 'Rate Limiting',                slug: 'system-design/rate-limiting' }],
+      'consistent-hashing':          [{ title: 'Scaling',                       slug: 'system-design/scaling' }],
+      'bloom-filter':                [{ title: 'Probabilistic Data Structures',  slug: 'system-design/probabilistic-data-structures' }],
+    },
   },
 ];
 
@@ -224,7 +283,7 @@ for (const section of SECTIONS) {
 
     // Write JSON manifest entry
     const jsonKey = pageSlug.replace(/\//g, '--');
-    const prerequisites = section.prerequisites?.[orderKey] ?? [];
+    const prerequisites = section.prerequisites?.[orderKey] ?? section.sectionPrereqs ?? [];
     const meta = {
       section: section.slug,
       sectionTitle: section.title,
