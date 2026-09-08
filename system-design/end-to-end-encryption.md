@@ -80,6 +80,35 @@ sequenceDiagram
     Note over B: Bob derives the identical shared secret independently
 ```
 
+**X3DH Key Computation Detail** — the four Diffie-Hellman operations that feed into HKDF to produce the master secret:
+
+```mermaid
+flowchart TD
+    classDef alice fill:#3498db,stroke:#2471a3,color:#fff
+    classDef bob fill:#27ae60,stroke:#1e8449,color:#fff
+    classDef dh fill:#e67e22,stroke:#ba6018,color:#fff
+    classDef root fill:#9b59b6,stroke:#7d3c98,color:#fff
+
+    subgraph ALICE["Alice's keys"]
+        IKA["IK_A — Identity Key<br/>(long-term)"]:::alice
+        EKA["EK_A — Ephemeral Key<br/>(generated fresh per session)"]:::alice
+    end
+
+    subgraph BOB["Bob's prekey bundle (fetched from server)"]
+        IKB["IK_B — Identity Key"]:::bob
+        SPKB["SPK_B — Signed Prekey<br/>(rotates periodically)"]:::bob
+        OPKB["OPK_B — One-time Prekey<br/>(consumed and discarded)"]:::bob
+    end
+
+    IKA & SPKB --> DH1["DH1 = DH(IK_A, SPK_B)"]:::dh
+    EKA & IKB  --> DH2["DH2 = DH(EK_A, IK_B)"]:::dh
+    EKA & SPKB --> DH3["DH3 = DH(EK_A, SPK_B)"]:::dh
+    EKA & OPKB --> DH4["DH4 = DH(EK_A, OPK_B)"]:::dh
+
+    DH1 & DH2 & DH3 & DH4 --> HKDF["HKDF — concatenate all four,<br/>derive master secret"]:::root
+    HKDF --> MS["Master Secret → Double Ratchet root key"]:::root
+```
+
 The trick is that Bob doesn't need to be present for any of this. He uploaded a bundle of public
 keys — his long-term identity key, a signed prekey, and a batch of one-time prekeys — to the
 server well in advance. Alice fetches that bundle, combines it with her own keys through a
@@ -118,6 +147,30 @@ flowchart TD
     SEND --> M3["Message key 3"]:::msgkey
 
     DH2["Next DH ratchet step<br/>(conversation direction flips)"]:::dh --> ROOT
+```
+
+**Double Ratchet: two ratchets, two different cadences** — the DH ratchet fires when the conversation direction flips; the KDF ratchet steps on every single message:
+
+```mermaid
+flowchart LR
+    classDef dh fill:#e67e22,stroke:#ba6018,color:#fff
+    classDef root fill:#9b59b6,stroke:#7d3c98,color:#fff
+    classDef chain fill:#27ae60,stroke:#1e8449,color:#fff
+    classDef msgkey fill:#3498db,stroke:#2471a3,color:#fff
+
+    subgraph DH_R["DH Ratchet — fires when conversation direction flips (i.e. other party replies)"]
+        DHPAIR["New DH key pair"]:::dh --> ROOTKDF["Root KDF"]:::root
+        ROOTKDF --> NEWROOT["Updated Root Key"]:::root
+        ROOTKDF --> NEWCK["New Chain Key"]:::chain
+    end
+
+    subgraph KDF_R["KDF Ratchet — one step per message"]
+        CK["Chain Key_n"]:::chain --> MK["Message Key_n"]:::msgkey
+        CK --> CK2["Chain Key_{n+1}<br/>(CK_n deleted immediately — forward secrecy)"]:::chain
+        MK --> ENC["AES-256 + HMAC-SHA256<br/>→ ciphertext"]:::msgkey
+    end
+
+    NEWCK -->|"seeds next chain"| CK
 ```
 
 <div class="stepper">
