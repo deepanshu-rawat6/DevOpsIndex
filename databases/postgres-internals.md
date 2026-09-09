@@ -1624,6 +1624,111 @@ FROM pg_stat_subscription;
   <div class="quiz-a" hidden>No — the replication slot pins the WAL, preventing PostgreSQL from recycling any segment the subscriber hasn't consumed yet, regardless of max_wal_size. The tradeoff is the opposite failure mode: an abandoned or badly lagging slot can make WAL accumulate indefinitely on the publisher's disk until the slot is dropped or the subscriber catches up.</div>
 </div>
 
+### Parallel Apply Workers (PG 15+)
+
+Physical streaming replication applies WAL in a single receiver process — there is no apply-side parallelism. Parallel apply is a logical replication feature: the subscriber can run multiple apply workers concurrently, each owning one in-flight transaction.
+
+```mermaid
+graph TD
+    classDef pub fill:#2980b9,stroke:#1f618d,color:#fff,rx:6
+    classDef decode fill:#e67e22,stroke:#ba6018,color:#fff,rx:6
+    classDef leader fill:#8e44ad,stroke:#6c3483,color:#fff,rx:6
+    classDef worker fill:#27ae60,stroke:#1e8449,color:#fff,rx:6
+    classDef table fill:#7f8c8d,stroke:#616a6b,color:#fff,rx:6
+
+    subgraph PUB["Publisher"]
+        WAL["WAL"]:::decode
+        DECODER["Logical decoder<br/>pgoutput plugin"]:::decode
+        SLOT["Replication slot<br/>pins WAL until subscriber reads it"]:::decode
+        WAL -->|"reads"| DECODER
+        DECODER -->|"decoded change stream"| SLOT
+    end
+
+    SLOT -->|"INSERT / UPDATE / DELETE events<br/>per transaction boundary"| LEADER
+
+    subgraph SUB["Subscriber"]
+        LEADER["LEADER apply worker<br/>(one per subscription)<br/>DDL · sequences · serial txns"]:::leader
+        W0["PARALLEL worker 0<br/>whole txn A"]:::worker
+        W1["PARALLEL worker 1<br/>whole txn B"]:::worker
+        W2["PARALLEL worker 2<br/>whole txn C"]:::worker
+        TABLES["Subscriber tables"]:::table
+
+        LEADER -->|"dispatches whole txn<br/>(transaction-level, not row-level)"| W0
+        LEADER -->|"dispatches whole txn"| W1
+        LEADER -->|"dispatches whole txn"| W2
+        LEADER -->|"applies directly<br/>(DDL / sequences always serial)"| TABLES
+        W0 -->|"writes"| TABLES
+        W1 -->|"writes"| TABLES
+        W2 -->|"writes"| TABLES
+    end
+```
+
+The LEADER reads the decoded change stream from the replication slot and dispatches **whole transactions** to idle parallel workers. Three concurrent DML transactions → three workers apply them simultaneously. One giant transaction → still one worker, regardless of row count — parallelism is transaction-level, never row-level.
+
+**Setup (subscriber side):**
+
+```sql
+-- 1. Standard logical replication objects are still required (same as before)
+-- On publisher:
+CREATE PUBLICATION my_pub FOR TABLE users, orders;
+
+-- On subscriber:
+CREATE SUBSCRIPTION my_sub
+  CONNECTION 'host=source-db user=replicator dbname=myapp'
+  PUBLICATION my_pub
+  WITH (streaming = parallel);   -- PG 16: stream large txns to workers before commit
+                                 -- PG 15: use streaming = on (buffers until commit)
+
+-- 2. postgresql.conf on the subscriber
+-- max_parallel_apply_workers_per_subscription = 4  (default 0 = disabled)
+-- max_logical_replication_workers = 16             (total pool: apply + parallel, default 4)
+-- max_worker_processes = 32                        (must cover all background workers)
+
+-- 3. Or alter an existing subscription to enable it:
+ALTER SUBSCRIPTION my_sub SET (streaming = parallel);
+
+-- Reload config (no restart needed for GUC changes at runtime)
+SELECT pg_reload_conf();
+```
+
+**What LEADER handles exclusively (no parallel dispatch):**
+- DDL (`ALTER TABLE`, `CREATE INDEX`, `TRUNCATE`)
+- Sequences
+- Transactions the decoder marks as non-parallelizable (e.g., large transactions when `streaming = off`)
+
+**When it actually helps vs doesn't:**
+
+| Workload | Parallel apply effect |
+|----------|-----------------------|
+| Many small concurrent DML transactions (OLTP inserts/updates from many users) | High — each txn dispatched to a free worker, throughput scales with worker count |
+| One large `UPDATE orders SET … WHERE …` touching 50M rows | None — it's one transaction, one worker |
+| DDL-heavy workload | None — DDL always serial through LEADER |
+| Unique-key conflicts on subscriber | Same conflict resolution, not bypassed — apply worker aborts and the subscription errors |
+
+**Monitoring:**
+
+```sql
+-- Active apply workers (leader + parallel) for a subscription
+SELECT pid, application_name, state, wait_event_type, wait_event
+FROM pg_stat_activity
+WHERE application_name LIKE 'logical replication%';
+
+-- Subscription lag and per-worker state
+SELECT subname, pid, received_lsn, latest_end_lsn,
+       last_msg_receipt_time
+FROM pg_stat_subscription;
+
+-- PG 14+: per-slot stats (spill-to-disk from large buffered txns)
+SELECT slot_name, total_txns, total_bytes, spill_txns, spill_bytes
+FROM pg_stat_replication_slots;
+```
+
+<div class="quiz-card">
+  <p class="quiz-q">You set <code>max_parallel_apply_workers_per_subscription = 8</code>. A single <code>UPDATE</code> touching 10 million rows runs on the publisher. How many parallel workers on the subscriber will apply it?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>One — parallel apply is transaction-level, not row-level. One transaction dispatches to exactly one worker regardless of how many rows it touches. The 8 workers help when 8 separate transactions arrive concurrently; a single large transaction saturates one worker and leaves the rest idle. This is why bulk operations are better broken into smaller batched transactions on the publisher side if you want parallel apply to actually speed up ingestion.</div>
+</div>
+
 ---
 
 ## Useful Diagnostic Queries

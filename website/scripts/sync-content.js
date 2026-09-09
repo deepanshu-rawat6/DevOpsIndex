@@ -10,15 +10,15 @@ const CONTENT_DIR = path.resolve(__dirname, '../src/content/topics');
 const SECTIONS = [
   {
     slug: 'linux', title: 'Linux', order: 1,
-    readOrder: ['README', 'commands', 'boot', 'systemd', 'networking', 'network-tools', 'io-models', 'scheduler', 'security', 'memory-tuning', 'strace-perf', 'containers-evolution', 'cgroup-v2', 'proc-internals', 'ebpf-bpftrace', 'signals'],
+    readOrder: ['README', 'commands', 'boot', 'systemd', 'networking', 'network-tools', 'io-models', 'scheduler', 'security', 'memory-tuning', 'strace-perf', 'containers-evolution', 'cgroup-v2', 'proc-internals', 'ebpf-bpftrace', 'signals', 'namespaces', 'filesystem-internals', 'numa-irq-tuning', 'kernel-memory-internals', 'io-schedulers-and-storage', 'perf-and-flamegraphs'],
   },
   {
     slug: 'networking', title: 'Networking', order: 2,
-    readOrder: ['README', 'osi-model', 'tcp-udp', 'tls-encryption', 'acme-certificate-automation', 'http-versions', 'grpc-graphql', 'grpc-deep-dive', 'linux-networking', 'bgp-routing', 'load-balancers', 'cdn', 'nslookup-vs-curl', 'zero-trust'],
+    readOrder: ['README', 'osi-model', 'tcp-udp', 'tls-encryption', 'acme-certificate-automation', 'http-versions', 'grpc-graphql', 'grpc-deep-dive', 'linux-networking', 'bgp-routing', 'load-balancers', 'cdn', 'nslookup-vs-curl', 'zero-trust', 'dns-internals', 'overlay-networks', 'ipvs-and-cni', 'service-mesh', 'quic-http3'],
   },
   {
     slug: 'docker', title: 'Docker', order: 3,
-    readOrder: ['README', 'networking', 'buildkit', 'docker-security', 'internals', 'debugging'],
+    readOrder: ['README', 'networking', 'buildkit', 'docker-security', 'internals', 'debugging', 'compose-advanced', 'runtime-and-alternatives', 'registry-and-distribution'],
     sectionPrereqs: [
       { title: 'Linux',      slug: 'linux' },
       { title: 'Networking', slug: 'networking' },
