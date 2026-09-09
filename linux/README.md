@@ -5,19 +5,27 @@ Everything — containers, Kubernetes, networking, storage — is built on Linux
 | File | Topics |
 |------|--------|
 | [README.md](./README.md) | Kernel architecture, processes, memory, filesystem, load average, file descriptors, top metrics, /proc and /sys |
-| [networking.md](./networking.md) | TCP/IP stack, sockets, accept queue, TCP states, TIME_WAIT, netfilter/iptables, kernel tuning |
-| [io-models.md](./io-models.md) | Blocking I/O, select/poll, epoll, Go netpoller, io_uring |
-| [scheduler.md](./scheduler.md) | CFS, vruntime, nice values, CPU affinity, context switches, Go GMP model |
-| [boot.md](./boot.md) | BIOS/UEFI, GRUB, initramfs, systemd, unit files |
-| [security.md](./security.md) | Capabilities, setuid, seccomp, AppArmor, SELinux, defense in depth |
-| [containers-evolution.md](./containers-evolution.md) | chroot, BSD Jails, namespaces, cgroups, LXC, Docker |
 | [commands.md](./commands.md) | grep, sed, awk, find, networking, processes, monitoring cheat sheet |
-| [strace-perf.md](./strace-perf.md) | strace, perf stat, perf top, perf record, flame graphs, perf trace |
+| [boot.md](./boot.md) | BIOS/UEFI, GRUB, initramfs, systemd, unit files |
+| [systemd.md](./systemd.md) | Unit file structure, service lifecycle, dependency ordering, timers, journalctl |
+| [networking.md](./networking.md) | TCP/IP stack, sockets, accept queue, TCP states, TIME_WAIT, netfilter/iptables, kernel tuning |
+| [network-tools.md](./network-tools.md) | ss, tcpdump, curl -v timing breakdown, netcat |
+| [io-models.md](./io-models.md) | Blocking I/O, select/poll, epoll, Go netpoller, sendfile, io_uring |
+| [scheduler.md](./scheduler.md) | CFS, vruntime, nice values, CPU affinity, context switches, Go GMP model |
+| [security.md](./security.md) | Capabilities, setuid, seccomp, AppArmor, SELinux, defense in depth |
 | [memory-tuning.md](./memory-tuning.md) | /proc/meminfo, swappiness, OOM killer, dirty pages, THP, cgroup v2 memory |
+| [strace-perf.md](./strace-perf.md) | strace syscall tracing, perf stat hardware counters, perf top |
+| [containers-evolution.md](./containers-evolution.md) | chroot, BSD Jails, namespaces, cgroups, LXC, Docker |
 | [cgroup-v2.md](./cgroup-v2.md) | cgroup v2 hierarchy, cpu.max/weight, memory.high, PSI pressure files, I/O limits, K8s mapping |
 | [proc-internals.md](./proc-internals.md) | /proc/maps, /proc/smaps, /proc/status, /proc/fd, signal masks, per-process internals |
 | [ebpf-bpftrace.md](./ebpf-bpftrace.md) | eBPF hooks, bpftrace one-liners, CPU/memory/network/disk tracing, BCC tools |
 | [signals.md](./signals.md) | SIGTERM vs SIGKILL, signal delivery internals, signal masks, SIGCHLD, graceful shutdown |
+| [namespaces.md](./namespaces.md) | 7 namespace types, unshare/nsenter hands-on, user namespace UID remapping, veth pairs, container namespace wiring |
+| [filesystem-internals.md](./filesystem-internals.md) | VFS (superblock/inode/dentry/file), ext4 extents + journal modes, XFS, overlayfs copy-up, inotify limits |
+| [numa-irq-tuning.md](./numa-irq-tuning.md) | NUMA topology + numactl, IRQ affinity via smp_affinity, isolcpus/nohz_full, SCHED_FIFO/RR/DEADLINE |
+| [kernel-memory-internals.md](./kernel-memory-internals.md) | Buddy allocator, SLUB slab cache, page cache writeback, TLB + HugeTLB vs THP, PSI memory pressure |
+| [io-schedulers-and-storage.md](./io-schedulers-and-storage.md) | Block I/O call path, none/mq-deadline/bfq scheduler guide, blkio cgroup v2, blktrace, fio, iostat |
+| [perf-and-flamegraphs.md](./perf-and-flamegraphs.md) | perf record at 99Hz, flamegraph pipeline, differential flamegraphs, off-CPU profiling, perf probe, perf mem |
 
 Sections below carry a **❓ knowledge check** — try to answer before revealing:
 

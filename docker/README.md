@@ -2,6 +2,20 @@
 
 A production-focused Docker reference covering architecture, image layers, essential commands, Dockerfile best practices, Compose, and runtime flags.
 
+## Files
+
+| File | Topics |
+|------|--------|
+| [README.md](./README.md) | Architecture (CLI → dockerd → containerd → runc), image layers + CoW, essential commands |
+| [networking.md](./networking.md) | Bridge/host/overlay/macvlan drivers, custom bridge, port publishing internals, container DNS |
+| [buildkit.md](./buildkit.md) | Parallel stage execution, cache mounts, secret mounts, SSH forwarding, multi-platform builds, inline cache |
+| [docker-security.md](./docker-security.md) | Attack surface, rootless Docker, socket danger, Trivy scanning, cosign + Sigstore, runtime hardening |
+| [internals.md](./internals.md) | Image layer CoW deep dive, Linux namespace isolation, cgroup resource limits, OCI manifest and config |
+| [debugging.md](./debugging.md) | Container exits immediately, OOM kills, port binding failures, DNS issues, build cache problems, image size |
+| [compose-advanced.md](./compose-advanced.md) | depends_on with service_healthy, profiles, override file chaining, extends, secrets/configs, resource limits, compose watch, CI caching |
+| [runtime-and-alternatives.md](./runtime-and-alternatives.md) | dockershim removal, CRI spec, containerd + nerdctl, CRI-O, Podman rootless, crictl, runtime classes (gVisor/Kata/WASM), snapshotters |
+| [registry-and-distribution.md](./registry-and-distribution.md) | OCI Distribution Spec pull sequence, manifest formats, content-addressable storage, Harbor, pull-through mirror, cosign + Kyverno, multi-arch |
+
 Most major sections end with a quick knowledge check — track how many you've cleared:
 
 <div class="quiz-progress" data-quiz-progress>
