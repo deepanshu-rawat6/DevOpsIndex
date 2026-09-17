@@ -459,6 +459,17 @@ pre:hover .copy-btn { opacity: 1; }
   border-left: 1px solid var(--border);
   padding-left: 1.25rem;
 }
+.graph-nav-link {
+  font-family: var(--mono);
+  font-size: 0.78rem;
+  color: var(--text-faint);
+  text-decoration: none;
+  border: 1px solid var(--border);
+  padding: 0.25rem 0.6rem;
+  border-radius: 999px;
+  transition: color 0.15s, border-color 0.15s;
+}
+.graph-nav-link:hover { color: var(--accent); border-color: var(--accent); }
 .header-right { margin-left: auto; display: flex; align-items: center; gap: 0.6rem; }
 .theme-toggle {
   display: flex;

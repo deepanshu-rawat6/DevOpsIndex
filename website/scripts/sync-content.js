@@ -195,6 +195,25 @@ const SECTIONS = [
       'bloom-filter':                [{ title: 'Probabilistic Data Structures',  slug: 'system-design/probabilistic-data-structures' }],
     },
   },
+  {
+    slug: 'platform-engineering', title: 'Platform Engineering', order: 20,
+    readOrder: ['README', 'idp-concepts', 'backstage', 'crossplane', 'developer-self-service', 'multi-tenancy', 'platform-observability', 'cost-attribution'],
+    sectionPrereqs: [
+      { title: 'Kubernetes', slug: 'kubernetes' },
+      { title: 'CI/CD',      slug: 'cicd' },
+      { title: 'IaC',        slug: 'iac' },
+    ],
+    prerequisites: {
+      'crossplane':             [{ title: 'K8s Custom Resources', slug: 'kubernetes/custom-resources-operators' },
+                                 { title: 'IaC',                  slug: 'iac' }],
+      'multi-tenancy':          [{ title: 'K8s RBAC',             slug: 'kubernetes/rbac' },
+                                 { title: 'K8s Networking',        slug: 'kubernetes/networking' }],
+      'platform-observability': [{ title: 'Monitoring',            slug: 'monitoring' },
+                                 { title: 'SRE Concepts',          slug: 'sre/sre-concepts' }],
+      'cost-attribution':       [{ title: 'K8s Resource Limits',   slug: 'kubernetes/resource-limits' },
+                                 { title: 'GCP Cost Optimization', slug: 'gcp/cost-optimization' }],
+    },
+  },
 ];
 
 // Clean and recreate output dirs

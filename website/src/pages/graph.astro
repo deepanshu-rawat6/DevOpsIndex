@@ -1,0 +1,295 @@
+---
+import { getCollection } from 'astro:content';
+import '../styles/global.css';
+
+const allTopics = await getCollection('topics');
+
+// One node per section
+const sectionMap = new Map<string, { id: string; label: string; order: number; href: string }>();
+for (const t of allTopics) {
+  if (!sectionMap.has(t.data.section)) {
+    sectionMap.set(t.data.section, {
+      id: t.data.section,
+      label: t.data.sectionTitle,
+      order: t.data.sectionOrder,
+      href: `/topic/${t.data.section}`,
+    });
+  }
+}
+const nodes = [...sectionMap.values()];
+
+// Edges from sectionPrereqs (prerequisites on the README / section-level pages)
+const edgeSet = new Set<string>();
+const links: { source: string; target: string }[] = [];
+for (const t of allTopics) {
+  for (const prereq of (t.data.prerequisites ?? [])) {
+    const targetSection = prereq.slug.split('/')[0];
+    const key = `${t.data.section}__${targetSection}`;
+    if (t.data.section !== targetSection && !edgeSet.has(key) && sectionMap.has(targetSection)) {
+      edgeSet.add(key);
+      links.push({ source: t.data.section, target: targetSection });
+    }
+  }
+}
+
+const graphData = JSON.stringify({ nodes, links });
+---
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Knowledge Graph | DevOpsIndex</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <script is:inline>
+    (function () {
+      try {
+        var s = localStorage.getItem('devopsindex-theme');
+        if (s === 'light' || s === 'dark') document.documentElement.setAttribute('data-theme', s);
+      } catch (e) {}
+    })();
+  </script>
+  <style>
+    *, *::before, *::after { box-sizing: border-box; }
+    html, body { margin: 0; padding: 0; height: 100%; overflow: hidden; background: var(--bg); color: var(--text); }
+
+    .graph-header {
+      position: fixed;
+      top: 0; left: 0; right: 0;
+      height: 52px;
+      display: flex;
+      align-items: center;
+      gap: 1rem;
+      padding: 0 1.25rem;
+      background: var(--surface);
+      border-bottom: 1px solid var(--border);
+      z-index: 10;
+      font-family: var(--mono);
+    }
+    .graph-header .wordmark {
+      font-size: 0.95rem;
+      font-weight: 700;
+      color: var(--accent);
+      text-decoration: none;
+      letter-spacing: -0.02em;
+    }
+    .graph-header .back-link {
+      font-size: 0.75rem;
+      color: var(--text-faint);
+      text-decoration: none;
+      border: 1px solid var(--border);
+      padding: 0.2rem 0.55rem;
+      border-radius: 999px;
+      transition: color 0.15s, border-color 0.15s;
+    }
+    .graph-header .back-link:hover { color: var(--accent); border-color: var(--accent); }
+    .graph-header .graph-title {
+      font-size: 0.78rem;
+      color: var(--text-faint);
+      border-left: 1px solid var(--border);
+      padding-left: 1rem;
+    }
+    .graph-header .ml-auto { margin-left: auto; display: flex; align-items: center; gap: 0.75rem; }
+    .theme-toggle {
+      display: flex; align-items: center; gap: 0.4rem;
+      padding: 0.3rem 0.65rem;
+      border: 1px solid var(--border);
+      border-radius: 999px;
+      background: transparent;
+      color: var(--text-dim);
+      font-family: var(--mono);
+      font-size: 0.78rem;
+      cursor: pointer;
+      transition: border-color 0.15s, color 0.15s;
+    }
+    .theme-toggle:hover { border-color: var(--accent); color: var(--accent); }
+
+    #graph-container {
+      position: fixed;
+      top: 52px; left: 0; right: 0; bottom: 0;
+    }
+
+    .graph-legend {
+      position: fixed;
+      bottom: 1.5rem;
+      left: 1.25rem;
+      display: flex;
+      flex-direction: column;
+      gap: 0.4rem;
+      background: var(--surface);
+      border: 1px solid var(--border);
+      border-radius: 0.5rem;
+      padding: 0.75rem 1rem;
+      font-family: var(--mono);
+      font-size: 0.72rem;
+      color: var(--text-dim);
+      z-index: 10;
+    }
+    .graph-legend-title { font-weight: 700; color: var(--text-faint); margin-bottom: 0.25rem; letter-spacing: 0.05em; text-transform: uppercase; }
+    .legend-row { display: flex; align-items: center; gap: 0.5rem; }
+    .legend-dot { width: 10px; height: 10px; border-radius: 50%; flex-shrink: 0; }
+
+    .graph-hint {
+      position: fixed;
+      bottom: 1.5rem;
+      right: 1.25rem;
+      font-family: var(--mono);
+      font-size: 0.7rem;
+      color: var(--text-faint);
+      text-align: right;
+      z-index: 10;
+      line-height: 1.7;
+      pointer-events: none;
+    }
+
+    @media (max-width: 600px) {
+      .graph-legend { display: none; }
+      .graph-hint { display: none; }
+    }
+  </style>
+</head>
+<body>
+  <header class="graph-header">
+    <a href="/" class="wordmark">❯devopsindex</a>
+    <a href="/" class="back-link">← Home</a>
+    <span class="graph-title">Knowledge Graph</span>
+    <div class="ml-auto">
+      <button class="theme-toggle" id="theme-toggle" type="button" aria-label="Toggle color theme">
+        <span>--theme=</span><span class="theme-label">dark</span>
+      </button>
+    </div>
+  </header>
+
+  <div id="graph-container"></div>
+
+  <div class="graph-legend">
+    <div class="graph-legend-title">Tier</div>
+    <div class="legend-row"><span class="legend-dot" style="background:#4f8cff"></span>Foundation (1–4)</div>
+    <div class="legend-row"><span class="legend-dot" style="background:#a78bfa"></span>Core (5–8)</div>
+    <div class="legend-row"><span class="legend-dot" style="background:#34d399"></span>Observability (9–12)</div>
+    <div class="legend-row"><span class="legend-dot" style="background:#fb923c"></span>Specialist (13+)</div>
+  </div>
+
+  <div class="graph-hint">
+    Drag to orbit · Scroll to zoom<br>Click node to open topic
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/3d-force-graph@1.73.3/dist/3d-force-graph.min.js"></script>
+  <script define:vars={{ graphData }}>
+    function currentTheme() {
+      const attr = document.documentElement.getAttribute('data-theme');
+      if (attr === 'light' || attr === 'dark') return attr;
+      return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
+    }
+
+    function tierColor(order, dimmed) {
+      if (dimmed) return currentTheme() === 'dark' ? 'rgba(120,140,150,0.25)' : 'rgba(120,140,150,0.3)';
+      const dark = currentTheme() === 'dark';
+      if (order <= 4)  return dark ? '#4f8cff' : '#2563eb';
+      if (order <= 8)  return dark ? '#a78bfa' : '#7c3aed';
+      if (order <= 12) return dark ? '#34d399' : '#059669';
+      return dark ? '#fb923c' : '#c2410c';
+    }
+
+    function bgColor() {
+      return currentTheme() === 'dark' ? '#070b0f' : '#f3fafb';
+    }
+
+    function linkColor(dimmed) {
+      const dark = currentTheme() === 'dark';
+      return dimmed
+        ? (dark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)')
+        : (dark ? 'rgba(255,255,255,0.22)' : 'rgba(0,0,0,0.15)');
+    }
+
+    const data = JSON.parse(graphData);
+
+    // Pre-compute in-degree for node sizing
+    const inDegree = {};
+    data.nodes.forEach(n => { inDegree[n.id] = 0; });
+    data.links.forEach(l => { inDegree[l.target] = (inDegree[l.target] || 0) + 1; });
+
+    // Highlight state
+    const highlightNodes = new Set();
+    const highlightLinks = new Set();
+    let hoverNode = null;
+    let autoRotate = true;
+
+    const Graph = ForceGraph3D()(document.getElementById('graph-container'))
+      .graphData(data)
+      .backgroundColor(bgColor())
+      .nodeId('id')
+      .nodeLabel('label')
+      .nodeVal(n => 3 + (inDegree[n.id] || 0) * 2)
+      .nodeColor(n => tierColor(n.order, hoverNode !== null && !highlightNodes.has(n.id)))
+      .nodeOpacity(0.92)
+      .linkColor(l => linkColor(hoverNode !== null && !highlightLinks.has(l)))
+      .linkWidth(l => highlightLinks.has(l) ? 2 : 1)
+      .linkDirectionalArrowLength(5)
+      .linkDirectionalArrowRelPos(1)
+      .linkDirectionalParticles(l => highlightLinks.has(l) ? 4 : 0)
+      .linkDirectionalParticleWidth(2)
+      .onNodeClick(n => { window.location.href = n.href; })
+      .onNodeHover(node => {
+        hoverNode = node ? node.id : null;
+        highlightNodes.clear();
+        highlightLinks.clear();
+        if (node) {
+          highlightNodes.add(node.id);
+          data.links.forEach(l => {
+            const src = typeof l.source === 'object' ? l.source.id : l.source;
+            const tgt = typeof l.target === 'object' ? l.target.id : l.target;
+            if (src === node.id || tgt === node.id) {
+              highlightLinks.add(l);
+              highlightNodes.add(src);
+              highlightNodes.add(tgt);
+            }
+          });
+        }
+        // Trigger re-render
+        Graph.nodeColor(Graph.nodeColor());
+        Graph.linkColor(Graph.linkColor());
+        Graph.linkWidth(Graph.linkWidth());
+        document.getElementById('graph-container').style.cursor = node ? 'pointer' : 'default';
+      });
+
+    // Pause auto-rotation while user drags
+    document.getElementById('graph-container').addEventListener('mousedown', () => { autoRotate = false; });
+    document.getElementById('graph-container').addEventListener('mouseup',   () => { setTimeout(() => { autoRotate = true; }, 1000); });
+    document.getElementById('graph-container').addEventListener('touchstart', () => { autoRotate = false; }, { passive: true });
+    document.getElementById('graph-container').addEventListener('touchend',   () => { setTimeout(() => { autoRotate = true; }, 1000); });
+
+    // Auto-rotation
+    let angle = 0;
+    setInterval(() => {
+      if (!autoRotate) return;
+      angle += 0.003;
+      const cam = Graph.camera();
+      const scene = Graph.scene();
+      const dist = cam.position.distanceTo(scene.position);
+      Graph.cameraPosition({ x: dist * Math.sin(angle), z: dist * Math.cos(angle) });
+    }, 33);
+
+    // Theme toggle
+    function applyTheme(theme) {
+      document.documentElement.setAttribute('data-theme', theme);
+      try { localStorage.setItem('devopsindex-theme', theme); } catch (_) {}
+      document.querySelectorAll('.theme-label').forEach(el => { el.textContent = theme; });
+      Graph.backgroundColor(bgColor());
+      Graph.nodeColor(Graph.nodeColor());
+      Graph.linkColor(Graph.linkColor());
+    }
+
+    const themeLabel = document.querySelector('.theme-label');
+    if (themeLabel) themeLabel.textContent = currentTheme();
+
+    document.getElementById('theme-toggle')?.addEventListener('click', () => {
+      applyTheme(currentTheme() === 'dark' ? 'light' : 'dark');
+    });
+
+    // Wait for simulation to settle, then fit view
+    setTimeout(() => { Graph.zoomToFit(400, 50); }, 2000);
+  </script>
+</body>
+</html>

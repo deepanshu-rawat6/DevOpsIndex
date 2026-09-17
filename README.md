@@ -55,6 +55,7 @@ Contributing a new guide or retrofitting an old one? [`website/COMPONENTS.md`](.
 17. System Design            → scaling, CAP/PACELC, rate limiting, async patterns
 18. SRE & Debugging          → production incident runbooks, on-call tooling
 19. Coding Practice          → DSA implementations in Go & Python (B-trees, skip lists, LRU cache, rate limiter, etc.)
+20. Platform Engineering     → IDP concepts, Backstage, Crossplane, self-service, multi-tenancy, DORA metrics, cost attribution
 ```
 
 ---
