@@ -166,9 +166,9 @@ const currentPath = Astro.url.pathname;
       });
     }
 
-    // Mermaid rendering — dynamic import so a CDN failure can't crash the
-    // whole module. Module reference and source list are kept so the
-    // theme toggle can re-render diagrams in the new theme.
+    // Mermaid rendering — script-tag injection bypasses Vite's module transform
+    // (same pattern as graph.astro). Module reference and source list kept for
+    // the theme toggle to re-render diagrams in the new theme.
     let _mermaid: any = null;
     const _mermaidDivs: { div: HTMLElement; src: string }[] = [];
 
@@ -185,13 +185,15 @@ const currentPath = Astro.url.pathname;
         _mermaidDivs.push({ div, src });
       });
       if (!_mermaidDivs.length) return;
-      import('https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs')
-        .then(m => {
-          _mermaid = m.default;
-          _mermaid.initialize({ startOnLoad: false, theme: currentTheme() === 'light' ? 'default' : 'dark', securityLevel: 'loose' });
-          _mermaid.run();
-        })
-        .catch(err => console.warn('[DevOpsIndex] Mermaid failed to load:', err));
+      const s = document.createElement('script');
+      s.src = 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js';
+      s.onload = () => {
+        _mermaid = (window as any).mermaid;
+        _mermaid.initialize({ startOnLoad: false, theme: currentTheme() === 'light' ? 'default' : 'dark', securityLevel: 'loose' });
+        _mermaid.run();
+      };
+      s.onerror = () => console.warn('[DevOpsIndex] Mermaid failed to load');
+      document.head.appendChild(s);
     }
 
     function rethemeMermaid(theme: string) {

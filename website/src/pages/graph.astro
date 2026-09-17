@@ -175,17 +175,23 @@ const graphData = JSON.stringify({ nodes, links });
     Drag to orbit · Scroll to zoom<br>Click node to open topic
   </div>
 
-  <script src="https://cdn.jsdelivr.net/npm/3d-force-graph@1.73.3/dist/3d-force-graph.min.js"></script>
-  <script define:vars={{ graphData }}>
+  <!-- Embed graph data as a JSON script element (avoids define:vars module-scope issues) -->
+  <script type="application/json" id="gd" set:html={graphData}></script>
+
+  <!-- UMD build — registers ForceGraph3D on window; is:inline stops Astro/Vite from rewriting it -->
+  <script is:inline src="https://cdn.jsdelivr.net/npm/3d-force-graph@1/dist/3d-force-graph.min.js"></script>
+
+  <!-- is:inline so Vite never touches this; ForceGraph3D global is accessible -->
+  <script is:inline>
     function currentTheme() {
-      const attr = document.documentElement.getAttribute('data-theme');
+      var attr = document.documentElement.getAttribute('data-theme');
       if (attr === 'light' || attr === 'dark') return attr;
       return window.matchMedia('(prefers-color-scheme: dark)').matches ? 'dark' : 'light';
     }
 
     function tierColor(order, dimmed) {
       if (dimmed) return currentTheme() === 'dark' ? 'rgba(120,140,150,0.25)' : 'rgba(120,140,150,0.3)';
-      const dark = currentTheme() === 'dark';
+      var dark = currentTheme() === 'dark';
       if (order <= 4)  return dark ? '#4f8cff' : '#2563eb';
       if (order <= 8)  return dark ? '#a78bfa' : '#7c3aed';
       if (order <= 12) return dark ? '#34d399' : '#059669';
@@ -197,13 +203,15 @@ const graphData = JSON.stringify({ nodes, links });
     }
 
     function linkColor(dimmed) {
-      const dark = currentTheme() === 'dark';
+      var dark = currentTheme() === 'dark';
       return dimmed
         ? (dark ? 'rgba(255,255,255,0.04)' : 'rgba(0,0,0,0.04)')
         : (dark ? 'rgba(255,255,255,0.22)' : 'rgba(0,0,0,0.15)');
     }
 
-    const data = JSON.parse(graphData);
+    var raw = document.getElementById('gd');
+    if (!raw) { console.error('[graph] #gd element missing'); }
+    var data = raw ? JSON.parse(raw.textContent) : { nodes: [], links: [] };
 
     // Pre-compute in-degree for node sizing
     const inDegree = {};
