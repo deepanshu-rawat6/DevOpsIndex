@@ -224,6 +224,17 @@ const sde2Path = [
   </div>
 
   <script>
+    // Mark learning-path chips for pages the user has already visited
+    try {
+      const visited: string[] = JSON.parse(localStorage.getItem('devopsindex-visited') || '[]');
+      document.querySelectorAll<HTMLAnchorElement>('.path-page-chip').forEach(chip => {
+        const href = chip.getAttribute('href') || '';
+        if (visited.includes(href) || visited.includes(href.replace(/\/$/, ''))) {
+          chip.classList.add('visited');
+        }
+      });
+    } catch (_) {}
+
     function filterSections(query: string) {
       const q = query.toLowerCase().trim();
       document.querySelectorAll<HTMLElement>('.section-tile').forEach(card => {

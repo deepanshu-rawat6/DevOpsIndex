@@ -297,7 +297,7 @@ Language and concurrency fluency for infra tooling, backend services, and coding
 | [advanced/trading-systems.md](./advanced/trading-systems.md) | OMS order lifecycle state machine, matching engine/order book fundamentals, market data feed handling (snapshot/incremental, gap detection), FIX protocol basics, exchange gateway failover, idempotent order submission, infra concerns for market-open spikes | SDE-2 |
 | [advanced/trading-data-streaming.md](./advanced/trading-data-streaming.md) | Kafka latency-first config (linger.ms=0, acks=1), broker I/O tuning, KRaft Express mode, Redis order book (AOF always, min-replicas-to-write, CP vs AP partition choice) | SDE-2 |
 
-**Read order:** service-mesh → ebpf-observability → chaos-engineering → chaos-engineering-handson → backup-dr → dr-zero-downtime → low-latency-networking → fintech-security → fintech-compliance → trading-systems → trading-data-streaming
+**Read order:** README → service-mesh → ebpf-observability → chaos-engineering → chaos-engineering-handson → backup-dr → dr-zero-downtime → low-latency-networking → fintech-security → fintech-compliance → trading-systems → trading-data-streaming
 
 ---
 

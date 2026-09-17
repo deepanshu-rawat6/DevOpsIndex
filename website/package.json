@@ -7,17 +7,15 @@
   },
   "scripts": {
     "dev": "node scripts/sync-content.js && astro dev",
-    "build": "node scripts/sync-content.js && astro build",
+    "build": "node scripts/sync-content.js && astro build && npx pagefind --site dist",
     "preview": "astro preview",
-    "astro": "astro"
+    "astro": "astro",
+    "sync:watch": "node scripts/sync-content.js --watch"
   },
   "dependencies": {
-    "@astrojs/react": "5.0.6",
     "@tailwindcss/typography": "0.5.19",
     "@tailwindcss/vite": "4.2.3",
     "astro": "6.4.2",
-    "react": "19.0.6",
-    "react-dom": "19.0.6",
     "rehype-external-links": "3.0.0",
     "rehype-stringify": "10.0.1",
     "remark-gfm": "4.0.1",
@@ -28,8 +26,7 @@
     "unist-util-visit": "^5.0.0"
   },
   "devDependencies": {
-    "@types/react": "19.1.6",
-    "@types/react-dom": "19.1.5"
+    "pagefind": "^1"
   },
   "overrides": {
     "vite": "7.3.3"

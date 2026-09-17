@@ -9,6 +9,7 @@ const topics = defineCollection({
     sectionOrder: z.number(),
     pageSlug: z.string(),
     title: z.string(),
+    description: z.string().optional().default(''),
     filePath: z.string(),
     pageOrder: z.number(),
     prerequisites: z.array(z.object({ title: z.string(), slug: z.string() })).optional().default([]),

@@ -63,10 +63,13 @@ if (rootPage) {
         {readmeHtml && <h2 class="text-lg font-semibold mb-4 pb-2" style="color: var(--text-secondary); border-bottom: 1px solid var(--border)">Pages in this section</h2>}
         <div class="space-y-2">
           {subPages.map((page, i) => (
-            <a href={`/topic/${page.data.pageSlug}`} class="pager-link flex items-center gap-4 px-4 py-3 group">
-              <span class="sidebar-index w-7 h-7 text-xs">{i + 1}</span>
-              <div class="text-sm font-medium" style="color: var(--text-secondary)">
-                {page.data.title}
+            <a href={`/topic/${page.data.pageSlug}`} class="pager-link flex items-start gap-4 px-4 py-3 group">
+              <span class="sidebar-index w-7 h-7 text-xs shrink-0 mt-0.5">{i + 1}</span>
+              <div class="min-w-0">
+                <div class="text-sm font-medium" style="color: var(--text-secondary)">{page.data.title}</div>
+                {page.data.description && (
+                  <div class="text-xs mt-0.5 truncate" style="color: var(--text-faint)">{page.data.description}</div>
+                )}
               </div>
             </a>
           ))}

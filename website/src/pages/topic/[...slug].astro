@@ -10,13 +10,23 @@ export async function getStaticPaths() {
   // Exclude single-segment slugs (e.g., "kubernetes") — handled by [section].astro
   return allTopics
     .filter(t => t.data.pageSlug.includes('/'))
-    .map(t => ({
-      params: { slug: t.data.pageSlug },
-      props: { topic: t.data },
-    }));
+    .map(t => {
+      const sectionPages = allTopics
+        .filter(s => s.data.section === t.data.section)
+        .sort((a, b) => a.data.pageOrder - b.data.pageOrder);
+      const idx = sectionPages.findIndex(s => s.data.pageSlug === t.data.pageSlug);
+      return {
+        params: { slug: t.data.pageSlug },
+        props: {
+          topic: t.data,
+          prev: idx > 0 ? sectionPages[idx - 1].data : null,
+          next: idx < sectionPages.length - 1 ? sectionPages[idx + 1].data : null,
+        },
+      };
+    });
 }
 
-const { topic } = Astro.props;
+const { topic, prev, next } = Astro.props;
 
 const mdPath = path.resolve('src/data/topics', topic.filePath);
 const mdRaw = fs.existsSync(mdPath) ? fs.readFileSync(mdPath, 'utf8') : '';
@@ -26,16 +36,6 @@ const fileDir = path.dirname(topic.filePath).replace(/\\/g, '/');
 const subpath = fileDir.includes('/') ? fileDir.split('/').slice(1).join('/') : '';
 
 const html = await renderMd(mdRaw, topic.section, subpath);
-
-// Prev/next within same section
-const allTopics = await getCollection('topics');
-const sectionPages = allTopics
-  .filter(t => t.data.section === topic.section)
-  .sort((a, b) => a.data.pageOrder - b.data.pageOrder);
-
-const idx = sectionPages.findIndex(t => t.data.pageSlug === topic.pageSlug);
-const prev = idx > 0 ? sectionPages[idx - 1].data : null;
-const next = idx < sectionPages.length - 1 ? sectionPages[idx + 1].data : null;
 
 const pageHref = (t: { pageSlug: string; section: string }) =>
   t.pageSlug === t.section ? `/topic/${t.section}` : `/topic/${t.pageSlug}`;

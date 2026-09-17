@@ -1,10 +1,14 @@
 import { defineConfig } from 'astro/config';
-import react from '@astrojs/react';
 import tailwindcss from '@tailwindcss/vite';
 
 export default defineConfig({
-  integrations: [react()],
   vite: {
     plugins: [tailwindcss()],
+    build: {
+      rollupOptions: {
+        // pagefind assets are generated post-build — they don't exist at compile time
+        external: [/\/pagefind\//],
+      },
+    },
   },
 });

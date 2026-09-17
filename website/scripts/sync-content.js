@@ -44,7 +44,7 @@ const SECTIONS = [
   },
   {
     slug: 'iac', title: 'Infrastructure as Code', order: 6,
-    readOrder: ['README', 'terraform', 'cloudformation', 'ansible', 'ansible/core-concepts', 'ansible/cloud-integration', 'ansible/advanced'],
+    readOrder: ['README', 'terraform', 'cloudformation', 'pulumi', 'ansible', 'ansible/core-concepts', 'ansible/cloud-integration', 'ansible/advanced'],
     sectionPrereqs: [
       { title: 'Linux',      slug: 'linux' },
       { title: 'Networking', slug: 'networking' },
@@ -52,7 +52,7 @@ const SECTIONS = [
   },
   {
     slug: 'aws', title: 'AWS', order: 7,
-    readOrder: ['README', 'ecs-fargate', 'request-flow-alb-to-pod', 'services-overview', 'storage-databases', 'databases-deep-dive', 'messaging-serverless-observability'],
+    readOrder: ['README', 'services-overview', 'ecs-fargate', 'request-flow-alb-to-pod', 'storage-databases', 'databases-deep-dive', 'messaging-serverless-observability'],
     sectionPrereqs: [
       { title: 'Linux',      slug: 'linux' },
       { title: 'Networking', slug: 'networking' },
@@ -83,7 +83,7 @@ const SECTIONS = [
   },
   {
     slug: 'advanced', title: 'Advanced', order: 11,
-    readOrder: ['README', 'service-mesh', 'ebpf-observability', 'chaos-engineering', 'backup-dr', 'low-latency-networking', 'fintech-security', 'trading-data-streaming'],
+    readOrder: ['README', 'service-mesh', 'ebpf-observability', 'chaos-engineering', 'chaos-engineering-handson', 'backup-dr', 'dr-zero-downtime', 'low-latency-networking', 'fintech-security', 'fintech-compliance', 'trading-systems', 'trading-data-streaming'],
     prerequisites: {
       'service-mesh':           [{ title: 'Kubernetes',       slug: 'kubernetes' },
                                   { title: 'Networking',      slug: 'networking' }],
@@ -198,9 +198,11 @@ const SECTIONS = [
 ];
 
 // Clean and recreate output dirs
-for (const dir of [DATA_DIR, CONTENT_DIR]) {
-  if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true });
-  fs.mkdirSync(dir, { recursive: true });
+function cleanDirs() {
+  for (const dir of [DATA_DIR, CONTENT_DIR]) {
+    if (fs.existsSync(dir)) fs.rmSync(dir, { recursive: true });
+    fs.mkdirSync(dir, { recursive: true });
+  }
 }
 
 function fixMermaid(content) {
@@ -234,6 +236,22 @@ function extractTitle(content, filename) {
     .replace(/\b\w/g, c => c.toUpperCase());
 }
 
+function extractDescription(content) {
+  const lines = content.split('\n');
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i].trim();
+    if (!line || line.startsWith('#') || line.startsWith('|') || line.startsWith('```') || line.startsWith('<')) continue;
+    // Strip inline markdown: bold, italic, backticks, links
+    return line
+      .replace(/\*\*(.+?)\*\*/g, '$1')
+      .replace(/\*(.+?)\*/g, '$1')
+      .replace(/`(.+?)`/g, '$1')
+      .replace(/\[(.+?)\]\(.+?\)/g, '$1')
+      .slice(0, 160);
+  }
+  return '';
+}
+
 // Recursively collect all .md files in a directory
 function collectMdFiles(dir, baseDir = dir) {
   const results = [];
@@ -261,9 +279,11 @@ function relPathToOrderKey(relPath) {
   return withoutExt;
 }
 
-let totalPages = 0;
+function syncAll() {
+  cleanDirs();
+  let totalPages = 0;
 
-for (const section of SECTIONS) {
+  for (const section of SECTIONS) {
   const sectionDir = path.join(REPO_ROOT, section.slug);
   if (!fs.existsSync(sectionDir)) {
     console.warn(`  skipping ${section.slug} (not found)`);
@@ -278,6 +298,7 @@ for (const section of SECTIONS) {
     content = fixMermaid(content);
 
     const title = extractTitle(content, path.basename(relPath));
+    const description = extractDescription(content);
 
     // Compute pageSlug
     const parts = relPath.replace(/\\/g, '/').split('/');
@@ -313,6 +334,7 @@ for (const section of SECTIONS) {
       sectionOrder: section.order,
       pageSlug,
       title,
+      description,
       filePath: path.join(section.slug, relPath).replace(/\\/g, '/'),
       pageOrder: finalOrder,
       prerequisites,
@@ -324,4 +346,21 @@ for (const section of SECTIONS) {
   }
 }
 
-console.log(`\nSynced ${totalPages} pages to src/data/topics/ and src/content/topics/`);
+  console.log(`\nSynced ${totalPages} pages to src/data/topics/ and src/content/topics/`);
+}
+
+syncAll();
+
+// Watch mode: run with `node scripts/sync-content.js --watch` (or `npm run sync:watch`)
+if (process.argv.includes('--watch')) {
+  console.log('[sync-content] Watching for markdown changes… (Ctrl+C to stop)');
+  let debounce;
+  fs.watch(REPO_ROOT, { recursive: true }, (_, filename) => {
+    if (!filename?.endsWith('.md')) return;
+    clearTimeout(debounce);
+    debounce = setTimeout(() => {
+      console.log(`[sync-content] ${filename} changed, resyncing…`);
+      syncAll();
+    }, 300);
+  });
+}

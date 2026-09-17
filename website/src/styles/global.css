@@ -76,6 +76,7 @@
   }
 }
 
+/* Keep in sync with the @media block above — CSS has no mixins, two blocks are required */
 :root[data-theme="dark"] {
   --bg: #070b0f;
   --surface: #101820;
@@ -675,6 +676,68 @@ pre:hover .copy-btn { opacity: 1; }
   text-decoration: none;
 }
 .path-page-chip:hover { color: var(--accent); border-color: var(--accent-line); }
+.path-page-chip.visited {
+  background: color-mix(in srgb, var(--ok) 15%, transparent);
+  color: var(--ok);
+  border-color: color-mix(in srgb, var(--ok) 30%, transparent);
+}
+.path-page-chip.visited::before { content: '✓ '; }
+
+/* ── Search trigger button ──────────────────────────────────── */
+.search-trigger {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.35rem 0.75rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  background: var(--surface);
+  color: var(--text-dim);
+  font-family: var(--mono);
+  font-size: 0.7rem;
+  cursor: pointer;
+  transition: border-color 0.15s, color 0.15s;
+}
+.search-trigger:hover { border-color: var(--accent); color: var(--accent); }
+
+/* ── Search modal (pagefind) ────────────────────────────────── */
+.search-modal {
+  position: fixed;
+  inset: 0;
+  z-index: 100;
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding-top: 6vh;
+}
+.search-modal[hidden] { display: none !important; }
+.search-modal-backdrop {
+  position: absolute;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  backdrop-filter: blur(3px);
+}
+.search-modal-inner {
+  position: relative;
+  width: min(680px, calc(100% - 32px));
+  max-height: 80vh;
+  overflow-y: auto;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 0.75rem;
+  padding: 1rem;
+  box-shadow: 0 24px 48px -12px var(--shadow-ambient);
+}
+.search-modal-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 0.75rem;
+}
+.search-modal-title { font-size: 0.75rem; font-weight: 600; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.06em; }
+.search-modal-close { background: none; border: none; cursor: pointer; color: var(--text-faint); font-size: 1rem; padding: 0.2rem 0.4rem; border-radius: 0.25rem; }
+.search-modal-close:hover { color: var(--text); background: var(--surface-raised); }
+.search-modal-hint { font-size: 0.72rem; color: var(--text-faint); margin-top: 0.75rem; text-align: center; }
 
 .search-input {
   background: var(--surface);
