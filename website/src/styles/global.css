@@ -694,6 +694,25 @@ pre:hover .copy-btn { opacity: 1; }
 }
 .path-page-chip.visited::before { content: '✓ '; }
 
+/* ── Tier-based learning path ───────────────────────────────── */
+.tier-path-group { padding: 0.75rem 0; border-top: 1px solid var(--border); }
+.tier-path-group:first-child { border-top: none; padding-top: 0; }
+.tier-section-chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.3rem 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 0.375rem;
+  background: var(--surface);
+  text-decoration: none;
+  transition: border-color 0.15s, background 0.15s;
+}
+.tier-section-chip:hover {
+  border-color: var(--accent-line);
+  background: color-mix(in srgb, var(--accent) 6%, var(--surface));
+}
+
 /* ── Search trigger button ──────────────────────────────────── */
 .search-trigger {
   display: flex;

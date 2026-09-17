@@ -7,7 +7,7 @@ interface Props {
   description?: string;
 }
 
-const { title, description = 'DevOps reference — Kubernetes, Linux, Docker, AWS, GCP, CI/CD and more' } = Astro.props;
+const { title, description = 'Structured DevOps learning path — Linux, Kubernetes, CI/CD, Security Engineering, eBPF, Platform Engineering and more. Free, no account needed.' } = Astro.props;
 
 const allTopics = await getCollection('topics');
 // Build sidebar: sections ordered 1-16, each with their pages
@@ -66,7 +66,7 @@ const currentPath = Astro.url.pathname;
 <body class="min-h-screen flex flex-col">
   <header class="site-header px-6 py-3.5 flex items-center gap-5">
     <a href="/" class="wordmark"><span class="prompt">❯</span>devopsindex<span class="cursor"></span></a>
-    <span class="site-tagline hidden sm:block">Kubernetes · Linux · Docker · AWS · GCP · CI/CD</span>
+    <span class="site-tagline hidden sm:block">Linux · Kubernetes · CI/CD · Security · Platform Engineering · eBPF</span>
     <a href="/graph" class="graph-nav-link hidden sm:block" aria-label="Knowledge graph">⬡ Graph</a>
     <div class="header-right">
       <button id="search-btn" class="search-trigger" aria-label="Search (/)">⌕ Search</button>

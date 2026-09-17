@@ -56,6 +56,8 @@ Contributing a new guide or retrofitting an old one? [`website/COMPONENTS.md`](.
 18. SRE & Debugging          → production incident runbooks, on-call tooling
 19. Coding Practice          → DSA implementations in Go & Python (B-trees, skip lists, LRU cache, rate limiter, etc.)
 20. Platform Engineering     → IDP concepts, Backstage, Crossplane, self-service, multi-tenancy, DORA metrics, cost attribution
+21. Security Engineering     → Container security, supply chain (SLSA/Sigstore), secrets management (Vault/ESO), SAST/DAST, Kubernetes security (OPA/Kyverno/Falco)
+22. eBPF                     → BPF fundamentals, Cilium CNI, Tetragon runtime security, bpftrace production debugging
 ```
 
 ---

@@ -214,6 +214,35 @@ const SECTIONS = [
                                  { title: 'GCP Cost Optimization', slug: 'gcp/cost-optimization' }],
     },
   },
+  {
+    slug: 'security-engineering', title: 'Security Engineering', order: 21,
+    readOrder: ['README', 'container-security', 'supply-chain', 'secrets-management', 'sast-dast', 'k8s-security'],
+    sectionPrereqs: [
+      { title: 'Docker',      slug: 'docker' },
+      { title: 'Kubernetes',  slug: 'kubernetes' },
+      { title: 'CI/CD',       slug: 'cicd' },
+    ],
+    prerequisites: {
+      'supply-chain':       [{ title: 'CI/CD',           slug: 'cicd' }],
+      'k8s-security':       [{ title: 'K8s RBAC',        slug: 'kubernetes/rbac' },
+                             { title: 'K8s Networking',  slug: 'kubernetes/networking' }],
+      'secrets-management': [{ title: 'IaC',             slug: 'iac' }],
+    },
+  },
+  {
+    slug: 'ebpf', title: 'eBPF', order: 22,
+    readOrder: ['README', 'bpf-fundamentals', 'cilium', 'tetragon', 'bpftrace'],
+    sectionPrereqs: [
+      { title: 'Linux',       slug: 'linux' },
+      { title: 'Kubernetes',  slug: 'kubernetes' },
+      { title: 'Networking',  slug: 'networking' },
+    ],
+    prerequisites: {
+      'cilium':   [{ title: 'K8s Networking',  slug: 'kubernetes/networking' }],
+      'tetragon': [{ title: 'Cilium',          slug: 'ebpf/cilium' },
+                   { title: 'K8s Security',    slug: 'security-engineering/k8s-security' }],
+    },
+  },
 ];
 
 // Clean and recreate output dirs

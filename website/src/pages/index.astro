@@ -48,38 +48,21 @@ function countOccurrences(pattern: RegExp): number {
 const liveSimCount = countOccurrences(/class="structure-viz"/g);
 const quizCount = countOccurrences(/class="quiz-card"/g);
 
-// Recommended learning path — two tracks
-const sde1Path = [
-  { step: 1,  section: 'linux',         pages: ['commands', 'boot', 'systemd', 'networking', 'signals', 'containers-evolution'] },
-  { step: 2,  section: 'networking',    pages: ['osi-model', 'tcp-udp', 'tls-encryption', 'http-versions'] },
-  { step: 3,  section: 'docker',        pages: ['networking', 'debugging'] },
-  { step: 4,  section: 'kubernetes',    pages: ['kubectl-cheatsheet', 'workloads', 'resource-limits', 'networking', 'storage', 'rbac', 'helm'] },
-  { step: 5,  section: 'cicd',          pages: ['github-actions', 'argocd'] },
-  { step: 6,  section: 'iac',           pages: ['terraform', 'cloudformation'] },
-  { step: 7,  section: 'aws',           pages: ['services-overview', 'storage-databases', 'messaging-serverless-observability'] },
-  { step: 8,  section: 'monitoring',    pages: ['prometheus', 'alertmanager', 'grafana', 'loki', 'alerting-philosophy'] },
-  { step: 9,  section: 'git',           pages: ['git-workflows', 'git-fixes'] },
-  { step: 10, section: 'sre',           pages: ['k8s-debugging', 'k8s-scenarios', 'aws-scenarios'] },
-];
-
-const sde2Path = [
-  { step: 1,  section: 'linux',         pages: ['io-models', 'scheduler', 'security', 'memory-tuning', 'cgroup-v2', 'proc-internals', 'strace-perf', 'ebpf-bpftrace'] },
-  { step: 2,  section: 'networking',    pages: ['linux-networking', 'grpc-graphql', 'load-balancers', 'cdn'] },
-  { step: 3,  section: 'docker',        pages: ['buildkit', 'docker-security', 'internals'] },
-  { step: 4,  section: 'kubernetes',    pages: ['autoscaling', 'coredns', 'pod-lifecycle', 'kube-proxy-modes', 'cross-node-networking', 'eks-architecture', 'node-shutdown', 'policy-security'] },
-  { step: 5,  section: 'aws',           pages: ['databases-deep-dive', 'ecs-fargate', 'request-flow-alb-to-pod'] },
-  { step: 6,  section: 'monitoring',    pages: ['opentelemetry', 'performance-debugging', 'slo-sli', 'thanos-mimir'] },
-  { step: 7,  section: 'git',           pages: ['git-internals'] },
-  { step: 8,  section: 'advanced',      pages: ['service-mesh', 'ebpf-observability', 'chaos-engineering', 'backup-dr'] },
-  { step: 9,  section: 'cicd',          pages: ['gitops-secrets', 'argo-rollouts', 'pipeline-design'] },
-  { step: 10, section: 'sre',           pages: ['linux-debugging', 'cicd-scenarios', 'iac-scenarios', 'sre-concepts'] },
-  { step: 11, section: 'gcp',           pages: ['services-overview', 'gke', 'bigquery'] },
-  { step: 12, section: 'databases',     pages: ['postgres-internals', 'mysql-internals', 'kafka-internals', 'redis-internals', 'replication', 'caching'] },
-  { step: 13, section: 'on-prem-k8s',   pages: ['postgres', 'kafka', 'redis-cluster'] },
-  { step: 14, section: 'system-design', pages: ['scaling', 'cap-pacelc', 'async-patterns', 'api-design', 'distributed-transactions'] },
-  { step: 15, section: 'ai-infra',      pages: ['gpu-scheduling', 'kuberay', 'model-serving', 'llmops'] },
-  { step: 16, section: 'mlops',         pages: ['experiment-tracking', 'training-pipelines', 'data-drift'] },
-];
+// Tier colors and descriptions — computed once in frontmatter, referenced in template
+const tierColors: Record<TierKey, string> = {
+  foundation: 'var(--tier-foundation)',
+  core:       'var(--tier-core)',
+  advanced:   'var(--tier-advanced)',
+  specialist: 'var(--tier-specialist)',
+};
+const tierDescriptions: Record<TierKey, string> = {
+  foundation: 'How infrastructure actually works — start here regardless of experience',
+  core:       'Shipping and running software reliably in the cloud',
+  advanced:   'Operating production systems: observability, internals, modern workloads',
+  specialist: "Deep dives — pick by what you're building or what's on-call",
+};
+const tierKeys: TierKey[] = ['foundation', 'core', 'advanced', 'specialist'];
+const tierRepresentative: Record<TierKey, number> = { foundation: 1, core: 5, advanced: 9, specialist: 13 };
 ---
 
 <BaseLayout title="DevOpsIndex">
@@ -87,10 +70,11 @@ const sde2Path = [
 
     <!-- Hero -->
     <div class="space-y-5">
-      <div class="hero-eyebrow"><span class="dot"></span>{allTopics.length} pages synced · build passing</div>
-      <h1 class="hero-title text-2xl sm:text-3xl"><span class="prompt">❯</span> devopsindex --learn <span class="arg">kubernetes,databases,networking,system-design</span></h1>
+      <div class="hero-eyebrow"><span class="dot"></span>{allTopics.length} pages · {sections.length} sections · always free</div>
+      <h1 class="hero-title text-2xl sm:text-3xl"><span class="prompt">❯</span> devopsindex</h1>
+      <p class="text-base sm:text-lg font-semibold" style="color: var(--text)">A structured path through the modern DevOps stack.</p>
       <p class="text-sm sm:text-[15px] leading-relaxed max-w-2xl" style="color: var(--text-secondary)">
-        A reference built like the systems it teaches: <b style="color: var(--text)">{liveSimCount} live simulators</b> you can break on purpose, <b style="color: var(--text)">{quizCount} knowledge checks</b>, across {sections.length} sections — Kubernetes, Linux, Docker, AWS, GCP, CI/CD, SRE and more.
+        From Linux fundamentals to platform engineering — <b style="color: var(--text)">{liveSimCount} hands-on simulators</b>, <b style="color: var(--text)">{quizCount} knowledge checks</b>, prerequisite-linked topics across {sections.length} sections. No account needed.
       </p>
 
       <div class="stat-strip">
@@ -117,72 +101,39 @@ const sde2Path = [
       </p>
     </div>
 
-    <!-- Recommended learning path (collapsible) -->
+    <!-- Recommended learning path (tier-based) -->
     <details class="panel group" open>
       <summary class="panel-summary flex items-center justify-between px-5 py-4 cursor-pointer list-none select-none">
-        <h2 class="text-sm font-semibold uppercase tracking-wider" style="color: var(--text-dim)">📚 Recommended Learning Path</h2>
+        <h2 class="text-sm font-semibold uppercase tracking-wider" style="color: var(--text-dim)">Recommended Learning Path</h2>
         <svg class="w-4 h-4 transition-transform group-open:rotate-180" style="color: var(--text-faint)" fill="none" viewBox="0 0 24 24" stroke="currentColor">
           <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7" />
         </svg>
       </summary>
 
-      <div class="px-5 pb-5 space-y-6">
-        <!-- Tab switcher -->
-        <div class="flex gap-2 pt-2 items-center">
-          <button id="tab-sde1" onclick="switchTab('sde1')" class="path-tab-btn active">SDE-1 Track</button>
-          <button id="tab-sde2" onclick="switchTab('sde2')" class="path-tab-btn">SDE-2 Track</button>
-          <span class="ml-auto text-xs self-center hidden sm:block" style="color: var(--text-faint)">Read top-to-bottom within each step</span>
-        </div>
-
-        <!-- SDE-1 track -->
-        <div id="path-sde1" class="space-y-3">
-          <p class="text-xs" style="color: var(--text-faint)">Start here if you're new to DevOps / joining as a junior engineer. Focus on understanding how things work before optimising them.</p>
-          <div class="space-y-2">
-            {sde1Path.map(step => {
-              const sec = sections.find(s => s.slug === step.section);
-              return (
-                <div class="path-step-card flex items-start gap-3 p-3">
-                  <span class="step-badge shrink-0 mt-0.5">{step.step}</span>
-                  <div class="min-w-0">
-                    <a href={`/topic/${step.section}`} class="step-title text-sm font-semibold">
-                      {sec?.title ?? step.section}
-                    </a>
-                    <div class="flex flex-wrap gap-1.5 mt-1.5">
-                      {step.pages.map(page => (
-                        <a href={`/topic/${step.section}/${page}`} class="path-page-chip">{page}</a>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
-
-        <!-- SDE-2 track -->
-        <div id="path-sde2" class="space-y-3 hidden">
-          <p class="text-xs" style="color: var(--text-faint)">Continue here after completing the SDE-1 track, or start here if you already have production experience. Focus on internals, failure modes and system design.</p>
-          <div class="space-y-2">
-            {sde2Path.map(step => {
-              const sec = sections.find(s => s.slug === step.section);
-              return (
-                <div class="path-step-card flex items-start gap-3 p-3">
-                  <span class="step-badge shrink-0 mt-0.5">{step.step}</span>
-                  <div class="min-w-0">
-                    <a href={`/topic/${step.section}`} class="step-title text-sm font-semibold">
-                      {sec?.title ?? step.section}
-                    </a>
-                    <div class="flex flex-wrap gap-1.5 mt-1.5">
-                      {step.pages.map(page => (
-                        <a href={`/topic/${step.section}/${page}`} class="path-page-chip">{page}</a>
-                      ))}
-                    </div>
-                  </div>
-                </div>
-              );
-            })}
-          </div>
-        </div>
+      <div class="px-5 pb-5 space-y-4 pt-2">
+        {tierKeys.map(key => {
+          const tierSections = sections.filter(s => tierInfo(s.order).key === key);
+          const info = tierInfo(tierRepresentative[key]);
+          const color = tierColors[key];
+          return (
+            <div class="tier-path-group">
+              <div class="tier-path-header flex items-center gap-2 mb-2">
+                <span class="sw" style={'background:' + color + ';width:10px;height:10px;border-radius:50%;display:inline-block;flex-shrink:0'}></span>
+                <span class="text-xs font-semibold uppercase tracking-wider" style={'color:' + color}>{info.tier}</span>
+                <span class="text-xs ml-1" style="color: var(--text-faint)">{tierDescriptions[key]}</span>
+              </div>
+              <div class="flex flex-wrap gap-2">
+                {tierSections.map((s, i) => (
+                  <a href={'/topic/' + s.slug} class="tier-section-chip flex items-center gap-1.5">
+                    <span class="text-xs font-mono" style="color: var(--text-faint)">#{String(s.order).padStart(2, '0')}</span>
+                    <span class="text-xs font-semibold" style="color: var(--text)">{s.title}</span>
+                    {i < tierSections.length - 1 && <span style="color: var(--border); margin-left: 2px;">→</span>}
+                  </a>
+                ))}
+              </div>
+            </div>
+          );
+        })}
       </div>
     </details>
 
@@ -226,17 +177,6 @@ const sde2Path = [
   </div>
 
   <script>
-    // Mark learning-path chips for pages the user has already visited
-    try {
-      const visited: string[] = JSON.parse(localStorage.getItem('devopsindex-visited') || '[]');
-      document.querySelectorAll<HTMLAnchorElement>('.path-page-chip').forEach(chip => {
-        const href = chip.getAttribute('href') || '';
-        if (visited.includes(href) || visited.includes(href.replace(/\/$/, ''))) {
-          chip.classList.add('visited');
-        }
-      });
-    } catch (_) {}
-
     function filterSections(query: string) {
       const q = query.toLowerCase().trim();
       document.querySelectorAll<HTMLElement>('.section-tile').forEach(card => {
@@ -245,18 +185,6 @@ const sde2Path = [
       });
     }
     (window as any).filterSections = filterSections;
-
-    function switchTab(tab: 'sde1' | 'sde2') {
-      const sde1 = document.getElementById('path-sde1');
-      const sde2 = document.getElementById('path-sde2');
-      const btn1 = document.getElementById('tab-sde1');
-      const btn2 = document.getElementById('tab-sde2');
-      sde1?.classList.toggle('hidden', tab !== 'sde1');
-      sde2?.classList.toggle('hidden', tab !== 'sde2');
-      btn1?.classList.toggle('active', tab === 'sde1');
-      btn2?.classList.toggle('active', tab === 'sde2');
-    }
-    (window as any).switchTab = switchTab;
 
     // Hero stat strip — count up on load, respecting reduced-motion.
     const reduceMotion = window.matchMedia('(prefers-reduced-motion: reduce)').matches;
