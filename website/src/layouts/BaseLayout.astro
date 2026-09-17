@@ -120,7 +120,7 @@ const currentPath = Astro.url.pathname;
         <button id="search-close" class="search-modal-close" aria-label="Close search">✕</button>
       </div>
       <div id="pagefind-search"></div>
-      <p class="search-modal-hint">Only available after <code>npm run build</code> in dev.</p>
+      <p class="search-modal-hint" hidden>Search index not built yet — run <code>npm run build</code> first.</p>
     </div>
   </div>
 
@@ -364,8 +364,10 @@ const currentPath = Astro.url.pathname;
             const { PagefindUI } = await import('/pagefind/pagefind-ui.js');
             new PagefindUI({ element: '#pagefind-search', showSubResults: true });
             _pagefindLoaded = true;
-            modal.querySelector<HTMLElement>('.search-modal-hint')!.hidden = true;
-          } catch (_) { /* dev mode — pagefind not built yet */ }
+          } catch (_) {
+            const hint = modal.querySelector<HTMLElement>('.search-modal-hint');
+            if (hint) hint.hidden = false;
+          }
         }
         modal.querySelector<HTMLElement>('.pagefind-ui__search-input')?.focus();
       };
