@@ -361,7 +361,8 @@ const currentPath = Astro.url.pathname;
         modal.hidden = false;
         if (!_pagefindLoaded) {
           try {
-            const { PagefindUI } = await import('/pagefind/pagefind-ui.js');
+            await import('/pagefind/pagefind-ui.js');
+            const PagefindUI = (window as any).PagefindUI;
             new PagefindUI({ element: '#pagefind-search', showSubResults: true });
             _pagefindLoaded = true;
           } catch (_) {
