@@ -15,6 +15,7 @@ Deep dives into each database: storage engine internals, WAL, replication, index
 | [mysql-internals.md](./mysql-internals.md) | MySQL / InnoDB | InnoDB storage engine, redo log, undo log, MVCC, B-tree, buffer pool, replication binlog |
 | [mongodb-internals.md](./mongodb-internals.md) | MongoDB | WiredTiger storage engine, oplog, BSON, aggregation pipeline, index types, sharding |
 | [redis-internals.md](./redis-internals.md) | Redis | Data structures internals, RDB/AOF persistence, eviction policies, Lua scripting, cluster |
+| [etcd.md](./etcd.md) | etcd | Raft consensus, MVCC storage model, watch API, compaction/defrag, clustering, performance tuning |
 | [kafka-internals.md](./kafka-internals.md) | Apache Kafka | Log segments, offset management, consumer groups, exactly-once, compaction |
 | [kafka-field-guide.md](./kafka-field-guide.md) | Apache Kafka | Narrative field guide: brokers/controller, topics/partitions, ISR & under-replicated vs. offline, producers, consumer group rebalances, offsets/lag, retention, Schema Registry, Connect, ACLs |
 | [clickhouse-internals.md](./clickhouse-internals.md) | ClickHouse | MergeTree family, columnar storage, compression, materialized views, query execution |
