@@ -165,8 +165,9 @@ Language and concurrency fluency for infra tooling, backend services, and coding
 | [go/concurrency.md](./go/concurrency.md) | Goroutine leaks + pprof detection, worker pool, fan-out/fan-in, pipeline pattern, done-channel cancellation, race detection (`-race`) | SDE-1/2 |
 | [go/context.md](./go/context.md) | context tree/propagation, WithCancel/WithTimeout/WithDeadline, errgroup fan-out with early cancellation, HTTP request cancellation, common mistakes | SDE-1/2 |
 | [go/sync-primitives.md](./go/sync-primitives.md) | Mutex vs RWMutex, sync.Once, sync.Pool, WaitGroup, errgroup, sync.Map, atomic package, Mutex vs Channel decision framework | SDE-1/2 |
+| [go/runtime-scheduler.md](./go/runtime-scheduler.md) | GMP scheduler internals, scheduling loop, work stealing, async preemption (Go 1.14), netpoller, GOMAXPROCS | SDE-2/3 |
 
-**Read order:** README → concurrency → context → sync-primitives
+**Read order:** README → concurrency → context → sync-primitives → runtime-scheduler
 
 ---
 
@@ -349,14 +350,15 @@ Storage engines, WAL, MVCC, replication internals, indexing, and query execution
 | [databases/mongodb-internals.md](./databases/mongodb-internals.md) | WiredTiger cache, journal, oplog internals, aggregation pipeline, index types, write/read concern | SDE-2 |
 | [databases/redis-internals.md](./databases/redis-internals.md) | Data structure encodings, RDB vs AOF, eviction policies, replication, cluster hash slots | SDE-1/2 |
 | [databases/etcd.md](./databases/etcd.md) | Raft consensus, MVCC revisions, watch API (how K8s controllers work), compaction/defrag, clustering, performance tuning | SDE-2 |
-| [databases/kafka-internals.md](./databases/kafka-internals.md) | Log segments, ISR/HW/LEO, producer acks, consumer group offsets, exactly-once, log compaction | SDE-2 |
+| [databases/lsm-trees.md](./databases/lsm-trees.md) | MemTable→SSTable write path, size-tiered/leveled/FIFO compaction, bloom filters, read/write/space amplification, RocksDB/LevelDB/Cassandra ecosystem | SDE-2 |
+| [databases/kafka-internals.md](./databases/kafka-internals.md) | Log segments, zero-copy sendfile, OS page cache, ISR/HW/LEO, producer acks, consumer group offsets, exactly-once, Redpanda | SDE-2 |
 | [databases/kafka-field-guide.md](./databases/kafka-field-guide.md) | Narrative field guide: brokers/controller, topics/partitions, ISR & under-replicated vs. offline, producers, consumer group rebalances, offsets/lag, retention, Schema Registry, Connect, ACLs, UI cheat sheet & glossary | SDE-1/2 |
 | [databases/clickhouse-internals.md](./databases/clickhouse-internals.md) | MergeTree family, columnar storage, granules, vectorized execution, materialized views | SDE-2 |
 | [databases/elasticsearch-internals.md](./databases/elasticsearch-internals.md) | Inverted index, segments, sharding, replication, mappings, Query DSL, aggregations, ILM, performance | SDE-2 |
 | [databases/replication.md](./databases/replication.md) | Sync/async/semi-sync, WAL shipping, logical vs physical, PostgreSQL/MySQL/MongoDB/Redis/Kafka replication, Raft/Paxos, cross-region | SDE-2 |
 | [databases/caching.md](./databases/caching.md) | Cache tiers, eviction policies, cache-aside/write-through/write-behind, Redis vs Memcached, stampede, warming, consistency | SDE-1/2 |
 
-**Read order:** README → postgres-internals → mysql-internals → mongodb-internals → redis-internals → etcd → kafka-internals → kafka-field-guide → clickhouse-internals → elasticsearch-internals → replication → caching
+**Read order:** README → postgres-internals → mysql-internals → mongodb-internals → redis-internals → etcd → lsm-trees → kafka-internals → kafka-field-guide → clickhouse-internals → elasticsearch-internals → replication → caching
 
 ---
 

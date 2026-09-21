@@ -118,7 +118,7 @@ const SECTIONS = [
   },
   {
     slug: 'databases', title: 'Database Internals', order: 14,
-    readOrder: ['README', 'postgres-internals', 'mysql-internals', 'mongodb-internals', 'redis-internals', 'etcd', 'kafka-internals', 'clickhouse-internals', 'elasticsearch-internals', 'replication', 'caching'],
+    readOrder: ['README', 'postgres-internals', 'mysql-internals', 'mongodb-internals', 'redis-internals', 'etcd', 'lsm-trees', 'kafka-internals', 'clickhouse-internals', 'elasticsearch-internals', 'replication', 'caching'],
     sectionPrereqs: [
       { title: 'Linux',      slug: 'linux' },
       { title: 'Networking', slug: 'networking' },
@@ -212,6 +212,18 @@ const SECTIONS = [
                                  { title: 'SRE Concepts',          slug: 'sre/sre-concepts' }],
       'cost-attribution':       [{ title: 'K8s Resource Limits',   slug: 'kubernetes/resource-limits' },
                                  { title: 'GCP Cost Optimization', slug: 'gcp/cost-optimization' }],
+    },
+  },
+  {
+    slug: 'go', title: 'Go', order: 23,
+    readOrder: ['README', 'concurrency', 'context', 'sync-primitives', 'runtime-scheduler'],
+    sectionPrereqs: [
+      { title: 'Linux',      slug: 'linux' },
+      { title: 'Networking', slug: 'networking' },
+    ],
+    prerequisites: {
+      'runtime-scheduler': [{ title: 'Go — Concurrency',      slug: 'go/concurrency' },
+                             { title: 'Go — Sync Primitives', slug: 'go/sync-primitives' }],
     },
   },
   {

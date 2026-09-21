@@ -1481,3 +1481,164 @@ The mermaid diagram earlier in this file already showed the shape of it — 6 pa
   renderConsumerList();
 })();
 </script>
+
+## Why Kafka Is Fast: OS-Level I/O
+
+Kafka's throughput — hundreds of MB/s on commodity hardware — comes from four compounding OS-level properties, not from clever JVM code.
+
+### Sequential Writes
+
+Kafka producers always append to the **end** of the active log segment for a partition. The OS page cache buffers these writes in memory and flushes to disk asynchronously in large sequential batches. Kafka does **not** call `fsync()` per message — it relies on replication (ISR quorum) for durability, and lets the OS flush at its own pace.
+
+Sequential I/O benchmark on spinning disk: **~500MB/s write**. Random I/O on the same disk: **~200 IOPS (~1MB/s effective)**. The difference is three orders of magnitude.
+
+### Zero-Copy with `sendfile()`
+
+When a consumer reads a batch of messages, the naive path copies data four times:
+
+```mermaid
+sequenceDiagram
+    participant Disk
+    participant PageCache as Kernel Page Cache
+    participant UserSpace as Broker User Space
+    participant SocketBuf as Socket Buffer (kernel)
+    participant NIC
+
+    Note over Disk,NIC: Normal read() + write() — 4 copies, 2 context switches
+    Disk->>PageCache: 1. DMA: disk → page cache
+    PageCache->>UserSpace: 2. read() syscall: kernel → user space (CPU copy)
+    UserSpace->>SocketBuf: 3. send() syscall: user space → socket buffer (CPU copy)
+    SocketBuf->>NIC: 4. DMA: socket buffer → NIC
+
+    Note over Disk,NIC: sendfile() — 2 copies, 0 user-space involvement
+    Disk->>PageCache: 1. DMA: disk → page cache
+    PageCache->>NIC: 2. DMA: page cache → NIC (kernel-to-kernel, no user space)
+```
+
+With `sendfile()`, the broker **never copies message bytes into user space** for a passthrough consumer read. The kernel transfers directly from the page cache to the NIC buffer. This is how a single Kafka broker can saturate a 10Gbps NIC without the JVM heap doing any of the work.
+
+Kafka enables zero-copy by design: messages are stored on disk in the exact same binary format they're sent to consumers over the network. No deserialization, no transformation — the broker is a dumb pipe.
+
+### Page Cache as Read Cache
+
+Consumers that follow closely behind producers (real-time consumers) read messages that are **still in the OS page cache** — data that was never evicted to disk from the producer's write. This is a free read from RAM.
+
+The page cache advantage over a JVM heap cache:
+- **OS-managed**: survives broker restarts (the JVM heap is gone, the page cache survives if the data is still warm)
+- **Shared**: multiple consumers reading the same partition share the same cached pages
+- **No GC pressure**: page cache memory doesn't participate in JVM garbage collection
+
+### `mmap` for Index Files
+
+Kafka's `.index` (offset → physical position) and `.timeindex` (timestamp → offset) files are memory-mapped with `mmap()`. A consumer offset lookup is a binary search over a virtual memory region — no `read()` syscall, no kernel/userspace copy. The OS maps the index file into the broker's virtual address space and handles page faults lazily.
+
+### Batching
+
+**Producer side**: `linger.ms` and `batch.size` accumulate multiple records before a single TCP `write()`. Fewer syscalls, larger payloads, better compression ratio (more repetition within a batch).
+
+**Consumer side**: `fetch.min.bytes` and `fetch.max.wait.ms` prevent the consumer from firing a fetch per message. The broker waits until there's enough data, then returns one large response.
+
+Combined, batching means fewer syscalls, fewer TCP round trips, and better `sendfile()` utilization — one `sendfile()` call can transfer thousands of messages at once.
+
+<div class="quiz-card">
+  <p class="quiz-q">A consumer reads 10MB from a Kafka broker. How many times does the 10MB of message data cross the kernel/userspace boundary with zero-copy (sendfile) vs without?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>With <code>sendfile()</code> (zero-copy): <strong>zero times</strong>. The data moves from disk → page cache (DMA, hardware-driven), then page cache → NIC (DMA, hardware-driven). The broker's user-space process is never involved in copying the payload bytes — it only issues the syscall. Without zero-copy (normal read + write): <strong>twice</strong>. First copy: kernel page cache → broker user-space buffer (CPU-driven, on the read() syscall). Second copy: broker user-space buffer → kernel socket buffer (CPU-driven, on the write() syscall). Then a final DMA from socket buffer to NIC — that one's hardware-driven in both paths.</div>
+</div>
+
+---
+
+## Redpanda
+
+Redpanda is a Kafka-API-compatible message broker rewritten in C++ using the **Seastar** framework. It's a drop-in replacement for Kafka clients and producers — no code changes required. No JVM, no ZooKeeper, no KRaft migration.
+
+### Thread-per-Core Architecture
+
+Kafka's JVM broker runs a thread pool where threads share state (partition maps, request queues, memory). Threads compete for locks under load; GC pauses all threads simultaneously.
+
+Redpanda's model: **each CPU core owns a fixed subset of partitions and its own memory shard**. Cores communicate via message passing (Seastar futures/fibers), never shared memory. This eliminates lock contention entirely — there's nothing to lock.
+
+```mermaid
+graph LR
+    subgraph Kafka["Kafka (JVM)"]
+        TP["Thread Pool\n(shared state,\nlocks, GC)"]
+        TP --> P1a["Partition A"]
+        TP --> P1b["Partition B"]
+        TP --> P1c["Partition C"]
+    end
+    subgraph Redpanda["Redpanda (C++ / Seastar)"]
+        C0["Core 0\n(owns P-A)"]
+        C1["Core 1\n(owns P-B)"]
+        C2["Core 2\n(owns P-C)"]
+    end
+```
+
+### No GC Pauses
+
+Kafka's JVM GC (G1 or ZGC) can pause all broker threads simultaneously — even ZGC with its concurrent collection introduces occasional multi-millisecond stop-the-world pauses. These pauses show up as p99/p999 latency spikes in consumers.
+
+Redpanda is C++ with deterministic memory management (RAII, custom allocators). There are no GC pauses. p99 latency stays in the sub-millisecond range even under load.
+
+### Built-In Raft
+
+Kafka's Raft (KRaft, KIP-500) replaced ZooKeeper in 3.0 — a necessary migration that required running a separate controller quorum alongside the broker quorum, with careful upgrade procedures.
+
+Redpanda uses Raft natively from its first release. Every partition group uses Raft for leader election and log replication, coordinated within the same broker processes. There's no separate metadata cluster to operate, no ZooKeeper to manage, no KRaft migration path.
+
+### Kafka vs Redpanda
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="runtime" class="active">Runtime</button>
+    <button data-tab="latency">Latency</button>
+    <button data-tab="ops">Operations</button>
+    <button data-tab="when">When to Choose</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="runtime">
+      <table>
+        <tr><th></th><th>Kafka</th><th>Redpanda</th></tr>
+        <tr><td>Language</td><td>Scala/Java (JVM)</td><td>C++ (Seastar)</td></tr>
+        <tr><td>Scheduling</td><td>Preemptive OS threads</td><td>Cooperative fibers (no context switches)</td></tr>
+        <tr><td>Memory model</td><td>JVM heap + GC</td><td>Manual/RAII, per-core shards</td></tr>
+        <tr><td>Shared state</td><td>Yes (locks)</td><td>No (message passing between cores)</td></tr>
+      </table>
+    </div>
+    <div class="tab-panel" data-tab-panel="latency">
+      <table>
+        <tr><th></th><th>Kafka</th><th>Redpanda</th></tr>
+        <tr><td>p50 produce latency</td><td>1–5ms</td><td>&lt;1ms</td></tr>
+        <tr><td>p99 produce latency</td><td>10–50ms (GC spikes)</td><td>1–5ms</td></tr>
+        <tr><td>GC pause risk</td><td>Yes (even ZGC)</td><td>None</td></tr>
+        <tr><td>Tail latency predictability</td><td>Variable</td><td>Consistent</td></tr>
+      </table>
+    </div>
+    <div class="tab-panel" data-tab-panel="ops">
+      <table>
+        <tr><th></th><th>Kafka</th><th>Redpanda</th></tr>
+        <tr><td>Metadata store</td><td>ZooKeeper → KRaft (3.0+)</td><td>Built-in Raft, day one</td></tr>
+        <tr><td>Upgrade complexity</td><td>ZK→KRaft migration required</td><td>Single binary, rolling upgrade</td></tr>
+        <tr><td>Ecosystem maturity</td><td>Very mature (10+ years)</td><td>Growing (2020+)</td></tr>
+        <tr><td>Kafka Streams</td><td>Native</td><td>Not available (use Flink/ksqlDB)</td></tr>
+        <tr><td>Schema Registry</td><td>Confluent / community</td><td>Built-in</td></tr>
+      </table>
+    </div>
+    <div class="tab-panel" data-tab-panel="when">
+      <strong>Choose Redpanda when:</strong>
+      <ul>
+        <li>Tail latency matters: trading, gaming, real-time bidding — p99 spikes are unacceptable</li>
+        <li>Smaller ops footprint: no ZooKeeper, no KRaft migration, single binary deployment</li>
+        <li>You want Kafka API compatibility without JVM tuning overhead (<code>-Xmx</code>, GC flags, heap dumps)</li>
+        <li>Edge or resource-constrained environments where JVM startup and footprint are costs</li>
+      </ul>
+      <br>
+      <strong>Stay on Kafka when:</strong>
+      <ul>
+        <li>You use Kafka Streams (no direct Redpanda equivalent)</li>
+        <li>Your team has deep Kafka operational expertise — don't pay the relearning cost for marginal latency gains</li>
+        <li>You rely on the Confluent ecosystem (ksqlDB, Kafka Connect sources/sinks, Schema Registry with Confluent features)</li>
+        <li>You're at a scale where Confluent Cloud or MSK operational support is worth more than the latency savings</li>
+      </ul>
+    </div>
+  </div>
+</div>

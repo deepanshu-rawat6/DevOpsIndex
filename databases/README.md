@@ -16,7 +16,8 @@ Deep dives into each database: storage engine internals, WAL, replication, index
 | [mongodb-internals.md](./mongodb-internals.md) | MongoDB | WiredTiger storage engine, oplog, BSON, aggregation pipeline, index types, sharding |
 | [redis-internals.md](./redis-internals.md) | Redis | Data structures internals, RDB/AOF persistence, eviction policies, Lua scripting, cluster |
 | [etcd.md](./etcd.md) | etcd | Raft consensus, MVCC storage model, watch API, compaction/defrag, clustering, performance tuning |
-| [kafka-internals.md](./kafka-internals.md) | Apache Kafka | Log segments, offset management, consumer groups, exactly-once, compaction |
+| [lsm-trees.md](./lsm-trees.md) | LSM Trees | MemTable→SSTable write path, compaction strategies (size-tiered/leveled/FIFO), bloom filters, read/write/space amplification, RocksDB ecosystem |
+| [kafka-internals.md](./kafka-internals.md) | Apache Kafka | Log segments, zero-copy sendfile, OS page cache, offset management, consumer groups, exactly-once, Redpanda comparison |
 | [kafka-field-guide.md](./kafka-field-guide.md) | Apache Kafka | Narrative field guide: brokers/controller, topics/partitions, ISR & under-replicated vs. offline, producers, consumer group rebalances, offsets/lag, retention, Schema Registry, Connect, ACLs |
 | [clickhouse-internals.md](./clickhouse-internals.md) | ClickHouse | MergeTree family, columnar storage, compression, materialized views, query execution |
 | [spark-internals.md](./spark-internals.md) | Apache Spark | Driver/Executor/Shuffle Service architecture, DAG→Stages→Tasks execution model, RDD vs DataFrame vs Dataset, Structured Streaming, operational config, Spark vs BigQuery vs Dataflow |

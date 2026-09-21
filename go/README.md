@@ -326,8 +326,9 @@ func (e *ConfigError) Unwrap() error { return e.Err }
 | [go/concurrency.md](./concurrency.md) | Worker pool, fan-out/fan-in, pipeline, goroutine leaks, race detection | SDE-1/2 |
 | [go/context.md](./context.md) | Cancellation propagation, errgroup, context in HTTP servers, common mistakes | SDE-1/2 |
 | go/sync-primitives.md | Mutex/RWMutex, sync.WaitGroup, sync.Once, atomic, sync.Pool, sync.Map | SDE-2 |
+| [go/runtime-scheduler.md](./runtime-scheduler.md) | GMP scheduler internals, work stealing, async preemption, netpoller, GOMAXPROCS | SDE-2/3 |
 
-**Read order:** README → concurrency → context → sync-primitives
+**Read order:** README → concurrency → context → sync-primitives → runtime-scheduler
 
 ---
 

@@ -764,7 +764,8 @@ pre:hover .copy-btn { opacity: 1; }
   justify-content: space-between;
   margin-bottom: 0.75rem;
 }
-.search-modal-title { font-size: 0.75rem; font-weight: 600; color: var(--text-faint); text-transform: uppercase; letter-spacing: 0.06em; }
+.search-modal-title { font-size: 0.75rem; font-weight: 700; color: var(--accent); font-family: var(--mono); letter-spacing: 0.02em; }
+.search-modal-hint-inline { font-size: 0.68rem; color: var(--text-faint); font-family: var(--mono); margin-left: auto; margin-right: 0.75rem; }
 .search-modal-close { background: none; border: none; cursor: pointer; color: var(--text-faint); font-size: 1rem; padding: 0.2rem 0.4rem; border-radius: 0.25rem; }
 .search-modal-close:hover { color: var(--text); background: var(--surface-raised); }
 .search-modal-hint { font-size: 0.72rem; color: var(--text-faint); margin-top: 0.75rem; text-align: center; }
@@ -777,3 +778,93 @@ pre:hover .copy-btn { opacity: 1; }
 }
 .search-input::placeholder { color: var(--text-faint); }
 .search-input:focus { outline: none; border-color: var(--accent); }
+
+/* ── Pagefind UI — override defaults to match site theme ───── */
+#pagefind-search {
+  --pagefind-ui-scale: 0.9;
+  --pagefind-ui-primary: var(--accent);
+  --pagefind-ui-text: var(--text);
+  --pagefind-ui-background: var(--surface);
+  --pagefind-ui-border: var(--border);
+  --pagefind-ui-tag: var(--surface-raised);
+  --pagefind-ui-border-width: 1px;
+  --pagefind-ui-border-radius: 6px;
+  --pagefind-ui-font: ui-monospace, "JetBrains Mono", "SF Mono", Menlo, Consolas, monospace;
+}
+/* Input */
+#pagefind-search .pagefind-ui__search-input {
+  background: var(--surface-sunken) !important;
+  color: var(--text) !important;
+  border-color: var(--border) !important;
+  box-shadow: none !important;
+}
+#pagefind-search .pagefind-ui__search-input:focus {
+  border-color: var(--accent) !important;
+  outline: none !important;
+  box-shadow: 0 0 0 2px var(--accent-line) !important;
+}
+/* Clear button */
+#pagefind-search .pagefind-ui__search-clear {
+  background: var(--surface-raised) !important;
+  color: var(--text-faint) !important;
+  border-radius: 4px !important;
+}
+#pagefind-search .pagefind-ui__search-clear:hover {
+  color: var(--text) !important;
+  background: var(--border) !important;
+}
+/* Results */
+#pagefind-search .pagefind-ui__results-area { margin-top: 0.5rem; }
+#pagefind-search .pagefind-ui__message {
+  font-size: 0.72rem;
+  color: var(--text-faint) !important;
+  padding: 0.5rem 0;
+}
+#pagefind-search .pagefind-ui__result {
+  border-color: var(--border) !important;
+  padding: 0.75rem 0 !important;
+}
+#pagefind-search .pagefind-ui__result-title { margin-bottom: 0.25rem; }
+#pagefind-search .pagefind-ui__result-link {
+  font-size: 0.875rem !important;
+  font-weight: 600 !important;
+  color: var(--text) !important;
+  text-decoration: none !important;
+}
+#pagefind-search .pagefind-ui__result-link:hover { color: var(--accent) !important; }
+#pagefind-search .pagefind-ui__result-excerpt {
+  font-size: 0.78rem !important;
+  color: var(--text-dim) !important;
+  line-height: 1.55 !important;
+  font-family: inherit !important;
+}
+/* Replace harsh yellow highlight with soft accent */
+#pagefind-search mark {
+  background: color-mix(in srgb, var(--accent) 18%, transparent) !important;
+  color: var(--text) !important;
+  border-radius: 2px;
+  padding: 0 2px;
+}
+/* Sub-results */
+#pagefind-search .pagefind-ui__result-nested {
+  border-color: var(--border-soft) !important;
+  padding-left: 0.75rem !important;
+}
+#pagefind-search .pagefind-ui__result-nested .pagefind-ui__result-link {
+  font-size: 0.78rem !important;
+  font-weight: 500 !important;
+  color: var(--text-dim) !important;
+}
+/* Load-more button */
+#pagefind-search .pagefind-ui__button {
+  background: var(--surface-raised) !important;
+  border-color: var(--border) !important;
+  color: var(--text-dim) !important;
+  font-size: 0.78rem !important;
+  padding: 0.4rem 1rem !important;
+  margin-top: 0.5rem !important;
+}
+#pagefind-search .pagefind-ui__button:hover {
+  border-color: var(--accent) !important;
+  color: var(--accent) !important;
+}
