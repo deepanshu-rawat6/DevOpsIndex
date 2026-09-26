@@ -55,7 +55,7 @@ Contributing a new guide or retrofitting an old one? [`website/COMPONENTS.md`](.
 17. System Design            → scaling, CAP/PACELC, rate limiting, async patterns
 18. SRE & Debugging          → production incident runbooks, on-call tooling
 19. Coding Practice          → DSA implementations in Go & Python (B-trees, skip lists, LRU cache, rate limiter, etc.)
-20. Platform Engineering     → IDP concepts, Backstage, Crossplane, self-service, multi-tenancy, DORA metrics, cost attribution
+20. Platform Engineering     → IDP concepts, Backstage, Crossplane, self-service, multi-tenancy, DORA metrics, cost attribution, workflow automation (n8n, Temporal), AI SRE agents (k8sgpt, Robusta, OpenSRE)
 21. Security Engineering     → Container security, supply chain (SLSA/Sigstore), secrets management (Vault/ESO), SAST/DAST, Kubernetes security (OPA/Kyverno/Falco)
 22. eBPF                     → BPF fundamentals, Cilium CNI, Tetragon runtime security, bpftrace production debugging
 ```
@@ -439,6 +439,27 @@ DSA implementations in Go **and Python**, relevant to backend/infra engineering 
 | [coding-practice/bloom-filter.md](./coding-practice/bloom-filter.md) | False-positive rate math, double hashing, infra use cases (DB lookup pre-check, stream dedup) | SDE-2 |
 
 **Read order:** README → concurrent-patterns → btree → skip-list → lru-cache → rate-limiter-implementations → consistent-hashing → bloom-filter
+
+---
+
+## 20. Platform Engineering
+
+Internal Developer Platforms, automation engines, and AI SRE agents.
+
+| File | Topics | Level |
+|------|--------|-------|
+| [platform-engineering/README.md](./platform-engineering/README.md) | What is Platform Engineering, CNCF maturity model, Team Topologies, IDP capabilities | SDE-2 |
+| [platform-engineering/idp-concepts.md](./platform-engineering/idp-concepts.md) | Golden paths, DORA metrics, SPACE framework, developer experience measurement | SDE-2 |
+| [platform-engineering/backstage.md](./platform-engineering/backstage.md) | Service catalog, TechDocs, scaffolder templates, plugins | SDE-2 |
+| [platform-engineering/crossplane.md](./platform-engineering/crossplane.md) | K8s-native IaC, composite resources, claim-based self-service | SDE-2 |
+| [platform-engineering/developer-self-service.md](./platform-engineering/developer-self-service.md) | ApplicationSets, PR environments, self-service provisioning patterns | SDE-2 |
+| [platform-engineering/multi-tenancy.md](./platform-engineering/multi-tenancy.md) | vcluster, Capsule, HNC, namespace isolation, RBAC patterns | SDE-2 |
+| [platform-engineering/platform-observability.md](./platform-engineering/platform-observability.md) | DORA metrics pipeline, Keptn, deployment frequency tracking | SDE-2 |
+| [platform-engineering/cost-attribution.md](./platform-engineering/cost-attribution.md) | Kubecost, OpenCost, FinOps, showback vs chargeback | SDE-2 |
+| [platform-engineering/workflow-automation.md](./platform-engineering/workflow-automation.md) | n8n (visual workflows, K8s deploy), Temporal (durable execution, compensation), Argo Workflows (K8s-native CNCF, DAG pods), Kestra (YAML-first, 500+ plugins), comparison table | SDE-2 |
+| [platform-engineering/ai-sre-agents.md](./platform-engineering/ai-sre-agents.md) | k8sgpt (cluster scanning, operator, air-gap), Robusta (playbooks, HolmesGPT), OpenSRE (agentic incident investigation, 60+ integrations), Coroot (eBPF auto-instrumentation, AI root cause), agentic SRE patterns | SDE-2/3 |
+
+**Read order:** README → idp-concepts → backstage → crossplane → developer-self-service → multi-tenancy → platform-observability → cost-attribution → workflow-automation → ai-sre-agents
 
 ---
 

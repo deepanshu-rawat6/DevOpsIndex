@@ -110,6 +110,8 @@ graph LR
     IDP --> CI["CI/CD<br/>(GitHub Actions + ArgoCD)"]:::cap
     IDP --> COST["Cost Attribution<br/>(Kubecost / OpenCost)"]:::cap
     IDP --> MT["Multi-tenancy<br/>(namespaces, Capsule, vcluster)"]:::cap
+    IDP --> WA["Workflow Automation<br/>(n8n, Temporal, Argo Workflows, Kestra)"]:::cap
+    IDP --> AI["AI SRE Agents<br/>(k8sgpt, Robusta, OpenSRE, Coroot)"]:::cap
 ```
 
 Key insight: the IDP is only as good as its **developer experience (DX)**. DX means:
@@ -139,8 +141,10 @@ graph LR
     F["multi-tenancy<br/>vcluster, Capsule, HNC"]
     G["platform-observability<br/>DORA metrics pipeline"]
     H["cost-attribution<br/>Kubecost, OpenCost, FinOps"]
+    I["workflow-automation<br/>n8n, Temporal"]
+    J["ai-sre-agents<br/>k8sgpt, Robusta, OpenSRE"]
 
-    A --> B --> C --> D --> E --> F --> G --> H
+    A --> B --> C --> D --> E --> F --> G --> H --> I --> J
 ```
 
 **Prerequisites**: Kubernetes (workloads, RBAC, networking, custom resources), CI/CD (ArgoCD, GitOps model), IaC (Terraform at minimum).

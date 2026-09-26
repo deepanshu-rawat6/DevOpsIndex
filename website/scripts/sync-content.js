@@ -197,7 +197,7 @@ const SECTIONS = [
   },
   {
     slug: 'platform-engineering', title: 'Platform Engineering', order: 20,
-    readOrder: ['README', 'idp-concepts', 'backstage', 'crossplane', 'developer-self-service', 'multi-tenancy', 'platform-observability', 'cost-attribution'],
+    readOrder: ['README', 'idp-concepts', 'backstage', 'crossplane', 'developer-self-service', 'multi-tenancy', 'platform-observability', 'cost-attribution', 'workflow-automation', 'ai-sre-agents'],
     sectionPrereqs: [
       { title: 'Kubernetes', slug: 'kubernetes' },
       { title: 'CI/CD',      slug: 'cicd' },
@@ -212,6 +212,10 @@ const SECTIONS = [
                                  { title: 'SRE Concepts',          slug: 'sre/sre-concepts' }],
       'cost-attribution':       [{ title: 'K8s Resource Limits',   slug: 'kubernetes/resource-limits' },
                                  { title: 'GCP Cost Optimization', slug: 'gcp/cost-optimization' }],
+      'workflow-automation':    [{ title: 'CI/CD',                 slug: 'cicd' },
+                                 { title: 'Kubernetes',            slug: 'kubernetes' }],
+      'ai-sre-agents':          [{ title: 'Monitoring',            slug: 'monitoring' },
+                                 { title: 'SRE Concepts',          slug: 'sre/sre-concepts' }],
     },
   },
   {

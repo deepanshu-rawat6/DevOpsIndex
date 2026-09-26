@@ -363,3 +363,251 @@ spec:
   <button class="quiz-reveal">Reveal answer</button>
   <div class="quiz-a" hidden>A replica set client needs to know about — and be able to reach — every member individually, because it has to track who's currently primary and be able to route reads to specific secondaries under a given readPreference. A single virtual endpoint can't distinguish one member from another, so the driver is handed the per-pod headless DNS names and figures out the topology itself via replicaSet=mongodb.</div>
 </div>
+
+---
+
+## Pod Anti-Affinity & Pod Disruption Budget
+
+Without pod anti-affinity, Kubernetes can schedule all 3 MongoDB replicas on the same node — losing that node loses the entire replica set. Without a PodDisruptionBudget, a rolling node drain can evict multiple replicas simultaneously.
+
+**Add anti-affinity to the MongoDBCommunity CR** (under `spec.statefulSetConfiguration`):
+
+```yaml
+statefulSetConfiguration:
+  spec:
+    template:
+      spec:
+        affinity:
+          podAntiAffinity:
+            requiredDuringSchedulingIgnoredDuringExecution:   # hard rule — refuse to schedule if can't spread
+            - labelSelector:
+                matchExpressions:
+                - key: app
+                  operator: In
+                  values:
+                  - mongodb
+              topologyKey: kubernetes.io/hostname              # one replica per node
+            preferredDuringSchedulingIgnoredDuringExecution:   # soft rule — prefer different AZs
+            - weight: 100
+              podAffinityTerm:
+                labelSelector:
+                  matchExpressions:
+                  - key: app
+                    operator: In
+                    values:
+                    - mongodb
+                topologyKey: topology.kubernetes.io/zone
+```
+
+**PodDisruptionBudget** — prevents draining more than one MongoDB node at a time:
+
+```yaml
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: mongodb-pdb
+  namespace: mongodb
+spec:
+  minAvailable: 2        # always keep at least primary + one secondary up
+  selector:
+    matchLabels:
+      app: mongodb       # matches pods created by the operator
+```
+
+<div class="quiz-card">
+  <p class="quiz-q">A node drain evicts mongodb-0 (primary) and mongodb-1 (secondary) simultaneously on a 3-member replica set with no PDB. What is the cluster state immediately after?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The replica set loses 2 of 3 members simultaneously, dropping below quorum (majority = 2). The surviving member (mongodb-2) cannot elect a new primary without a majority vote — it stays secondary. The cluster goes read-only: reads may succeed with readPreference: secondary, but writes are rejected until at least one evicted pod reschedules and rejoins. A PDB prevents this by blocking the drain of a second node while the first's pod is not yet Ready again.</div>
+</div>
+
+---
+
+## WiredTiger Cache for Kubernetes
+
+The MongoDB internals file explains the 50%-of-RAM rule. On Kubernetes, the relevant RAM is the **container memory limit**, not the node's total RAM.
+
+If `cacheSizeGB` is not set, WiredTiger defaults to `(total RAM − 1GB) / 2`. On a node with 64GB RAM, a container with a 12Gi memory limit but no `cacheSizeGB` will attempt to use ~31GB — it triggers the OOMKiller almost immediately.
+
+```yaml
+# In MongoDBCommunity spec:
+spec:
+  additionalMongodConfig:
+    storage.wiredTiger.engineConfig.cacheSizeGB: 6    # ~50% of container memory limit (12Gi)
+  statefulSetConfiguration:
+    spec:
+      template:
+        spec:
+          containers:
+          - name: mongod
+            resources:
+              requests:
+                memory: "8Gi"
+                cpu: "2"
+              limits:
+                memory: "12Gi"    # cacheSizeGB should be ~50% of this value
+                cpu: "4"
+```
+
+Rule: `cacheSizeGB ≈ (container memory limit in GB) × 0.5`. Leave headroom for the connection pool, sort buffers, and the OS page cache.
+
+<div class="quiz-card">
+  <p class="quiz-q">A MongoDB pod has a memory limit of 8Gi and no cacheSizeGB set. The node has 64GB RAM. What does WiredTiger use as its cache size, and what happens?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>WiredTiger reads total system RAM (64GB) and sets cache to (64−1)/2 ≈ 31.5GB. The container's memory limit is 8Gi — allocating 31GB inside an 8GB container immediately triggers the OOM killer, which terminates mongod. The pod restarts, hits OOM again, and enters CrashLoopBackOff. Always set cacheSizeGB explicitly to roughly 50% of the container memory limit.</div>
+</div>
+
+---
+
+## Prometheus Monitoring
+
+The Community Operator doesn't deploy a MongoDB Exporter — deploy it separately.
+
+**Create the monitoring user** (run inside the primary pod):
+
+```javascript
+db.getSiblingDB("admin").createUser({
+  user: "prometheus",
+  pwd: "monitoring-password",
+  roles: [
+    { role: "clusterMonitor", db: "admin" },
+    { role: "read", db: "local" }
+  ]
+})
+```
+
+**Deploy mongodb-exporter** (Percona's exporter):
+
+```yaml
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: mongodb-exporter
+  namespace: mongodb
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: mongodb-exporter
+  template:
+    metadata:
+      labels:
+        app: mongodb-exporter
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9216"
+    spec:
+      containers:
+      - name: mongodb-exporter
+        image: percona/mongodb_exporter:0.40
+        args:
+        - --mongodb.uri=$(MONGODB_URI)
+        - --collect-all          # enable all available collectors
+        - --compatible-mode      # include legacy metric names for older dashboards
+        env:
+        - name: MONGODB_URI
+          valueFrom:
+            secretKeyRef:
+              name: mongodb-exporter-secret
+              key: uri
+        ports:
+        - containerPort: 9216
+---
+apiVersion: v1
+kind: Secret
+metadata:
+  name: mongodb-exporter-secret
+  namespace: mongodb
+stringData:
+  # List all replica set members — driver handles primary discovery and failover
+  uri: "mongodb://prometheus:monitoring-password@mongodb-0.mongodb-svc.mongodb.svc.cluster.local:27017,mongodb-1.mongodb-svc.mongodb.svc.cluster.local:27017,mongodb-2.mongodb-svc.mongodb.svc.cluster.local:27017/admin?replicaSet=mongodb"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: mongodb-exporter
+  namespace: mongodb
+  labels:
+    app: mongodb-exporter
+spec:
+  ports:
+  - name: metrics
+    port: 9216
+  selector:
+    app: mongodb-exporter
+```
+
+**Prometheus ServiceMonitor** (Prometheus Operator):
+
+```yaml
+apiVersion: monitoring.coreos.com/v1
+kind: ServiceMonitor
+metadata:
+  name: mongodb-exporter
+  namespace: mongodb
+spec:
+  selector:
+    matchLabels:
+      app: mongodb-exporter
+  endpoints:
+  - port: metrics
+    interval: 30s
+```
+
+**Key alert rules:**
+
+```promql
+# No PRIMARY member — replica set is read-only
+sum(mongodb_rs_members_state{state="PRIMARY"}) == 0
+
+# Secondary replication lag > 30s
+max(mongodb_rs_members_optimeDate{state="SECONDARY"})
+  - max(mongodb_rs_members_optimeDate{state="PRIMARY"}) > 30
+
+# Connection pool > 80% utilized
+mongodb_connections{state="current"} / mongodb_connections{state="available"} > 0.8
+
+# WiredTiger cache dirty ratio > 20% (memory pressure)
+mongodb_wiredtiger_cache_dirty_bytes
+  / mongodb_wiredtiger_cache_bytes_currently_in_cache > 0.2
+```
+
+<div class="quiz-card">
+  <p class="quiz-q">The mongodb-exporter URI points only at mongodb-0's pod DNS name. After a failover, mongodb-1 becomes primary. Does the exporter keep reporting correctly?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No — the exporter is connected to mongodb-0 specifically. After failover, mongodb-0 is now a secondary, so the exporter's primary-state metrics will be wrong, and if mongodb-0 restarts it loses the connection entirely. The fix is to list all replica set members in the URI with replicaSet= (as shown above): the MongoDB driver discovers which member is currently primary and reconnects automatically after failover.</div>
+</div>
+
+---
+
+## Rolling Upgrade via Operator
+
+The Community Operator performs rolling upgrades when `spec.version` changes:
+
+```bash
+# Patch the MongoDBCommunity resource to the new version
+kubectl -n mongodb patch mongodbcommunity mongodb \
+  --type='merge' \
+  -p '{"spec":{"version":"7.0.5"}}'
+
+# Watch upgrade progress
+kubectl -n mongodb get mongodbcommunity -w
+# NAME      PHASE      VERSION
+# mongodb   Updating   7.0.4    ← rolling pods one at a time
+# mongodb   Running    7.0.5    ← complete
+```
+
+**What the operator does:** restarts pods one at a time — secondaries first, waits for each to reach Running + Ready, then triggers a primary stepdown and updates the primary last.
+
+**Verify each member upgraded:**
+
+```bash
+for pod in mongodb-0 mongodb-1 mongodb-2; do
+  echo -n "$pod: "
+  kubectl -n mongodb exec $pod -- mongosh --eval "db.version()" --quiet
+done
+# mongodb-0: 7.0.5
+# mongodb-1: 7.0.5
+# mongodb-2: 7.0.5
+```
+
+**Rollback:** MongoDB does not support downgrading major versions. For a minor version rollback, patch `spec.version` back to the previous version — the operator applies the same rolling restart in reverse.

@@ -397,3 +397,308 @@ rate(etcd_server_leader_changes_seen_total[1h]) > 1
   <button class="quiz-reveal">Reveal answer</button>
   <div class="quiz-a" hidden>The slow volume causes every etcd write to take 50ms+ to fsync the WAL. That delays the leader's ability to send timely AppendEntries heartbeats to followers. Followers that don't receive a heartbeat within election-timeout (default 1000ms) conclude the leader is dead and start an election. During a re-election (typically 1–2 seconds) etcd stops accepting writes. The API server — unable to write to etcd — returns 503s for that window. If fsync stays slow, this cycle repeats: slow disk → missed heartbeats → frequent re-elections → repeated API outages.</div>
 </div>
+
+---
+
+## Lease System
+
+Leases give keys a TTL without per-key expiry (which would require a separate timer per key). A client grants a lease with a TTL, attaches any number of keys to it with `--lease`, and must call `keep-alive` before the TTL expires — otherwise the lease and all attached keys are atomically deleted. This is how Kubernetes pod leases, node heartbeats, and leader election work.
+
+```bash
+# Grant a lease — returns a lease ID
+etcdctl lease grant 30
+# lease 694d6c3fe1c6b80a granted with TTL(30s)
+
+# Attach a key to the lease
+etcdctl put /leader/my-app "node-1" --lease=694d6c3fe1c6b80a
+
+# Inspect a lease (remaining TTL, attached keys)
+etcdctl lease timetolive 694d6c3fe1c6b80a --keys
+# TTL=28, granted-TTL=30, Keys=[/leader/my-app]
+
+# Keep-alive: renew lease (call before TTL expires)
+etcdctl lease keep-alive 694d6c3fe1c6b80a
+# lease 694d6c3fe1c6b80a keepalived with TTL(30)
+# (blocks and re-sends every TTL/3 seconds until Ctrl-C)
+
+# Revoke lease explicitly (immediately deletes all attached keys)
+etcdctl lease revoke 694d6c3fe1c6b80a
+```
+
+**Distributed lock pattern:**
+
+```bash
+# 1. Grant a short-lived lease (your "lock TTL")
+LEASE=$(etcdctl lease grant 15 | awk '/lease/{print $2}')
+
+# 2. Try to put the lock key only if it doesn't exist (compare-and-swap via txn)
+etcdctl txn <<EOF
+create("/locks/db-migration") = "0"
+
+put /locks/db-migration "node-1" --lease=$LEASE
+
+
+EOF
+# Returns "SUCCESS" if key didn't exist (created) or "FAILURE" if another holder exists
+
+# 3. Keep-alive loop while holding the lock
+etcdctl lease keep-alive $LEASE &
+
+# 4. Do critical work...
+
+# 5. Release: revoke lease (atomically deletes the lock key)
+etcdctl lease revoke $LEASE
+```
+
+**Leader election with `etcdctl elect`:**
+
+```bash
+# Blocks until this caller wins the election (no other holder of "my-app" key)
+etcdctl elect my-app node-1
+# node-1 elected — blocks, keeping the lease alive until Ctrl-C or failure
+```
+
+<div class="quiz-card">
+  <p class="quiz-q">A process holds a lease with TTL=30 and calls keep-alive every 10 seconds. The process freezes for 35 seconds (GC pause, swap). What happens to the attached keys?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The lease expires after 30 seconds with no keep-alive, and etcd atomically deletes all keys attached to that lease. When the frozen process resumes, its lease ID is gone — it must grant a new lease, re-attach keys, and re-establish its role. This is intentional: etcd uses lease expiry as a failure-detection mechanism. If a process can't keep-alive, it's assumed dead, and its lock/leader key should be released so another holder can take over. The window where a false positive eviction can occur (process alive but slow) is a known tradeoff of TTL-based leases.</div>
+</div>
+
+---
+
+## Transactions (Compare-and-Swap)
+
+`etcdctl txn` executes a conditional multi-key operation atomically: if all conditions pass, the success ops run; otherwise the failure ops run. Nothing in between.
+
+```bash
+# Syntax: conditions, blank line, success ops, blank line, failure ops
+etcdctl txn <<EOF
+value("/config/active-dc") = "us-east-1"
+
+put /config/active-dc "us-west-2"
+
+put /config/failover-attempted "true"
+EOF
+# SUCCESS: /config/active-dc was "us-east-1" → switched to "us-west-2"
+# FAILURE: was something else → wrote failover-attempted flag instead
+```
+
+**Condition operators:**
+
+| Condition | Meaning |
+|---|---|
+| `value("key") = "val"` | Key's current value equals val |
+| `mod("key") = "rev"` | Key's modRevision equals rev (optimistic locking) |
+| `create("key") = "0"` | Key does not exist (createRevision = 0) |
+| `version("key") = "N"` | Key has been written exactly N times |
+
+**Optimistic locking with `mod` — concurrent update guard:**
+
+```bash
+# Read current state + revision
+etcdctl get /config/settings -w json | jq '{value: .kvs[0].value, mod: .kvs[0].mod_revision}'
+# { "value": "eyJtYXhfd29ya2Vyc...", "mod": 47 }
+
+# Update only if nobody else wrote it since we read it
+etcdctl txn <<EOF
+mod("/config/settings") = "47"
+
+put /config/settings "{\"max_workers\":20}"
+
+EOF
+# FAILURE → re-read and retry
+```
+
+<div class="quiz-card">
+  <p class="quiz-q">Two processes read /config/settings at modRevision=47 and both issue a txn guarded by mod("/config/settings") = "47". Can both succeed?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. The first txn to commit changes modRevision to 48. When the second txn arrives, the condition mod("/config/settings") = "47" is now false — the revision doesn't match — so the second txn executes its failure branch. This is identical to SQL's optimistic locking with a version column: the loser must re-read the new state and retry. Because etcd processes writes serially through Raft, there is no scenario where both txns see revision 47 and both commit.</div>
+</div>
+
+---
+
+## Auth & RBAC
+
+etcd's built-in auth is prefix-based: roles grant read or write permissions on key prefixes, and users are assigned roles. Auth is off by default; enabling it requires creating a root user first.
+
+```bash
+# 1. Create root user BEFORE enabling auth (or you lock yourself out)
+etcdctl user add root
+# Enter password: xxxxxxxx
+
+# 2. Grant root role to root user
+etcdctl user grant-role root root
+
+# 3. Enable auth — all subsequent calls require credentials
+etcdctl auth enable
+# Authentication Enabled
+
+# 4. All commands now need --user or env var
+export ETCDCTL_USER=root:password
+
+# Create a read-only role for a monitoring service
+etcdctl role add etcd-reader
+etcdctl role grant-permission etcd-reader read "" --prefix   # read any key
+
+# Create a role for the K8s API server
+etcdctl role add kube-apiserver
+etcdctl role grant-permission kube-apiserver readwrite /registry/ --prefix
+
+# Create users and assign roles
+etcdctl user add monitoring
+etcdctl user grant-role monitoring etcd-reader
+
+etcdctl user add kube-apiserver
+etcdctl user grant-role kube-apiserver kube-apiserver
+
+# Inspect
+etcdctl user list
+etcdctl role list
+etcdctl user get monitoring      # shows assigned roles
+etcdctl role get etcd-reader     # shows granted permissions
+```
+
+<div class="quiz-card">
+  <p class="quiz-q">etcdctl auth enable is called before creating any user. What happens?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>etcd refuses to enable auth without a root user existing first. If auth were enabled with no root, no one would be able to administer the cluster — you'd be permanently locked out. etcd enforces: a user named "root" with the built-in "root" role must exist before auth enable succeeds. Always create root first, verify you can authenticate as root, then enable auth — in that order.</div>
+</div>
+
+---
+
+## TLS Setup
+
+etcd has two independent TLS channels: **peer TLS** (etcd-to-etcd, port 2380) and **client TLS** (clients-to-etcd, port 2379). Both use the same CA but have separate cert/key pairs.
+
+**Generate CA and certs (openssl):**
+
+```bash
+# 1. Create CA
+openssl genrsa -out ca.key 4096
+openssl req -new -x509 -key ca.key -out ca.crt -days 3650 \
+  -subj "/CN=etcd-ca"
+
+# 2. Per-member peer cert (repeat for each node — change IP/hostname)
+#    SAN must include both hostname and IP — etcd verifies both
+cat > etcd-1-peer-ext.cnf <<EOF
+subjectAltName=DNS:etcd-1,DNS:etcd-1.example.com,IP:10.0.0.1,IP:127.0.0.1
+EOF
+
+openssl genrsa -out etcd-1-peer.key 2048
+openssl req -new -key etcd-1-peer.key -out etcd-1-peer.csr \
+  -subj "/CN=etcd-1"
+openssl x509 -req -in etcd-1-peer.csr -CA ca.crt -CAkey ca.key \
+  -CAcreateserial -out etcd-1-peer.crt -days 365 \
+  -extfile etcd-1-peer-ext.cnf
+
+# 3. Client cert (for etcdctl, K8s API server — no IP SAN needed for clients)
+openssl genrsa -out client.key 2048
+openssl req -new -key client.key -out client.csr -subj "/CN=etcd-client"
+openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key \
+  -CAcreateserial -out client.crt -days 365
+
+# 4. Distribute certs to each node
+scp ca.crt client.crt client.key root@10.0.0.1:/etc/etcd/tls/
+scp etcd-1-peer.crt etcd-1-peer.key root@10.0.0.1:/etc/etcd/tls/
+# Repeat for etcd-2, etcd-3 with their respective peer certs
+
+# 5. Set permissions
+chmod 600 /etc/etcd/tls/*.key
+chown -R etcd:etcd /etc/etcd/tls/
+```
+
+**The six TLS flags:**
+
+| Flag | Channel | What it does |
+|---|---|---|
+| `--peer-cert-file` | Peer | This member's cert presented to other etcd members |
+| `--peer-key-file` | Peer | Private key for peer cert |
+| `--peer-trusted-ca-file` | Peer | CA to verify other members' peer certs |
+| `--cert-file` | Client | Cert presented to clients |
+| `--key-file` | Client | Private key for client cert |
+| `--trusted-ca-file` | Client | CA to verify client certs (needed only with `--client-cert-auth`) |
+
+**etcdctl environment shortcuts (avoids repeating flags every command):**
+
+```bash
+export ETCDCTL_CACERT=/etc/etcd/tls/ca.crt
+export ETCDCTL_CERT=/etc/etcd/tls/client.crt
+export ETCDCTL_KEY=/etc/etcd/tls/client.key
+export ETCDCTL_ENDPOINTS=https://10.0.0.1:2379,https://10.0.0.2:2379,https://10.0.0.3:2379
+export ETCDCTL_API=3
+
+# Now works without --cacert/--cert/--key on every call
+etcdctl endpoint health
+```
+
+**Cert rotation (rolling, no downtime):**
+
+```bash
+# 1. Issue new cert with new expiry (keep same CA)
+# 2. Add both old and new cert to trusted-ca-file (bundle) and restart one member
+# 3. Verify cluster healthy after each member restart
+# 4. Once all members accept new cert, remove old cert from bundle, restart again
+```
+
+<div class="quiz-card">
+  <p class="quiz-q">The peer cert for etcd-1 was generated with only the IP (10.0.0.1) in its SAN — not the hostname. etcd-2 connects to etcd-1 using its hostname (etcd-1.internal). What happens?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>TLS handshake fails with a certificate verification error. Go's TLS library (which etcd uses) verifies that the name used to connect matches either an IP SAN or a DNS SAN in the peer's certificate. If etcd-2 dials etcd-1.internal and the cert only has IP:10.0.0.1, the hostname doesn't match any SAN — connection refused. This is why the cert generation must include both the IP and every hostname the member might be reached by, and why you must test connectivity with both the DNS name and IP before going to production.</div>
+</div>
+
+---
+
+## Additional Operations Reference
+
+Additions to the operations cookbook (beyond the existing snapshot, compact, defrag, health check commands):
+
+```bash
+# Transfer leadership before maintenance (graceful — less disruption than stopping)
+etcdctl move-leader <target-member-id>
+# Get member IDs from: etcdctl member list
+
+# Decommission a member cleanly
+etcdctl member remove <member-id>
+# Stop the etcd process on that node BEFORE running this — otherwise it tries to reconnect
+
+# Force-remove a dead member that can't be reached (last resort for quorum recovery)
+# Only safe when the cluster has quorum without the dead member
+etcdctl member remove <dead-member-id>   # same command — works even if member unreachable
+
+# Performance benchmark (built-in)
+etcdctl check perf --load=s   # s=small, m=medium, l=large, xl=extra-large
+# Reports: requests per second, latency p50/p99/p999
+
+# Distributed lock (blocks until lock acquired, runs command while holding it)
+etcdctl lock my-lock -- /path/to/command
+
+# Leader election (blocks until elected; name is the election namespace)
+etcdctl elect my-election proposal-value
+
+# Count keys by K8s resource type (useful for quota debugging)
+etcdctl get /registry/ --prefix --keys-only \
+  | awk -F/ 'NF>3{print $3}' | sort | uniq -c | sort -rn
+
+# Watch for config changes in real time starting from current revision
+etcdctl watch /registry/ --prefix --rev=$(etcdctl endpoint status \
+  --write-out=json | jq '.[0].Status.header.revision')
+```
+
+**Additional PromQL alerts:**
+
+```promql
+# Proposals failed — Raft couldn't commit entries (leadership instability)
+rate(etcd_server_proposals_failed_total[5m]) > 0
+
+# Peer round-trip latency p99 — alert > 50ms (cross-region: > 150ms)
+histogram_quantile(0.99, rate(etcd_network_peer_round_trip_time_seconds_bucket[5m])) > 0.05
+
+# Slow apply — server can't apply committed entries fast enough (CPU/disk)
+rate(etcd_server_slow_apply_total[5m]) > 0
+
+# gRPC request errors — alert if error rate > 1%
+sum(rate(grpc_server_handled_total{grpc_code!="OK"}[5m])) /
+sum(rate(grpc_server_handled_total[5m])) > 0.01
+```
+
+Grafana dashboard: import ID **3070** (etcd by Prometheus community) or the CoreOS etcd mixin dashboard from `github.com/etcd-io/etcd/contrib/mixin`.

@@ -1405,3 +1405,203 @@ Without hash tag:
 With hash tag (curly braces define the slot key):
   MGET {user:1}:name {user:1}:email  → both hash to "user:1" → same slot → works
 ```
+
+---
+
+## List-Based Queue
+
+The simplest Redis queue: producer pushes to the head of a list, consumer blocks waiting for work at the tail. Zero setup, no consumer groups, no persistence beyond RDB/AOF.
+
+```bash
+# Producer: push job to queue head (left push)
+LPUSH jobs:email '{"to":"user@example.com","template":"welcome","user_id":42}'
+LPUSH jobs:email '{"to":"alice@example.com","template":"reset"}'
+# Queue now: [reset, welcome]  (FIFO: BRPOP returns welcome first)
+
+# Consumer: block up to 30s waiting for work (right pop — FIFO)
+BRPOP jobs:email 30
+# Returns: ["jobs:email", "{\"to\":\"user@example.com\"...}"]
+# Returns nil on timeout — loop and call again
+
+# Queue depth (how much backlog?)
+LLEN jobs:email
+
+# Priority queue — BRPOP takes from leftmost non-empty list
+# Process critical jobs before high before low
+BRPOP jobs:critical jobs:high jobs:low 30
+
+# Reliable pop: atomically move from queue to processing list
+# (lets you track in-flight jobs; re-queue from processing list on crash)
+BLMOVE jobs:email jobs:email:processing LEFT RIGHT 30
+# Consumer removes from processing list on completion:
+LREM jobs:email:processing 1 '<job-json>'
+```
+
+**BLPOP vs BRPOP:** both block waiting for an element. BLPOP pops from the left (head), BRPOP from the right (tail). For FIFO with LPUSH, use BRPOP (push left, pop right). For LIFO (stack), use BLPOP.
+
+<div class="quiz-card">
+  <p class="quiz-q">A worker calls BRPOP, receives a job, then crashes mid-processing. Is the job automatically re-queued or retried?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. BRPOP atomically removes the element from the list — once popped, the job is gone. If the worker crashes before finishing, the job is lost. This is at-most-once delivery. To get at-least-once semantics with a list, use BLMOVE to atomically move the job from the queue list to a processing list, do the work, then LREM from the processing list on success. A separate recovery process can re-queue anything stuck in the processing list too long. For built-in at-least-once with consumer groups, use Streams instead.</div>
+</div>
+
+---
+
+## XCLAIM — Reclaiming Stuck Pending Messages
+
+Every Streams consumer group keeps a **Pending Entry List (PEL)**: a record of every message delivered but not yet ACKed, with delivery count and idle time. When a consumer crashes, its PEL entries stay pending forever — use XCLAIM or XAUTOCLAIM to reclaim them.
+
+```bash
+# Inspect the PEL for a consumer group
+XPENDING orders payments - + 10
+# Returns for each pending entry:
+# [message-id, consumer-name, idle-ms, delivery-count]
+# Example: ["1700000000000-0", "worker-1", 90000, 3]
+#                                          ^idle^  ^delivered 3 times^
+
+# XCLAIM: manually claim a specific message from a crashed consumer
+# (use when you know exactly which message to reclaim)
+XCLAIM orders payments worker-2 60000 1700000000000-0
+#       ^stream ^group ^new-owner ^min-idle-ms ^message-id
+# delivery-count increments on each XCLAIM — use it to detect poison messages
+
+# XAUTOCLAIM: claim any pending message idle > 30s (batched, modern API)
+XAUTOCLAIM orders payments worker-2 30000 0-0 COUNT 50
+#                            ^min-idle^ ^start-id^ ^batch
+# Returns: [next-cursor, claimed-messages, deleted-ids]
+# next-cursor "0-0" means all pending messages were scanned (nothing more to claim)
+
+# Poison message detection: delivery-count too high → skip to DLQ
+XPENDING orders payments - + 10
+# If delivery-count > 5, the message is likely malformed
+# 1. Acknowledge it (remove from PEL)
+XACK orders payments 1700000000000-0
+# 2. Route to dead-letter stream
+XADD orders:dlq * \
+  message_id 1700000000000-0 \
+  reason "max_delivery_count_exceeded" \
+  payload '{"user_id":42,"action":"charge"}'
+```
+
+**The `0` vs `>` ID in XREADGROUP:**
+
+```bash
+# ">" means: give me NEW messages (never delivered to any consumer)
+XREADGROUP GROUP payments worker-1 COUNT 10 STREAMS orders >
+
+# "0" means: give me MY OWN pending messages (already delivered, not yet ACKed)
+# Use on startup/restart to re-process anything that was in-flight when we crashed
+XREADGROUP GROUP payments worker-1 COUNT 10 STREAMS orders 0
+# When this returns empty, the consumer's PEL is clear — switch to ">" for new messages
+```
+
+**Consumer group management:**
+
+```bash
+# Reset a consumer group's pointer (reprocess from a specific ID)
+XGROUP SETID orders payments 0                # reprocess from beginning
+XGROUP SETID orders payments 1700000000000-0  # reprocess from a specific message
+
+# Remove a specific consumer from the group (its PEL entries become claimable)
+XGROUP DELCONSUMER orders payments crashed-worker-3
+
+# Destroy an entire consumer group (drops all pending entries)
+XGROUP DESTROY orders payments
+
+# Inspect stream and groups
+XINFO STREAM orders                     # stream length, first/last entry, groups count
+XINFO GROUPS orders                     # per-group: name, consumers, pending count, last-delivered-id
+XINFO CONSUMERS orders payments         # per-consumer: name, pending count, idle time
+```
+
+<div class="quiz-card">
+  <p class="quiz-q">XAUTOCLAIM returns a next-cursor of "0-0". Does this mean there are no more pending messages at all, or something else?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>"0-0" means XAUTOCLAIM scanned to the end of the PEL in this call — it has processed all entries from the start ID you passed to the end. It does NOT mean the PEL is empty: it means no more pending messages match the idle threshold, or none remain after the ones already claimed. New pending entries can arrive after this call. The returned cursor tells you where to start the next XAUTOCLAIM call — "0-0" means start from the beginning again on the next run.</div>
+</div>
+
+---
+
+## Stream Trimming
+
+Streams grow unbounded without trimming. Two strategies: trim by count (MAXLEN) or trim by time (MINID).
+
+```bash
+# Producer-side trim: keep last 10000 entries (exact — O(N) to trim)
+XADD orders MAXLEN 10000 * user_id 42 action charge amount 99.99
+
+# Approximate trim (~): amortized O(1), may keep slightly more than 10000
+# Almost always the right choice — the overshoot is bounded (< 1 full radix tree node)
+XADD orders MAXLEN ~ 10000 * user_id 42 action charge amount 99.99
+
+# XTRIM: trim an existing stream (independent of XADD)
+XTRIM orders MAXLEN ~ 50000       # keep ~50000 most recent entries
+
+# MINID: trim by message ID (ID encodes timestamp: milliseconds-sequence)
+# Keep only the last 24 hours (IDs older than now-86400000ms are trimmed)
+XTRIM orders MINID ~ $(( $(date +%s%3N) - 86400000 ))-0
+
+# Check current stream length
+XLEN orders
+
+# Check memory usage
+MEMORY USAGE orders   # bytes used by this key (approximate for streams)
+```
+
+**When to trim where:**
+
+| Trim location | Command | Trade-off |
+|---|---|---|
+| At producer (XADD MAXLEN) | `XADD ... MAXLEN ~ N` | Simplest; trim happens on every write |
+| Explicit (XTRIM) | `XTRIM ... MAXLEN ~ N` | More control; run on a schedule or from a separate process |
+| By time (MINID) | `XTRIM ... MINID ~ <id>` | Keeps data for a fixed duration; size depends on write rate |
+
+Exact trimming (`MAXLEN` without `~`) does a precise trim on every write — use only for strict compliance requirements. For almost everything else, `~` is correct.
+
+<div class="quiz-card">
+  <p class="quiz-q">You trim a stream to MAXLEN 10000, but a consumer group's last-delivered-id points to an entry that just got trimmed. What happens when the consumer tries to read?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The consumer's last-delivered-id is now behind the stream's first entry. When it calls XREADGROUP with ">", Redis delivers messages starting from the stream's oldest available entry — so it "jumps" forward, skipping the trimmed messages. Those trimmed messages are not delivered. If they were already in the PEL (delivered but not ACKed), their IDs are now deleted-ids — XAUTOCLAIM returns them in the third return value (deleted-ids list) so you can handle the gap. Trim only entries you're confident all consumer groups have already processed, or accept at-most-once delivery for the trimmed window.</div>
+</div>
+
+---
+
+## Queue Pattern Comparison
+
+| | **List (LPUSH/BRPOP)** | **Pub/Sub** | **Streams** |
+|---|---|---|---|
+| **Persistence** | Yes (RDB/AOF) | No — fire-and-forget | Yes (append-only log) |
+| **Delivery guarantee** | At-most-once (pop = destroy) | At-most-once (no subscriber = lost) | At-least-once (PEL + ACK) |
+| **Consumer groups** | No — one consumer per pop | No — fan-out only | Yes — multiple groups, each gets all messages |
+| **Replay / re-read** | No | No | Yes — read from any past ID (before compaction) |
+| **Fan-out (same message, N consumers)** | No — one consumer gets the message | Yes — all subscribers get it | Yes — one group per consumer set |
+| **Message ordering** | FIFO within list | No guaranteed order | Strict per-shard order (single stream = total order) |
+| **In-flight tracking** | Manual (BLMOVE pattern) | None | Built-in (PEL) |
+| **Memory overhead** | Lowest | None (no buffer) | Medium (entries + PEL) |
+
+**Decision rule:**
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="use-list" class="active">Use List when</button>
+    <button data-tab="use-pubsub">Use Pub/Sub when</button>
+    <button data-tab="use-streams">Use Streams when</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="use-list">
+      Simple worker pool with at-most-once delivery. Sending tasks to background workers where losing a job on worker crash is acceptable (or you handle it application-side with BLMOVE). Write rate &lt; ~100K ops/sec. You want zero Streams overhead.
+    </div>
+    <div class="tab-panel" data-tab-panel="use-pubsub">
+      Ephemeral broadcast — cache invalidation signals, presence updates, live notifications. Every subscriber should get every message, durability is irrelevant, and it's fine if a subscriber that's offline misses messages. Fan-out without a queue.
+    </div>
+    <div class="tab-panel" data-tab-panel="use-streams">
+      Durable event log. At-least-once delivery with consumer groups. Multiple independent consumers processing the same stream (audit log + billing + notifications reading the same orders stream). Replay needed (retry a batch, backfill a new service). Crash recovery without losing in-flight work.
+    </div>
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">You need to fan out a cache-invalidation event to 20 subscriber pods with no durability requirement — a pod that's down when the event fires simply misses it. List, Pub/Sub, or Streams?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Pub/Sub. Fan-out to all current subscribers and ephemeral delivery are exactly what Pub/Sub is built for. A List would require one consumer per pop (not fan-out). Streams with 20 consumer groups would work but adds overhead (PEL, XACK calls, stream trimming) for a use case that explicitly doesn't need durability. SUBSCRIBE delivers to every current subscriber simultaneously; if a pod is down, it misses the message — that's the stated requirement.</div>
+</div>

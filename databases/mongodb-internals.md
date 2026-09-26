@@ -1075,3 +1075,397 @@ db.setProfilingLevel(1, {slowms: 100})   // log queries slower than 100ms
 db.system.profile.find().sort({ts: -1}).limit(10)
 rs.status()                              // replica set health + per-member replication lag
 ```
+
+---
+
+## Schema Validation
+
+MongoDB's `$jsonSchema` validator runs on insert and update — like a DB constraint, not an ORM validation. Existing documents that don't match are not automatically rejected (controlled by `validationLevel`).
+
+```javascript
+// Create collection with validation
+db.createCollection("orders", {
+  validator: {
+    $jsonSchema: {
+      bsonType: "object",
+      required: ["user_id", "total", "status", "created_at"],
+      properties: {
+        user_id: {
+          bsonType: "objectId",
+          description: "must be an ObjectId"
+        },
+        total: {
+          bsonType: "decimal",
+          minimum: 0,
+          description: "must be non-negative decimal"
+        },
+        status: {
+          enum: ["pending", "paid", "shipped", "cancelled"],
+          description: "must be one of the allowed statuses"
+        },
+        created_at: {
+          bsonType: "date"
+        },
+        items: {
+          bsonType: "array",
+          minItems: 1,
+          items: {
+            bsonType: "object",
+            required: ["sku", "qty", "price"],
+            properties: {
+              sku:   { bsonType: "string" },
+              qty:   { bsonType: "int", minimum: 1 },
+              price: { bsonType: "decimal", minimum: 0 }
+            }
+          }
+        }
+      }
+    }
+  },
+  validationAction: "error",    // "error": reject violating writes; "warn": log and allow
+  validationLevel:  "strict"    // "strict": validate all inserts+updates; "moderate": only docs that already match
+})
+
+// Add a validator to an existing collection
+db.runCommand({
+  collMod: "orders",
+  validator: { $jsonSchema: { /* schema here */ } },
+  validationAction: "warn",     // start with warn — see what would fail before enforcing
+  validationLevel: "strict"
+})
+
+// Inspect the current validator
+db.getCollectionInfos({ name: "orders" })[0].options.validator
+
+// Bypass validation (admin only — use for backfill migrations)
+db.orders.insertOne({ /* doc */ }, { bypassDocumentValidation: true })
+```
+
+**validationLevel semantics:**
+
+| Level | On insert | On update |
+|---|---|---|
+| `strict` (default) | Validates always | Validates always |
+| `moderate` | Validates always | Only validates if the document currently matches the schema |
+
+`moderate` is useful during migrations: existing non-conforming documents won't be rejected on update, giving you time to backfill them.
+
+<div class="quiz-card">
+  <p class="quiz-q">A collection has validationLevel="moderate" and validationAction="error". An existing document is missing a required field. A subsequent update to that document adds a new field. Is the update rejected?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. With "moderate" level, MongoDB only validates an update if the document currently matches the schema. Since the existing document is already non-conforming (missing a required field), it doesn't match the schema, so the update is not validated — it proceeds regardless of what the schema requires. This is the intentional design: moderate gives you a window to fix existing bad data without blocking writes on it.</div>
+</div>
+
+---
+
+## Time Series Collections
+
+Special collection type (MongoDB 5.0+) with bucketing built into the storage engine. MongoDB internally groups documents with the same `metaField` value into time-window buckets. Range scans and aggregations over time are significantly faster because they can skip entire buckets rather than scanning individual documents.
+
+```javascript
+// Create a time series collection
+db.createCollection("metrics", {
+  timeseries: {
+    timeField: "timestamp",      // field containing the Date (required)
+    metaField: "host",           // field identifying the series source (optional but important)
+    granularity: "seconds"       // "seconds", "minutes", or "hours" — controls bucket window size
+  },
+  expireAfterSeconds: 2592000    // TTL: auto-delete buckets older than 30 days
+})
+
+// Insert — looks like a normal insert
+db.metrics.insertMany([
+  { host: "web-01", timestamp: new Date(), cpu_pct: 42.3, mem_pct: 71.0 },
+  { host: "web-01", timestamp: new Date(), cpu_pct: 41.8, mem_pct: 70.5 },
+  { host: "web-02", timestamp: new Date(), cpu_pct: 15.1, mem_pct: 55.2 }
+])
+
+// Efficient range query — hits only relevant buckets
+db.metrics.find({
+  host: "web-01",
+  timestamp: {
+    $gte: new Date(Date.now() - 3600000),    // last 1 hour
+    $lt:  new Date()
+  }
+})
+
+// Aggregation over time — $dateTruncate for bucketed summaries
+db.metrics.aggregate([
+  { $match: { host: "web-01", timestamp: { $gte: new Date(Date.now() - 86400000) } } },
+  { $group: {
+    _id: { $dateTruncate: { date: "$timestamp", unit: "minute", binSize: 5 } },
+    avg_cpu: { $avg: "$cpu_pct" },
+    max_mem: { $max: "$mem_pct" }
+  }},
+  { $sort: { _id: 1 } }
+])
+```
+
+**Limitations vs regular collections:**
+- No ad-hoc updates to individual documents (update writes a new document; the old one is logically deleted inside its bucket)
+- No unique indexes except compound `{metaField, timeField}`
+- `timeField` must be a BSON Date — string timestamps require pre-processing
+- `metaField` is the primary cardinality axis — high-cardinality meta (e.g., per-request UUID) kills bucketing efficiency
+
+<div class="quiz-card">
+  <p class="quiz-q">A time series collection stores metrics with metaField="sensor_id". There are 10 million unique sensor IDs. Why does this kill bucketing efficiency?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The metaField determines how documents are grouped into buckets — all documents with the same metaField value and within the same time window go into one bucket. With 10 million unique sensor IDs, each sensor gets its own bucket series. Each bucket holds at most a handful of documents (one sensor generates few data points per time window), so instead of dense buckets covering many documents, you have millions of mostly-empty buckets. The bucketing benefit disappears: range scans can't skip large chunks of data, and storage overhead increases. Time series collections work best when metaField cardinality is low to medium (hundreds to thousands of unique values, not millions).</div>
+</div>
+
+---
+
+## Index Deep Dive: ESR Rule, Multikey, Wildcard
+
+### ESR Rule for Compound Index Field Order
+
+The query planner's ability to use a compound index depends on field order. The ESR rule tells you the optimal order:
+
+**E**quality fields first → **S**ort fields next → **R**ange fields last
+
+```javascript
+// Query: status = "active" AND created_at in last 7 days, sorted by score descending
+db.users.find({
+  status: "active",                          // Equality
+  created_at: { $gte: sevenDaysAgo }         // Range
+}).sort({ score: -1 })                       // Sort
+
+// Bad index: {created_at, status, score}
+// — range field first means sort and equality can't use the index efficiently
+
+// Correct ESR index: {status, score, created_at}
+db.users.createIndex({ status: 1, score: -1, created_at: 1 })
+// Equality (status) → Sort (score) → Range (created_at)
+```
+
+**Why:** MongoDB walks the index left-to-right. Equality conditions narrow the index range precisely. Sort fields come next so MongoDB can satisfy the sort from the index without a blocking sort stage. Range fields come last because a range scan means the sort field values may not be contiguous in the remaining entries.
+
+### Multikey Indexes
+
+An index on an array field is a multikey index — MongoDB creates one index entry per array element.
+
+```javascript
+// Document: { tags: ["mongodb", "nosql", "database"] }
+db.posts.createIndex({ tags: 1 })       // multikey — 3 index entries for this document
+db.posts.find({ tags: "mongodb" })      // uses the multikey index
+
+// Compound multikey restriction: at most ONE array field per compound index
+db.posts.createIndex({ tags: 1, categories: 1 })
+// ERROR: both are arrays → compound multikey with two array fields is forbidden
+// Fix: index one array field and one scalar field
+db.posts.createIndex({ tags: 1, author: 1 })   // OK: one array, one scalar
+```
+
+### Wildcard Indexes
+
+Index any field without knowing field names upfront — useful for user-defined schemas or document stores.
+
+```javascript
+// Index all fields (use sparingly — large index size)
+db.events.createIndex({ "$**": 1 })
+
+// Index a specific nested path and its subfields
+db.events.createIndex({ "properties.$**": 1 })
+// Matches queries on properties.foo, properties.bar, properties.nested.deep
+
+// Cannot be used for sort (wildcard indexes are query-only)
+// Cannot be a unique index
+```
+
+<div class="quiz-card">
+  <p class="quiz-q">A compound index is defined as {category: 1, tags: 1}. The "tags" field is an array. Is this index allowed? What about {tags: 1, categories: 1} where both fields are arrays?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>{category: 1, tags: 1} is allowed — one scalar field and one array field is a valid compound multikey index. MongoDB creates entries for each element of the tags array combined with the scalar category value. {tags: 1, categories: 1} is not allowed if any document has both fields as arrays — MongoDB returns an error "cannot index parallel arrays" because indexing the Cartesian product of two arrays would be unbounded. The rule: a compound index can include at most one field whose value is an array.</div>
+</div>
+
+---
+
+## $lookup Performance
+
+`$lookup` is a server-side join. Without the right index, it does a collection scan of the `from` collection for every input document — O(N×M) cost.
+
+```javascript
+// --- Equality join (simple form) ---
+// REQUIRES an index on orders.user_id — verify before deploying
+db.orders.createIndex({ user_id: 1 })
+
+db.users.aggregate([
+  { $match: { status: "active" } },
+  {
+    $lookup: {
+      from: "orders",
+      localField: "_id",         // field from the "users" collection
+      foreignField: "user_id",   // field from the "orders" collection — index this
+      as: "orders"
+    }
+  }
+])
+
+// --- Pipeline join (expressive form) ---
+// Can apply conditions, projections, and computed fields inside the lookup
+db.users.aggregate([
+  {
+    $lookup: {
+      from: "orders",
+      let: { uid: "$_id" },              // expose local field as a variable
+      pipeline: [
+        { $match: {
+          $expr: { $eq: ["$user_id", "$$uid"] },   // use the variable
+          status: "paid"                             // additional filter inside lookup
+        }},
+        { $project: { _id: 1, total: 1, created_at: 1 } },   // trim output
+        { $sort: { created_at: -1 } },
+        { $limit: 5 }
+      ],
+      as: "recent_orders"
+    }
+  }
+])
+// Pipeline joins also require an index on the from collection's join field
+
+// --- Check if the index is being used ---
+db.users.aggregate([ /* pipeline */ ], { explain: "executionStats" })
+// Look for: IXSCAN in the $lookup sub-pipeline (not COLLSCAN)
+// "totalDocsExamined" inside $lookup sub-pipeline should equal returned docs
+```
+
+**When to denormalize instead of $lookup:**
+- 1:1 relationships where the joined document is always needed together
+- Joined documents are small and infrequently updated
+- Query latency is critical (embedding eliminates the join entirely)
+
+**$lookup on sharded collections:**
+- The `from` collection must be either unsharded or sharded by `_id`
+- Pipeline-form $lookup on sharded `from` triggers scatter-gather — high latency on large shards
+
+<div class="quiz-card">
+  <p class="quiz-q">A $lookup joins users (10K docs) with orders (10M docs) on orders.user_id with no index on orders.user_id. How many total document examinations does MongoDB perform?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>For each of the 10,000 user documents, MongoDB scans the entire orders collection (10M docs) to find matching orders.user_id values. Total: 10,000 × 10,000,000 = 100 billion document examinations. In practice the query will time out or run for hours. Always create an index on the foreignField (or the field matched in a pipeline join's $match $expr) before running $lookup on any non-trivial dataset.</div>
+</div>
+
+---
+
+## Aggregation Pipeline Optimization
+
+The MongoDB query planner pushes some optimizations automatically. Others require manual stage ordering.
+
+```javascript
+// 1. $match EARLY — eliminates documents before downstream stages process them
+//    Automatic: planner moves $match before adjacent $project
+//    Manual: always write $match before $lookup, $unwind, $group
+
+db.orders.aggregate([
+  { $match: { status: "paid", created_at: { $gte: thirtyDaysAgo } } },   // ← first
+  { $lookup: { from: "users", localField: "user_id", foreignField: "_id", as: "user" } },
+  { $unwind: "$user" },
+  { $group: { _id: "$user.country", revenue: { $sum: "$total" } } }
+])
+
+// 2. $project EARLY — reduce document size before expensive stages
+{ $project: { user_id: 1, total: 1, created_at: 1 } }   // drop unused fields before $lookup
+
+// 3. allowDiskUse — triggers when $sort or $group exceeds 100MB in-memory
+db.orders.aggregate([ /* stages */ ], { allowDiskUse: true })
+// Without it, a sort or group on a large dataset throws:
+// "Exceeded memory limit for $group/$sort, but didn't opt in to external sorting"
+
+// 4. explain a pipeline
+db.orders.aggregate([
+  { $match: { status: "paid" } },
+  { $group: { _id: "$country", total: { $sum: "$amount" } } }
+], { explain: "executionStats" })
+// Look for: IXSCAN (not COLLSCAN) in the $match stage
+// "nReturned" at each stage — large drops mean filtering is working
+// "executionTimeMillisEstimate" — identifies the slow stage
+
+// 5. Common anti-patterns
+
+//    BAD: $group before $match — aggregates the whole collection first
+[
+  { $group: { _id: "$country", total: { $sum: "$amount" } } },
+  { $match: { total: { $gt: 1000 } } }
+]
+//    GOOD: filter on indexed fields before $group
+[
+  { $match: { status: "paid" } },
+  { $group: { _id: "$country", total: { $sum: "$amount" } } },
+  { $match: { total: { $gt: 1000 } } }
+]
+
+//    BAD: $unwind without prior $match — explodes every array element before filtering
+[
+  { $unwind: "$items" },
+  { $match: { "items.sku": "ABC-123" } }
+]
+//    GOOD: $match on array field before $unwind (uses multikey index on items.sku)
+[
+  { $match: { "items.sku": "ABC-123" } },
+  { $unwind: "$items" },
+  { $match: { "items.sku": "ABC-123" } }    // second match after unwind is exact
+]
+```
+
+<div class="quiz-card">
+  <p class="quiz-q">An aggregation pipeline starts with $group followed by $match. The planner "optimizes" by moving $match before $group. Why is this optimization not always safe?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The planner can only move $match before $group when the $match filters on fields that exist before grouping — i.e., fields from the original documents. If the $match filters on computed fields created by $group (like an accumulated "total" or a renamed "_id" alias), those fields don't exist before $group runs, so moving $match would change the result. MongoDB's query planner is conservative and only reorders stages when it can prove the result is identical. When in doubt, profile with explain() to verify the stage order the planner actually uses.</div>
+</div>
+
+---
+
+## mongosh Admin Cookbook
+
+Quick-reference one-liners for production administration.
+
+```javascript
+// --- Current operations ---
+// Find queries running longer than 5 seconds
+db.currentOp({ "secs_running": { $gt: 5 }, "op": { $in: ["query", "command"] } })
+// Columns to check: opid, client, ns, secs_running, planSummary
+
+// Kill a specific operation
+db.killOp(12345)    // opid from currentOp output
+
+// --- Query profiling ---
+db.setProfilingLevel(1, { slowms: 50 })    // log queries > 50ms (0=off, 1=slow, 2=all)
+db.system.profile.find({}, { op:1, ns:1, millis:1, ts:1, planSummary:1 }).sort({ts:-1}).limit(5)
+db.getProfilingStatus()                    // check current threshold
+
+// --- Index intelligence ---
+// Find unused indexes (zero accesses since last restart — candidates for drop)
+db.orders.aggregate([
+  { $indexStats: {} },
+  { $match: { "accesses.ops": 0 } },
+  { $project: { name: 1, key: 1 } }
+])
+
+// Diagnose a slow query (look for COLLSCAN, totalDocsExamined >> nReturned)
+db.orders.find({ user_id: ObjectId("..."), status: "paid" }).explain("executionStats")
+
+// --- Replication ---
+// Replication lag per member in seconds
+rs.status().members.map(m => ({
+  name: m.name,
+  state: m.stateStr,
+  lagSecs: m.optimeDate ? (new Date() - m.optimeDate) / 1000 : null
+}))
+
+// Change sync source without restart
+rs.syncFrom("10.0.0.1:27017")
+
+// Check oplog window (must exceed backup + maintenance windows)
+rs.printReplicationInfo()
+// oplog size:   10240 MB
+// log length:   24.3 hrs  ← increase oplogSizeMB if this is too short
+
+// --- Space reclamation ---
+// Reclaim fragmented space after heavy deletes (blocks writes on the collection)
+db.runCommand({ compact: "orders" })
+// How much space is reclaimable:
+db.orders.stats().wiredTiger["block-manager"]["file bytes available for reuse"]
+
+// --- Connections ---
+db.serverStatus().connections
+// { current: 412, available: 51588, totalCreated: 29043 }
+```
