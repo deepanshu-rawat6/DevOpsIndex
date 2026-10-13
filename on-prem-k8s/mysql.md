@@ -231,6 +231,29 @@ Walk through a restore end to end:
   <div class="quiz-a" hidden>There's a required step first: xtrabackup --prepare. A freshly taken backup isn't restorable as-is — it has to be prepared before --copy-back will produce a working data directory.</div>
 </div>
 
+### Permissions & Version Compatibility
+
+**`#innodb_redo` is mode 700.** MySQL 8.0 creates `/var/lib/mysql/#innodb_redo/` with `drwx------` (mode 700), owned by the `mysql` OS user. XtraBackup must enter this directory to tail the redo log during `--backup`. Root bypasses DAC on Linux; a non-root process hits `OS error 13 (EACCES)`.
+
+In Kubernetes the `percona/percona-xtrabackup:8.0` container runs as a non-root user by default. Fix with a `securityContext`:
+
+```yaml
+# In the XtraBackup CronJob pod spec:
+securityContext:
+  runAsUser: 0    # root — needed to read #innodb_redo (mode 700)
+```
+
+On **macOS Docker Desktop** (VirtioFS): additionally remove `:ro` from the datadir volume mount — VirtioFS with `:ro` causes EACCES on mode-700 directories even for root inside the container.
+
+**Version pinning.** XtraBackup's minor version must match MySQL's. A mismatch may produce a silently corrupt backup that fails only at restore time.
+
+| MySQL | XtraBackup image tag |
+|-------|---------------------|
+| 8.0.x | `percona/percona-xtrabackup:8.0` (pin to `8.0.x`) |
+| 8.4.x | `percona/percona-xtrabackup:8.4` |
+
+`--no-server-version-check` suppresses the version gate — use only as an emergency escape hatch, never routinely.
+
 ---
 
 ## Monitoring

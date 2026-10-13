@@ -27,7 +27,9 @@ Running databases directly on VMs skips the Kubernetes storage and operator laye
 
 | File | Database | Topics |
 |------|----------|--------|
+| [mysql.md](./mysql.md) | MySQL | Master/replica GTID replication, my.cnf tuning, XtraBackup hot backup, restore runbook, GCS upload, cron, permissions gotchas |
 | [mongodb.md](./mongodb.md) | MongoDB | Replica set on VMs, firewall rules, mongod.conf, cacheSizeGB, users, write concern, mongodb-exporter |
+| [etcd.md](./etcd.md) | etcd | 3-node cluster on VMs, TLS certs, systemd config, member ops, snapshot backup, disaster recovery |
 
 ## Common Patterns
 

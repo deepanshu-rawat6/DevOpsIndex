@@ -1252,3 +1252,191 @@ FROM information_schema.tables
 WHERE table_schema = DATABASE()
 ORDER BY data_length + index_length DESC LIMIT 20;
 ```
+
+---
+
+## XtraBackup — Hot Backup & Restore
+
+XtraBackup is Percona's open-source physical backup tool for MySQL InnoDB. Unlike `mysqldump`, it takes a **hot backup** — MySQL keeps running, serving reads and writes, while the backup runs. This section covers how it works at the InnoDB level, why backup-from-replica is the right topology, and the full restore flow.
+
+### Why not mysqldump?
+
+`mysqldump` holds a global read lock (`FLUSH TABLES WITH READ LOCK`) for the entire duration of the dump. On a large database this can mean minutes or hours where no writes land. XtraBackup holds effectively no lock:
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="mysqldump" class="active">mysqldump</button>
+    <button data-tab="xtrabackup">XtraBackup</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="mysqldump">
+
+```sql
+-- mysqldump internally does:
+FLUSH TABLES WITH READ LOCK;    -- all writes blocked from here
+-- ... streams every table as INSERT statements ...
+UNLOCK TABLES;                  -- writes resume
+-- Lock duration: proportional to database size (minutes–hours on large DBs)
+```
+
+    </div>
+    <div class="tab-panel" data-tab-panel="xtrabackup">
+
+```bash
+# XtraBackup:
+xtrabackup --backup ...
+# Copies .ibd files directly from disk — no lock needed
+# --safe-slave-backup pauses the replica SQL thread for ~1s only
+# Master is never blocked. Writes continue uninterrupted.
+```
+
+    </div>
+  </div>
+</div>
+
+| | mysqldump | XtraBackup |
+|--|-----------|------------|
+| Lock duration | Full DB size (minutes–hours) | ~1s SQL thread pause |
+| Master impact | FTWRL blocks all writes | None |
+| Output format | SQL text (portable) | Physical InnoDB files |
+| Restore speed | Slow (replay all INSERTs) | Fast (file copy + chown) |
+| PITR anchor | Binlog position in dump header | `xtrabackup_slave_info` GTID set |
+
+### What XtraBackup actually does
+
+XtraBackup reads InnoDB's `.ibd` files directly from disk — bypassing MySQL's buffer pool entirely. It simultaneously tails the InnoDB redo log directory (`#innodb_redo/`) to capture every change made while copying.
+
+```mermaid
+sequenceDiagram
+    participant XBK as XtraBackup (root)
+    participant DISK as Replica Disk<br/>(/var/lib/mysql)
+    participant REDO as #innodb_redo/<br/>(redo log)
+    participant MYSQL as Replica mysqld<br/>(still running)
+    participant SLAVE_INFO as xtrabackup_slave_info
+
+    XBK->>DISK: open + copy orders.ibd (pages at LSN N)
+    XBK->>REDO: tail redo log — capturing changes made during copy
+    MYSQL->>DISK: writes continue (buffer pool dirty pages flushed)
+
+    Note over XBK: --safe-slave-backup: pause SQL thread ~1s
+    XBK->>SLAVE_INFO: write gtid_purged = master_uuid:1-9847
+    Note over XBK: SQL thread resumes
+
+    XBK->>XBK: --prepare: replay captured redo log<br/>→ all pages converge to same LSN
+    Note over XBK: backup is now a consistent snapshot
+```
+
+The **raw backup** (just after `--backup`) has InnoDB pages copied at different points in time — they share no common LSN. The backup is unusable in this state. `--prepare` runs crash recovery against the captured redo log, bringing every page to the same LSN. This is mandatory before any restore.
+
+### Backup from replica, not master
+
+Running `xtrabackup` on the replica rather than the master isolates heavy sequential disk I/O from the write path.
+
+- **Master writes continue uninterrupted** — `--safe-slave-backup` pauses the replica SQL thread for ~1s; the I/O thread keeps streaming from master; master never notices.
+- **Replica datadir is a consistent copy** — because InnoDB replication applies the same transactions in the same order, the replica's `.ibd` files are structurally identical to master's (with a small lag).
+- **Read load is already there** — the replica often serves read traffic; adding backup I/O there doesn't change the write path's latency profile.
+
+### The GTID stamp
+
+The key artifact XtraBackup produces (beyond the data files) is `xtrabackup_slave_info`. It contains the GTID set that was applied on the replica at backup time:
+
+```sql
+-- xtrabackup_slave_info (inside the backup dir):
+SET GLOBAL gtid_purged='2cb72875-c6ff-11f1-b144-32898eb9db14:1-9847,
+                        96a4392c-c6ff-11f1-9034-322fe87d1f59:1-5';
+CHANGE MASTER TO MASTER_AUTO_POSITION=1;
+```
+
+This is the **restore anchor**: it tells MySQL exactly which transactions the backup already contains. When wiring replication on a restored node, `SOURCE_AUTO_POSITION=1` uses this `gtid_executed` set to ask master for only the missing transactions — everything after `:9847`.
+
+`--slave-info` writes this file. `--safe-slave-backup` ensures the GTID position is clean (SQL thread paused for the instant of capture). Without `--safe-slave-backup` the GTID might be captured mid-relay-log application and be inconsistent.
+
+### Restore sequence
+
+```mermaid
+sequenceDiagram
+    participant TAR as mysql-backup-TIMESTAMP.tar.gz
+    participant DISK as /var/lib/mysql (fresh)
+    participant MYSQL as mysqld
+    participant MASTER as Master
+
+    Note over TAR: already prepared — redo log applied before archiving
+    TAR->>DISK: tar -xzf → xtrabackup --copy-back
+    Note over DISK: chown -R mysql:mysql /var/lib/mysql
+    DISK->>MYSQL: systemctl start mysql
+    Note over MYSQL: reads gtid_executed from restored mysql.ibd
+    MYSQL->>MASTER: CHANGE REPLICATION SOURCE TO SOURCE_AUTO_POSITION=1
+    MASTER->>MYSQL: streams missing transactions (:9848 onward)
+    Note over MYSQL: Seconds_Behind_Source → 0
+```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Extract the archive.</strong> <code>tar -xzf mysql-backup-TIMESTAMP.tar.gz -C /tmp/restore/</code>. The backup inside was already <code>--prepare</code>d before archiving — do not run <code>--prepare</code> again.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Run <code>--copy-back</code>.</strong> <code>xtrabackup --copy-back --datadir=/var/lib/mysql --target-dir=/tmp/restore/TIMESTAMP</code>. The target datadir must be empty.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Fix ownership.</strong> <code>chown -R mysql:mysql /var/lib/mysql</code>. XtraBackup ran as root; MySQL runs as the <code>mysql</code> OS user. Without this, <code>mysqld</code> refuses to start.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. Start MySQL.</strong> <code>systemctl start mysql</code>. MySQL reads <code>mysql.gtid_executed</code> from the restored <code>mysql.ibd</code> — it knows exactly which transactions it already has.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Wire replication.</strong> <code>RESET REPLICA ALL; CHANGE REPLICATION SOURCE TO SOURCE_HOST='...', SOURCE_AUTO_POSITION=1; START REPLICA;</code>. The replica requests only the missing GTID transactions from master and catches up automatically.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+### Key flags reference
+
+| Flag | What it does | When to use |
+|------|-------------|-------------|
+| `--backup` | Copy `.ibd` files + tail redo log | Every backup run |
+| `--slave-info` | Write `xtrabackup_slave_info` with GTID | Always when backing up a replica |
+| `--safe-slave-backup` | Pause SQL thread ~1s for clean GTID stamp | Always with `--slave-info` |
+| `--prepare` | Apply captured redo log (crash recovery) | After `--backup`, before archiving or restoring |
+| `--copy-back` | Copy prepared files into datadir | During restore |
+| `--no-server-version-check` | Skip XtraBackup vs MySQL version gate | Emergency only — never routinely |
+
+### Permissions gotcha — `#innodb_redo`
+
+MySQL 8.0 creates `/var/lib/mysql/#innodb_redo/` with mode `700` (`drwx------`), owned by the `mysql` OS user. XtraBackup needs to enter this directory to tail the redo log.
+
+**Root bypasses DAC on Linux** — a process running as uid 0 can enter any directory regardless of its mode bits. Therefore:
+
+- **On a VM:** xtrabackup runs as root on the host → no issue.
+- **In Docker:** the `percona/percona-xtrabackup:8.0` image runs as a non-root user by default → `OS error 13 (EACCES)` on `#innodb_redo/`. Fix: `user: "0"` in `docker-compose.yml`.
+- **macOS VirtioFS extra trap:** adding `:ro` to the datadir volume mount causes EACCES on mode-700 directories even for root inside the container. Remove `:ro` from the datadir mount — XtraBackup does not write to the datadir during `--backup`.
+
+```yaml
+# docker-compose.yml (dev only)
+xtrabackup:
+  image: percona/percona-xtrabackup:8.0
+  user: "0"                        # root — reads #innodb_redo (mode 700)
+  volumes:
+    - replica-data:/var/lib/mysql  # no :ro — macOS VirtioFS bug
+    - ./backup:/backup
+```
+
+**Version pinning:** XtraBackup's minor version must match MySQL's. `percona-xtrabackup-80` for MySQL 8.0.x; `percona-xtrabackup-84` for MySQL 8.4.x. A mismatch can produce a silently corrupt backup that fails only at restore time. `--no-server-version-check` suppresses the gate but does not fix the underlying incompatibility.
+
+<div class="quiz-card">
+  <p class="quiz-q">XtraBackup's <code>--backup</code> completed OK, but you did not run <code>--prepare</code>. A week later a disk fails and you need to restore from this backup. What happens when you run <code>--copy-back</code>?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>The restore will appear to succeed (files are copied), but MySQL will fail to start — or start and immediately crash — because the InnoDB pages in the backup have inconsistent LSNs: each was copied at a different moment in time. <code>--prepare</code> is what runs crash recovery to bring all pages to the same consistent point. A backup without <code>--prepare</code> is not a valid backup.</div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">You're running XtraBackup in a Docker container and hit "OS error 13" on <code>#innodb_redo/</code>. The container is running as the default image user. What are the two required fixes?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>(1) Add <code>user: "0"</code> to the container definition so XtraBackup runs as root — root bypasses the mode-700 DAC check on Linux. (2) Remove <code>:ro</code> from the datadir volume mount if on macOS with Docker Desktop — VirtioFS bug: <code>:ro</code> + mode-700 dir = EACCES even for root inside the container. On a production VM neither fix is needed — xtrabackup runs directly on the host as root with no container boundary.</div>
+</div>

@@ -12,7 +12,7 @@ Deep dives into each database: storage engine internals, WAL, replication, index
 | File | Database | Key Topics |
 |------|----------|-----------|
 | [postgres-internals.md](./postgres-internals.md) | PostgreSQL | MVCC, WAL, VACUUM, B-tree/GiST indexes, EXPLAIN, connection pooling, replication internals |
-| [mysql-internals.md](./mysql-internals.md) | MySQL / InnoDB | InnoDB storage engine, redo log, undo log, MVCC, B-tree, buffer pool, replication binlog |
+| [mysql-internals.md](./mysql-internals.md) | MySQL / InnoDB | InnoDB storage engine, redo log, undo log, MVCC, B-tree, buffer pool, replication binlog, XtraBackup hot backup & restore |
 | [mongodb-internals.md](./mongodb-internals.md) | MongoDB | WiredTiger storage engine, oplog, BSON, aggregation pipeline, index types, sharding |
 | [redis-internals.md](./redis-internals.md) | Redis | Data structures internals, RDB/AOF persistence, eviction policies, Lua scripting, cluster |
 | [etcd.md](./etcd.md) | etcd | Raft consensus, MVCC storage model, watch API, compaction/defrag, clustering, performance tuning |
