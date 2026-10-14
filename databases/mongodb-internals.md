@@ -1469,3 +1469,144 @@ db.orders.stats().wiredTiger["block-manager"]["file bytes available for reuse"]
 db.serverStatus().connections
 // { current: 412, available: 51588, totalCreated: 29043 }
 ```
+
+---
+
+## Backup & Point-in-Time Recovery
+
+MongoDB's equivalent of XtraBackup is **Percona Backup for MongoDB (PBM)** — a physical hot backup tool that reads WiredTiger files directly and archives the oplog for PITR. `mongodump` is the logical alternative: simpler, no agent, no PITR.
+
+### mongodump vs Percona Backup for MongoDB (PBM)
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="mongodump" class="active">mongodump</button>
+    <button data-tab="pbm">PBM (physical)</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="mongodump">
+
+```bash
+# Logical BSON export
+mongodump --uri="mongodb://user:pass@primary:27017" --out=/backup/dump/
+# Restore:
+mongorestore --uri="mongodb://user:pass@primary:27017" /backup/dump/
+# No agent needed. Portable across major MongoDB versions.
+# Downside: brief per-collection lock during export, no PITR.
+```
+
+    </div>
+    <div class="tab-panel" data-tab-panel="pbm">
+
+```bash
+# Physical hot backup via PBM
+pbm backup
+# Reads WiredTiger .wt files directly — no locks on primary
+# Backup runs on a secondary elected by PBM agents
+# Oplog continuously archived for PITR
+```
+
+    </div>
+  </div>
+</div>
+
+| | mongodump | Percona Backup for MongoDB (PBM) |
+|---|---|---|
+| Backup type | Logical (BSON) | Physical (WiredTiger files) |
+| PITR | No | Yes (oplog-tail) |
+| Restore time (1TB) | ~6 hours | ~30 minutes |
+| Agent required | No | Yes (pbm-agent on each node) |
+| Primary impact | Brief per-collection lock | Backup from secondary, zero primary impact |
+| Cloud storage | Manual | S3/GCS native |
+
+### PBM Architecture
+
+PBM runs a `pbm-agent` alongside every `mongod`. The agent elected for the backup reads WiredTiger files directly; all agents continuously tail the oplog for PITR archiving.
+
+```mermaid
+graph TD
+    PRI[Primary<br/>mongod] -->|oplog stream| SEC1[Secondary 1<br/>mongod + pbm-agent]
+    PRI -->|oplog stream| SEC2[Secondary 2<br/>mongod + pbm-agent]
+    SEC1 -->|physical backup + oplog| S3[S3 / GCS<br/>backup storage]
+    SEC2 -->|oplog tail| S3
+    CLI[pbm CLI] -->|commands via MongoDB| SEC1
+    CLI -->|commands via MongoDB| SEC2
+```
+
+### Install & Configure PBM
+
+```bash
+# Install pbm-agent on every mongod node
+apt install percona-backup-mongodb
+
+# /etc/pbm-agent.env
+PBM_MONGODB_URI="mongodb://pbmuser:password@localhost:27017/?authSource=admin"
+
+systemctl enable --now pbm-agent
+```
+
+`pbm-config.yaml` (applied once via CLI):
+
+```yaml
+storage:
+  type: s3
+  s3:
+    region: us-east-1
+    bucket: my-mongodb-backups
+    prefix: pbm/
+    credentials:
+      access-key-id: AKIA...
+      secret-access-key: ...
+pitr:
+  enabled: true
+  oplogSpanMin: 10    # archive oplog slice every 10 min → RPO ≈ 10 min
+```
+
+```bash
+pbm config --file pbm-config.yaml
+pbm status   # verify all nodes show pbm-agent as connected
+```
+
+### Backup & PITR Restore
+
+```bash
+# Take a physical backup
+pbm backup
+
+# List available backups and PITR timeline
+pbm list
+
+# Restore to a specific point in time
+pbm restore --time="2026-10-14T14:37:00"
+
+# Restore a specific named full backup (no PITR)
+pbm restore <backup-name>
+```
+
+### Oplog Window Monitoring
+
+PITR requires the oplog to continuously span from the base backup timestamp to the restore target. If the oplog wraps before PBM archives it, that window is lost.
+
+```js
+// mongosh — check current oplog window
+rs.printReplicationInfo()
+// Output:
+//   oplog size:   10240 MB
+//   log length:   24.3 hrs   ← must exceed backup interval + maintenance windows
+
+// Set a guaranteed minimum retention in mongod.conf:
+// storage.oplogMinRetentionHours: 48
+// Rule: oplog window ≥ 2× your backup interval
+```
+
+<div class="quiz-card">
+  <p class="quiz-q">You take a PBM physical backup at 02:00. The primary crashes at 09:00. PBM PITR is enabled with <code>oplogSpanMin: 10</code>. What is your RPO — how recent a restore target can you specify?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>~10 minutes. The latest safe restore target is ~08:50 — one oplog archive interval before the crash. The 02:00 base backup plus oplog archives from 02:00 → 08:50 cover the gap. The final 10 minutes before the crash may not have been archived yet. To tighten RPO, reduce <code>oplogSpanMin</code>.</div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q"><code>mongodump</code> runs for 3 hours on a 2TB cluster. A document is updated 5 times during the dump. Which version ends up in the backup?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Whichever version existed when mongodump read that collection. mongodump is not point-in-time consistent across all collections — it exports them sequentially, so a document updated after its collection was already dumped appears stale relative to documents in later collections. Use <code>--oplog</code> to capture a consistent snapshot: mongodump records the starting oplog position and replays operations seen during the dump, producing a consistent view. For large clusters, use PBM instead.</div>
+</div>

@@ -889,3 +889,146 @@ INSERT INTO events_buffer VALUES (...);  -- fast, goes to RAM buffer
   <button class="quiz-reveal">Reveal answer</button>
   <div class="quiz-a" hidden>No. The three thresholds are OR conditions, not AND — whichever one is hit first triggers the flush. 1.2M rows already exceeds the row threshold, so the Buffer table flushes into the underlying MergeTree table immediately, regardless of how little time has elapsed.</div>
 </div>
+
+---
+
+## Backup & Restore
+
+### Native BACKUP TO (ClickHouse 22.x+)
+
+ClickHouse 22.x introduced native `BACKUP` / `RESTORE` SQL commands. No external agent needed.
+
+```sql
+-- Backup a table to S3
+BACKUP TABLE default.events TO S3('https://s3.amazonaws.com/my-bucket/backups/events/', 'ACCESS_KEY', 'SECRET_KEY');
+
+-- Backup entire database
+BACKUP DATABASE default TO S3('https://s3.amazonaws.com/my-bucket/backups/full/', 'ACCESS_KEY', 'SECRET_KEY');
+
+-- Restore
+RESTORE TABLE default.events FROM S3('https://s3.amazonaws.com/my-bucket/backups/events/', 'ACCESS_KEY', 'SECRET_KEY');
+
+-- Check backup status
+SELECT * FROM system.backups ORDER BY start_time DESC LIMIT 5;
+```
+
+Async backup (non-blocking — returns immediately, runs in background):
+
+```sql
+BACKUP DATABASE default TO S3('...') ASYNC;
+-- Returns a backup_id; monitor via system.backups
+```
+
+### clickhouse-backup (Third-party — Pre-22.x or More Features)
+
+For older ClickHouse versions or richer scheduling/S3 lifecycle integration, `clickhouse-backup` by Altinity is the standard tool.
+
+```bash
+# Install
+wget https://github.com/Altinity/clickhouse-backup/releases/latest/download/clickhouse-backup-linux-amd64.tar.gz
+tar xzf clickhouse-backup-linux-amd64.tar.gz
+cp clickhouse-backup /usr/local/bin/
+```
+
+```yaml
+# /etc/clickhouse-backup/config.yml (key settings)
+clickhouse:
+  host: localhost
+  port: 9000
+  username: default
+  password: ""
+s3:
+  bucket: my-ch-backups
+  region: us-east-1
+  path: clickhouse/backups
+  access_key: AKIA...
+  secret_key: ...
+```
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="local" class="active">Local backup</button>
+    <button data-tab="s3">S3 backup</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="local">
+
+```bash
+# Create local backup
+clickhouse-backup create my-backup-2026-10-14
+
+# List local backups
+clickhouse-backup list local
+
+# Restore from local
+clickhouse-backup restore my-backup-2026-10-14
+```
+
+    </div>
+    <div class="tab-panel" data-tab-panel="s3">
+
+```bash
+# Create + upload to S3 in one step
+clickhouse-backup create-remote my-backup-2026-10-14
+
+# List remote backups
+clickhouse-backup list remote
+
+# Download + restore from S3
+clickhouse-backup restore-remote my-backup-2026-10-14
+```
+
+    </div>
+  </div>
+</div>
+
+### Incremental Backups via Frozen Partitions
+
+ClickHouse's MergeTree engine supports partition-level freezes. A frozen partition is a hardlinked snapshot — zero copy cost.
+
+```sql
+-- Freeze a specific partition (e.g. month partition)
+ALTER TABLE default.events FREEZE PARTITION '2026-10';
+
+-- Frozen data appears in:
+-- /var/lib/clickhouse/shadow/N/data/default/events/
+-- where N increments per freeze operation
+
+-- Upload the shadow dir to S3 (incremental — only new parts)
+-- aws s3 sync /var/lib/clickhouse/shadow/ s3://my-bucket/ch-incremental/
+
+-- Unfreeze (cleanup local shadow copy)
+ALTER TABLE default.events UNFREEZE PARTITION '2026-10' WITH NAME 'backup-20261014';
+```
+
+### Why ClickHouse Has No PITR
+
+ClickHouse is an OLAP engine — it does not have a WAL or redo log in the OLTP sense. Data is written in batches as immutable parts. Each part is a self-contained directory of column files.
+
+- No transaction log to replay → no PITR
+- Recovery strategy: **replica is the HA answer**, not backup restore
+- `ReplicatedMergeTree` + ZooKeeper/Keeper handles node failure automatically
+- Backups cover the DR scenario (entire cluster lost, region failure)
+
+For DR, the restore process is: restore backup → parts placed in data directory → ClickHouse detects new parts on startup.
+
+### Backup Schedule Recommendation
+
+```bash
+# /etc/cron.d/clickhouse-backup
+# Daily full backup at 02:00
+0 2 * * * clickhouse clickhouse-backup create-remote "$(date +%Y-%m-%d)"
+# Retain last 7 days — set backups_to_keep_remote: 7 in config.yml
+```
+
+<div class="quiz-card">
+  <p class="quiz-q">A ClickHouse node dies. You have a backup from yesterday. ReplicatedMergeTree with 2 replicas is configured. Do you need to restore from backup?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>No. ReplicatedMergeTree will replicate missing parts from the surviving replica once the node comes back (or is replaced). Backup restore is only needed when ALL replicas of a shard are lost simultaneously — a much rarer DR scenario. Replication is the primary HA/recovery mechanism; backup is the last-resort DR fallback.</div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">You run <code>BACKUP DATABASE default TO S3(...)</code> and the command returns instantly. Is the backup complete?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Only if you used the synchronous form. The async form returns a backup_id immediately while backup runs in the background. Check <code>SELECT status FROM system.backups WHERE id='&lt;id&gt;'</code> and wait for <code>BACKUP_CREATED</code>. Never assume the backup is done just because the SQL returned.</div>
+</div>

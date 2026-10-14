@@ -1642,3 +1642,145 @@ Redpanda uses Raft natively from its first release. Every partition group uses R
     </div>
   </div>
 </div>
+
+---
+
+## Disaster Recovery & Cross-Cluster Replication
+
+### Why Kafka Has No Traditional Backup
+
+Kafka's log segments are already replicated across brokers by the ISR mechanism. A replication factor of 3 means each partition is stored on 3 brokers — losing one broker is handled automatically by leader re-election.
+
+Traditional "backup" (tar the data dir) doesn't work well:
+- Log segments contain offsets, which are cluster-specific
+- Consumer group offsets live in `__consumer_offsets` — not in the log segments
+- A node restored from raw files won't know the current partition leader or cluster membership
+
+**The answer to DR in Kafka is not backup — it's cross-cluster replication.**
+
+### In-Cluster HA vs Cross-Cluster DR
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="incluster" class="active">In-cluster HA</button>
+    <button data-tab="crosscluster">Cross-cluster DR (MirrorMaker2)</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="incluster">
+      <strong>Replication factor ≥ 3 handles:</strong>
+      <ul>
+        <li>Single broker failure (leader re-election from ISR)</li>
+        <li>Rolling broker restarts (upgrades)</li>
+        <li>Disk failure (partition replicated to other brokers)</li>
+      </ul>
+      <strong>Does NOT handle:</strong>
+      <ul>
+        <li>Full cluster failure (data center outage)</li>
+        <li>Accidental topic deletion</li>
+        <li>Corrupted data replicated to all replicas</li>
+      </ul>
+    </div>
+    <div class="tab-panel" data-tab-panel="crosscluster">
+      <strong>MirrorMaker2 handles:</strong>
+      <ul>
+        <li>Active-passive DC failover (traffic switches to DR cluster)</li>
+        <li>Active-active geo-distribution (writes in both clusters, replicated bidirectionally)</li>
+        <li>Accidental deletion recovery (DR cluster has data independently)</li>
+      </ul>
+      <strong>Does NOT handle:</strong>
+      <ul>
+        <li>Sub-second failover (replication lag means some messages may not be in DR cluster yet)</li>
+        <li>Exactly-once across clusters</li>
+      </ul>
+    </div>
+  </div>
+</div>
+
+### MirrorMaker2 Architecture
+
+```mermaid
+graph LR
+    subgraph Source["Source Cluster (DC1)"]
+        B1[Broker 1]
+        B2[Broker 2]
+        B3[Broker 3]
+    end
+
+    subgraph MM2["MirrorMaker2"]
+        MSC[MirrorSourceConnector<br/>mirrors topic data]
+        MCC[MirrorCheckpointConnector<br/>syncs consumer offsets]
+        MHC[MirrorHeartbeatConnector<br/>measures replication lag]
+    end
+
+    subgraph Target["Target Cluster (DC2)"]
+        T1[Broker 1]
+        T2[Broker 2]
+        T3[Broker 3]
+    end
+
+    Source -->|topic records| MSC --> Target
+    Source -->|__consumer_offsets| MCC --> Target
+    MHC -->|heartbeat.ms latency| Target
+```
+
+Three connectors, each with a specific job:
+- **`MirrorSourceConnector`**: replicates topic records. Topics appear in target prefixed with the source alias (e.g., `source.my-topic`).
+- **`MirrorCheckpointConnector`**: translates and syncs consumer group offsets from source to target so consumers can resume from the right position after failover.
+- **`MirrorHeartbeatConnector`**: writes periodic records to a heartbeat topic; used to measure actual replication lag.
+
+### MirrorMaker2 Configuration
+
+```properties
+# mm2.properties
+clusters = source, target
+source.bootstrap.servers = dc1-broker1:9092,dc1-broker2:9092
+target.bootstrap.servers = dc2-broker1:9092,dc2-broker2:9092
+
+# Enable all three connectors
+source->target.enabled = true
+source->target.topics = .*          # all topics
+source->target.groups = .*          # all consumer groups
+
+# Replication factors for internal MM2 topics
+source->target.replication.factor = 3
+checkpoints.topic.replication.factor = 3
+heartbeats.topic.replication.factor = 3
+```
+
+```bash
+# Start MirrorMaker2
+./bin/connect-mirror-maker.sh mm2.properties
+```
+
+### Consumer Group Offset Sync & Failover
+
+Consumer group offsets are cluster-local — offset 1000 in source ≠ offset 1000 in target if compaction ran differently. MirrorCheckpointConnector writes translated offsets to `mm2-offsets.<source>.internal` in the target cluster.
+
+On failover:
+
+```bash
+# Reset consumer group to translated offset in target cluster
+./bin/kafka-consumer-groups.sh \
+  --bootstrap-server dc2-broker1:9092 \
+  --group my-consumer-group \
+  --reset-offsets \
+  --from-file translated-offsets.csv \
+  --execute
+```
+
+`auto.offset.reset=earliest` as a safe fallback: if no translated offset is found, the consumer starts from the earliest available record — may reprocess some messages but won't miss any.
+
+### Tiered Storage (KIP-405) as Long-Term Retention
+
+Apache Kafka 3.6+ (and Confluent Platform) supports Tiered Storage — older log segments are offloaded to object storage (S3/GCS) while recent segments stay on broker disk. This enables:
+- Months/years of retention without scaling broker disk
+- Cost-effective DR: historical data in S3 survives a full cluster loss
+- Re-bootstrapping a new cluster from tiered storage
+
+Not a backup per se — but achieves similar recoverability for historical data without a separate backup pipeline.
+
+<div class="quiz-card">
+  <p class="quiz-q">Your source Kafka cluster goes down. MirrorMaker2 was replicating with ~30 second lag. Consumer group <code>payments-consumer</code> was at offset 50000 in source. What happens to it in the target cluster after failover?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>MirrorCheckpointConnector has been syncing translated offsets to the target. The consumer group in target has a translated offset corresponding to the last checkpointed position — roughly 30 seconds behind. After failover, the consumer resumes from that translated offset, potentially reprocessing ~30 seconds of messages. This is at-least-once delivery across clusters; exactly-once requires deduplication logic on the consumer side.</div>
+</div>

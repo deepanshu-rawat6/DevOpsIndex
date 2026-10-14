@@ -118,7 +118,7 @@ const SECTIONS = [
   },
   {
     slug: 'databases', title: 'Database Internals', order: 14,
-    readOrder: ['README', 'postgres-internals', 'mysql-internals', 'mongodb-internals', 'redis-internals', 'etcd', 'lsm-trees', 'kafka-internals', 'clickhouse-internals', 'elasticsearch-internals', 'replication', 'caching'],
+    readOrder: ['README', 'postgres-internals', 'mysql-internals', 'mongodb-internals', 'redis-internals', 'etcd', 'lsm-trees', 'kafka-internals', 'clickhouse-internals', 'elasticsearch-internals', 'replication', 'caching', 'backup-strategies'],
     sectionPrereqs: [
       { title: 'Linux',      slug: 'linux' },
       { title: 'Networking', slug: 'networking' },
@@ -134,7 +134,7 @@ const SECTIONS = [
   },
   {
     slug: 'on-prem-vm', title: 'On-Prem VM Setup', order: 16,
-    readOrder: ['README', 'mongodb'],
+    readOrder: ['README', 'mysql', 'mongodb', 'etcd', 'postgres', 'redis'],
     sectionPrereqs: [
       { title: 'Linux',             slug: 'linux' },
       { title: 'Database Internals', slug: 'databases' },

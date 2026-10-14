@@ -11,19 +11,20 @@ Deep dives into each database: storage engine internals, WAL, replication, index
 
 | File | Database | Key Topics |
 |------|----------|-----------|
-| [postgres-internals.md](./postgres-internals.md) | PostgreSQL | MVCC, WAL, VACUUM, B-tree/GiST indexes, EXPLAIN, connection pooling, replication internals |
+| [postgres-internals.md](./postgres-internals.md) | PostgreSQL | MVCC, WAL, VACUUM, B-tree/GiST indexes, EXPLAIN, connection pooling, replication internals, pg_basebackup, pgBackRest, WAL archiving, PITR |
 | [mysql-internals.md](./mysql-internals.md) | MySQL / InnoDB | InnoDB storage engine, redo log, undo log, MVCC, B-tree, buffer pool, replication binlog, XtraBackup hot backup & restore |
-| [mongodb-internals.md](./mongodb-internals.md) | MongoDB | WiredTiger storage engine, oplog, BSON, aggregation pipeline, index types, sharding |
+| [mongodb-internals.md](./mongodb-internals.md) | MongoDB | WiredTiger storage engine, oplog, BSON, aggregation pipeline, index types, sharding, mongodump vs PBM, oplog-tail PITR |
 | [redis-internals.md](./redis-internals.md) | Redis | Data structures internals, RDB/AOF persistence, eviction policies, Lua scripting, cluster |
 | [etcd.md](./etcd.md) | etcd | Raft consensus, MVCC storage model, watch API, compaction/defrag, clustering, performance tuning |
 | [lsm-trees.md](./lsm-trees.md) | LSM Trees | MemTable→SSTable write path, compaction strategies (size-tiered/leveled/FIFO), bloom filters, read/write/space amplification, RocksDB ecosystem |
-| [kafka-internals.md](./kafka-internals.md) | Apache Kafka | Log segments, zero-copy sendfile, OS page cache, offset management, consumer groups, exactly-once, Redpanda comparison |
+| [kafka-internals.md](./kafka-internals.md) | Apache Kafka | Log segments, zero-copy sendfile, OS page cache, offset management, consumer groups, exactly-once, Redpanda comparison, MirrorMaker2 DR |
 | [kafka-field-guide.md](./kafka-field-guide.md) | Apache Kafka | Narrative field guide: brokers/controller, topics/partitions, ISR & under-replicated vs. offline, producers, consumer group rebalances, offsets/lag, retention, Schema Registry, Connect, ACLs |
-| [clickhouse-internals.md](./clickhouse-internals.md) | ClickHouse | MergeTree family, columnar storage, compression, materialized views, query execution |
+| [clickhouse-internals.md](./clickhouse-internals.md) | ClickHouse | MergeTree family, columnar storage, compression, materialized views, query execution, BACKUP TO, clickhouse-backup, frozen partitions |
 | [spark-internals.md](./spark-internals.md) | Apache Spark | Driver/Executor/Shuffle Service architecture, DAG→Stages→Tasks execution model, RDD vs DataFrame vs Dataset, Structured Streaming, operational config, Spark vs BigQuery vs Dataflow |
-| [elasticsearch-internals.md](./elasticsearch-internals.md) | Elasticsearch | Inverted index, segments, sharding, replication, mappings, Query DSL, aggregations, ILM, vector search, security |
+| [elasticsearch-internals.md](./elasticsearch-internals.md) | Elasticsearch | Inverted index, segments, sharding, replication, mappings, Query DSL, aggregations, ILM, vector search, security, snapshot/restore, SLM |
 | [replication.md](./replication.md) | All DBs | Sync/async/semi-sync, WAL shipping, logical vs physical, per-DB deep dives, Raft/Paxos, cross-region, lag measurement |
 | [caching.md](./caching.md) | Redis / Memcached | Cache tiers, eviction policies, cache-aside/write-through/write-behind, stampede (XFetch), warming, invalidation |
+| [backup-strategies.md](./backup-strategies.md) | All DBs | Hot vs cold, physical vs logical, WAL/oplog PITR mechanics, incremental backups, backup verification, RTO/RPO, tool matrix |
 
 ## Common Concepts Across All Databases
 

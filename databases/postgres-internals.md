@@ -1773,3 +1773,210 @@ WHERE relkind = 'r'
 ORDER BY pg_total_relation_size(oid) DESC
 LIMIT 20;
 ```
+
+---
+
+## Backup & Point-in-Time Recovery
+
+XtraBackup's equivalent for PostgreSQL is `pg_basebackup` + **pgBackRest** + WAL archiving. Unlike MySQL which uses binlog, Postgres uses WAL (Write-Ahead Log) as the change stream for both replication and PITR. This section covers logical vs physical backups, WAL archiving setup, and a full PITR restore workflow.
+
+### Why not pg_dump?
+
+`pg_dump` is a logical backup — it exports data as SQL. Fine for small databases or schema migrations, but no PITR capability and restore times grow linearly with data volume. `pg_basebackup` takes a physical copy of PGDATA, the same mechanism that seeds standbys:
+
+<div class="tab-group">
+  <div class="tab-buttons">
+    <button data-tab="pgdump" class="active">pg_dump</button>
+    <button data-tab="pgbasebackup">pg_basebackup</button>
+  </div>
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="pgdump">
+
+```sql
+-- pg_dump: logical export (SQL text or custom format)
+pg_dump -Fc -d mydb -f mydb.dump
+-- Restore: pg_restore -d mydb mydb.dump
+-- No explicit lock — reads a consistent MVCC snapshot per table
+-- Restore time on 1TB: ~4 hours (replays every INSERT)
+```
+
+    </div>
+    <div class="tab-panel" data-tab-panel="pgbasebackup">
+
+```bash
+# pg_basebackup: physical copy of PGDATA
+pg_basebackup -h primary -U replicator -D /backup/base -Ft -z -P
+# No lock on primary. Uses streaming replication protocol.
+# Restore time on 1TB: ~20 minutes (file copy + WAL replay)
+```
+
+    </div>
+  </div>
+</div>
+
+| | pg_dump | pg_basebackup |
+|---|---|---|
+| Backup type | Logical (SQL) | Physical (data files) |
+| PITR capable | No | Yes (with WAL archiving) |
+| Restore time (1TB) | ~4 hours | ~20 minutes |
+| Single table backup | Yes | No |
+| Cross-version restore | Yes | No |
+| Hot backup | Yes | Yes |
+
+### WAL Archiving — The PITR Foundation
+
+PostgreSQL writes every change to WAL before touching data pages. Archiving completed WAL segments to S3/GCS is what enables PITR — the same mechanism as MySQL binlog, but automatic.
+
+```conf
+# postgresql.conf
+wal_level = replica          # minimum for archiving; 'logical' also works
+archive_mode = on
+archive_command = 'wal-g wal-push %p'    # %p = segment path, %f = filename
+restore_command = 'wal-g wal-fetch %f %p'
+archive_timeout = 60         # archive every 60s even if segment not full → RPO ≈ 60s
+```
+
+`wal-g` environment (set in systemd override or `/etc/wal-g/wal-g.env`):
+
+```bash
+WALG_S3_PREFIX=s3://my-pg-backups/wal
+AWS_REGION=us-east-1
+# GCS alternative:
+# WALG_GS_PREFIX=gs://my-pg-backups/wal
+# GOOGLE_APPLICATION_CREDENTIALS=/etc/wal-g/sa.json
+```
+
+Key WAL concepts:
+- A WAL segment is 16MB by default. Archived after it fills or `archive_timeout` is reached.
+- `archive_timeout = 60` → at most 60s of WAL per segment → RPO ≈ 60s (not 16MB of writes).
+- Continuous archiving means segments are shipped to S3 in order as they complete.
+
+### pgBackRest — Full Backup + PITR
+
+pgBackRest is the production-grade backup manager for PostgreSQL. It handles full/differential/incremental backups, WAL archiving, and PITR with a single config file.
+
+```bash
+apt install pgbackrest
+```
+
+`/etc/pgbackrest.conf`:
+
+```conf
+[global]
+repo1-path=/var/lib/pgbackrest
+repo1-type=s3
+repo1-s3-bucket=my-pg-backups
+repo1-s3-region=us-east-1
+repo1-retention-full=2
+start-fast=y
+
+[mydb]
+pg1-path=/var/lib/postgresql/16/main
+pg1-port=5432
+```
+
+```bash
+# One-time stanza initialisation
+pgbackrest --stanza=mydb stanza-create
+
+# Full backup (copy all data files)
+pgbackrest --stanza=mydb --type=full backup
+
+# Differential (changed blocks since last full)
+pgbackrest --stanza=mydb --type=diff backup
+
+# Incremental (changed blocks since last backup of any type)
+pgbackrest --stanza=mydb --type=incr backup
+
+# List backups and WAL archive status
+pgbackrest --stanza=mydb info
+```
+
+Cron (`/etc/cron.d/pgbackrest`):
+
+```bash
+0 1 * * 0   postgres pgbackrest --stanza=mydb --type=full backup
+0 1 * * 1-6 postgres pgbackrest --stanza=mydb --type=diff backup
+```
+
+### PITR Restore
+
+```mermaid
+sequenceDiagram
+    participant DBA
+    participant PG as PostgreSQL (broken)
+    participant S3 as S3 / WAL archive
+
+    DBA->>PG: 1. Stop postgres
+    DBA->>PG: 2. Rename PGDATA aside
+    DBA->>S3: 3. pgbackrest restore --target="2026-10-14 03:45:00"
+    S3-->>PG: 4. Base backup files restored to PGDATA
+    S3-->>PG: 5. WAL segments replayed up to target timestamp
+    DBA->>PG: 6. Start postgres (enters recovery mode)
+    PG-->>PG: 7. Finish WAL replay, reach consistent state
+    DBA->>PG: 8. SELECT pg_wal_replay_resume() — open for writes
+```
+
+<div class="stepper">
+  <div class="stepper-panels">
+    <div class="stepper-panel active">
+      <strong>1. Stop PostgreSQL.</strong> <code>systemctl stop postgresql</code>. Confirm: <code>pg_lsclusters</code> shows status <code>down</code>.
+    </div>
+    <div class="stepper-panel">
+      <strong>2. Rename the data directory.</strong> <code>mv /var/lib/postgresql/16/main /var/lib/postgresql/16/main.bak</code>. pgBackRest requires the target to be empty or absent — never delete the old data until restore is confirmed.
+    </div>
+    <div class="stepper-panel">
+      <strong>3. Run pgBackRest restore.</strong> <code>pgbackrest --stanza=mydb --target="2026-10-14 03:45:00" --target-action=promote restore</code>. pgBackRest selects the correct base backup and fetches WAL segments automatically.
+    </div>
+    <div class="stepper-panel">
+      <strong>4. pgBackRest replays WAL.</strong> Fetches segments from S3 via <code>restore_command</code> and applies them up to the target timestamp. No manual steps — this happens inside the restore command.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. Start PostgreSQL.</strong> <code>systemctl start postgresql</code>. Postgres enters recovery mode, finalises WAL replay, then promotes (due to <code>--target-action=promote</code>).
+    </div>
+    <div class="stepper-panel">
+      <strong>6. Monitor recovery progress.</strong> <code>tail -f /var/log/postgresql/postgresql-16-main.log | grep -E "recovery|redo"</code>. Look for: <em>"database system is ready to accept connections"</em>.
+    </div>
+    <div class="stepper-panel">
+      <strong>7. Verify target reached.</strong> <code>SELECT pg_is_in_recovery();</code> — returns <code>f</code> once recovery is complete and the DB is open for writes.
+    </div>
+    <div class="stepper-panel">
+      <strong>8. Verify data integrity.</strong> <code>SELECT COUNT(*) FROM critical_table;</code> — compare with pre-incident count. Run application smoke tests before pointing replicas at this recovered primary.
+    </div>
+  </div>
+  <div class="stepper-controls">
+    <button class="stepper-prev">← Prev</button>
+    <span class="stepper-dots"></span>
+    <span class="stepper-label"></span>
+    <button class="stepper-next">Next →</button>
+  </div>
+</div>
+
+### Key flags reference
+
+| Flag | What it does |
+|------|-------------|
+| `--target="TIMESTAMP"` | Restore to this point in time |
+| `--target-action=promote` | Open DB for writes after reaching target (else stays read-only) |
+| `--type=full/diff/incr` | Backup type |
+| `--stanza=NAME` | Which PostgreSQL cluster to operate on |
+| `repo1-retention-full=2` | Keep last 2 full backups; older ones auto-expire |
+| `archive_timeout=60` | Archive WAL every 60s even if segment not full |
+| `wal_keep_size=1GB` | Keep WAL on primary for replica catch-up without archiving |
+| `start-fast=y` | Force an immediate checkpoint at backup start |
+
+### Permissions
+
+The `postgres` OS user must have credentials to write to the archive destination. For S3: attach an IAM instance role, or set `repo1-s3-key` / `repo1-s3-key-secret` in `pgbackrest.conf`. pgBackRest should **never** run as root — the config file should be readable only by the `postgres` user (`chmod 640 /etc/pgbackrest.conf`).
+
+<div class="quiz-card">
+  <p class="quiz-q">Your primary crashes at 14:37. Your last full backup completed at 01:00 this morning. WAL archiving is enabled with <code>archive_timeout=60</code>. Approximately how much data do you lose?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>At most 60 seconds of writes — one <code>archive_timeout</code> interval of WAL that hadn't been flushed to the archive yet. Everything from 01:00 to ~14:36 is in S3 as archived WAL segments. You restore the 01:00 base backup plus replayed WAL to 14:36:00 and lose only the last partial segment's worth of writes.</div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q"><code>pg_basebackup</code> is running against your primary. A write-heavy batch job starts halfway through the backup. Is the resulting backup still consistent?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>Yes. <code>pg_basebackup</code> records the WAL start position in <code>backup_label</code> at the moment the backup begins. Data files are copied while writes continue — those pages may be inconsistent mid-copy — but the inconsistency is resolved during restore by replaying WAL from that recorded start position forward. The batch job's writes land in WAL and are included via WAL replay, not via the file copy. The backup is always restorable to a consistent state.</div>
+</div>
