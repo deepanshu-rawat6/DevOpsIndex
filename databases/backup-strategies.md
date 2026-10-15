@@ -35,18 +35,18 @@ A **cold backup** stops the database first, copies the files, then restarts. Sim
 
 <div class="tab-group">
   <div class="tab-buttons">
-    <button data-tab="physical">Physical</button>
+    <button data-tab="physical" class="active">Physical</button>
     <button data-tab="logical">Logical</button>
   </div>
   <div class="tab-panels">
-    <div data-tab-content="physical">
+    <div class="tab-panel active" data-tab-panel="physical">
       <strong>Restore time (1 TB):</strong> ~20 minutes — file copy at disk throughput + short redo replay.<br/>
       <strong>PITR:</strong> ✅ — combine with WAL/binlog archiving to restore to any second in time.<br/>
       <strong>Portability:</strong> Same engine version required. Cannot upgrade MySQL 5.7 → 8.0 via physical restore.<br/>
       <strong>Consistency:</strong> Redo log ensures a consistent view even if files were copied mid-write.<br/>
       <strong>Tools:</strong> XtraBackup (MySQL), pg_basebackup / pgBackRest / wal-g (Postgres), PBM (MongoDB), <code>BACKUP TO</code> (ClickHouse).
     </div>
-    <div data-tab-content="logical">
+    <div class="tab-panel" data-tab-panel="logical">
       <strong>Restore time (1 TB):</strong> 4–8 hours — every row re-inserted and every index rebuilt.<br/>
       <strong>PITR:</strong> ❌ — snapshot only, no continuous log replay.<br/>
       <strong>Portability:</strong> Cross-version, cross-platform, readable with any text editor.<br/>

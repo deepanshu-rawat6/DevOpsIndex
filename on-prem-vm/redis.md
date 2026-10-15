@@ -89,8 +89,8 @@ Open between **all three VMs** in both directions.
   <button data-tab="firewalld">RHEL/firewalld</button>
   <button data-tab="iptables">iptables</button>
 </div>
-<div class="tab-panels">
-<div data-tab-content="ufw">
+  <div class="tab-panels">
+    <div class="tab-panel active" data-tab-panel="ufw">
 
 ```bash
 # Run on all 3 VMs — substitute actual peer IPs
@@ -106,7 +106,7 @@ sudo ufw reload
 ```
 
 </div>
-<div data-tab-content="firewalld">
+    <div class="tab-panel" data-tab-panel="firewalld">
 
 ```bash
 # Run on all 3 VMs
@@ -118,7 +118,7 @@ sudo firewall-cmd --reload
 ```
 
 </div>
-<div data-tab-content="iptables">
+    <div class="tab-panel" data-tab-panel="iptables">
 
 ```bash
 # Run on all 3 VMs
@@ -130,7 +130,7 @@ sudo iptables-save | sudo tee /etc/iptables/rules.v4
 ```
 
 </div>
-</div>
+  </div>
 </div>
 
 Verify connectivity from each VM:
