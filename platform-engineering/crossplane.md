@@ -287,7 +287,7 @@ Many organizations use both: Terraform for base infrastructure (VPCs, clusters, 
 ## 6. How a Composition Renders a Cloud Resource
 
 <div class="stepper">
-  <div class="stepper-header">
+  <div class="stepper-controls">
     <button class="stepper-prev" disabled>←</button>
     <span class="stepper-label">Step 1 of 5</span>
     <button class="stepper-next">→</button>

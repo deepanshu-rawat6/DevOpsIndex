@@ -219,7 +219,7 @@ The **developer-to-platform-engineer ratio** CNCF recommends is approximately 10
 A practical three-step ladder for teams starting from scratch:
 
 <div class="stepper">
-  <div class="stepper-header">
+  <div class="stepper-controls">
     <button class="stepper-prev" disabled>←</button>
     <span class="stepper-label">Step 1 of 3</span>
     <button class="stepper-next">→</button>

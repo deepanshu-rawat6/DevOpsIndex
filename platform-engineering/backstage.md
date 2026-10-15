@@ -155,7 +155,7 @@ The Scaffolder is Backstage's golden-path delivery mechanism. A software templat
 ### How a developer uses it
 
 <div class="stepper">
-  <div class="stepper-header">
+  <div class="stepper-controls">
     <button class="stepper-prev" disabled>←</button>
     <span class="stepper-label">Step 1 of 5</span>
     <button class="stepper-next">→</button>

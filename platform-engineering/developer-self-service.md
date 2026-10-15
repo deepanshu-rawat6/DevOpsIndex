@@ -188,7 +188,7 @@ graph TD
 ### PR environment lifecycle
 
 <div class="stepper">
-  <div class="stepper-header">
+  <div class="stepper-controls">
     <button class="stepper-prev" disabled>←</button>
     <span class="stepper-label">Step 1 of 4</span>
     <button class="stepper-next">→</button>
