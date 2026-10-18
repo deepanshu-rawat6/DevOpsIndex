@@ -18,6 +18,7 @@ Metrics, logs, traces, and alerting — from Prometheus fundamentals to long-ter
 | [monitoring-scenarios.md](./monitoring-scenarios.md) | 12 debugging scenarios with Prevention: target DOWN, missing metrics, Prometheus OOM, alert storms |
 | [distributed-tracing-backend.md](./distributed-tracing-backend.md) | Grafana Tempo architecture, TraceQL, trace-to-log correlation, service graph, Jaeger comparison |
 | [continuous-profiling.md](./continuous-profiling.md) | Parca eBPF DaemonSet, Pyroscope, flame graph reading, trace-to-profile correlation, GCP Cloud Profiler |
+| [loki-ruler.md](./loki-ruler.md) | Loki ruler component, recording rules (log-to-metric), alerting from logs, ruler.yaml config, common patterns |
 
 > Database-specific monitoring (PostgreSQL, MySQL, Redis, MongoDB) lives in [../sre/db-monitoring.md](../sre/db-monitoring.md).
 
@@ -36,4 +37,5 @@ graph LR
     I --> J["monitoring-scenarios<br/>applied debugging runbooks"]
     J --> K["distributed-tracing-backend<br/>Tempo, TraceQL, Jaeger"]
     K --> L["continuous-profiling<br/>Parca, Pyroscope, flame graphs"]
+    L --> M["loki-ruler<br/>log-to-metric, recording rules, alerting from logs"]
 ```

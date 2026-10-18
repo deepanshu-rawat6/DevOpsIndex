@@ -15,6 +15,8 @@ A production-focused Docker reference covering architecture, image layers, essen
 | [compose-advanced.md](./compose-advanced.md) | depends_on with service_healthy, profiles, override file chaining, extends, secrets/configs, resource limits, compose watch, CI caching |
 | [runtime-and-alternatives.md](./runtime-and-alternatives.md) | dockershim removal, CRI spec, containerd + nerdctl, CRI-O, Podman rootless, crictl, runtime classes (gVisor/Kata/WASM), snapshotters |
 | [registry-and-distribution.md](./registry-and-distribution.md) | OCI Distribution Spec pull sequence, manifest formats, content-addressable storage, Harbor, pull-through mirror, cosign + Kyverno, multi-arch |
+| [volumes-and-storage.md](./volumes-and-storage.md) | Bind mounts vs named volumes vs tmpfs, overlay2 CoW, NFS/EFS volume driver plugins, volume backup patterns, multi-host challenges |
+| [daemon.md](./daemon.md) | daemon.json reference, storage driver (overlay2 vs devicemapper), log drivers (json-file/journald/fluentd), live-restore, runtime config, metrics |
 
 Most major sections end with a quick knowledge check — track how many you've cleared:
 

@@ -10,15 +10,15 @@ const CONTENT_DIR = path.resolve(__dirname, '../src/content/topics');
 const SECTIONS = [
   {
     slug: 'linux', title: 'Linux', order: 1,
-    readOrder: ['README', 'commands', 'boot', 'systemd', 'networking', 'network-tools', 'io-models', 'scheduler', 'security', 'memory-tuning', 'strace-perf', 'containers-evolution', 'cgroup-v2', 'proc-internals', 'ebpf-bpftrace', 'signals', 'namespaces', 'filesystem-internals', 'numa-irq-tuning', 'kernel-memory-internals', 'io-schedulers-and-storage', 'perf-and-flamegraphs'],
+    readOrder: ['README', 'commands', 'boot', 'systemd', 'networking', 'network-tools', 'io-models', 'scheduler', 'security', 'memory-tuning', 'strace-perf', 'containers-evolution', 'cgroup-v2', 'proc-internals', 'ebpf-bpftrace', 'signals', 'namespaces', 'filesystem-internals', 'numa-irq-tuning', 'kernel-memory-internals', 'io-schedulers-and-storage', 'perf-and-flamegraphs', 'auditd'],
   },
   {
     slug: 'networking', title: 'Networking', order: 2,
-    readOrder: ['README', 'osi-model', 'tcp-udp', 'tls-encryption', 'acme-certificate-automation', 'http-versions', 'grpc-graphql', 'grpc-deep-dive', 'linux-networking', 'bgp-routing', 'load-balancers', 'cdn', 'nslookup-vs-curl', 'zero-trust', 'dns-internals', 'overlay-networks', 'ipvs-and-cni', 'service-mesh', 'quic-http3', 'websocket-internals'],
+    readOrder: ['README', 'osi-model', 'tcp-udp', 'tls-encryption', 'acme-certificate-automation', 'http-versions', 'grpc-graphql', 'grpc-deep-dive', 'linux-networking', 'bgp-routing', 'load-balancers', 'cdn', 'nslookup-vs-curl', 'zero-trust', 'dns-internals', 'overlay-networks', 'ipvs-and-cni', 'service-mesh', 'quic-http3', 'websocket-internals', 'network-performance-tuning'],
   },
   {
     slug: 'docker', title: 'Docker', order: 3,
-    readOrder: ['README', 'networking', 'buildkit', 'docker-security', 'internals', 'debugging', 'compose-advanced', 'runtime-and-alternatives', 'registry-and-distribution'],
+    readOrder: ['README', 'networking', 'buildkit', 'docker-security', 'internals', 'debugging', 'compose-advanced', 'runtime-and-alternatives', 'registry-and-distribution', 'volumes-and-storage', 'daemon'],
     sectionPrereqs: [
       { title: 'Linux',      slug: 'linux' },
       { title: 'Networking', slug: 'networking' },
@@ -35,7 +35,7 @@ const SECTIONS = [
   },
   {
     slug: 'cicd', title: 'CI/CD', order: 5,
-    readOrder: ['README', 'github-actions', 'jenkins', 'jenkins/ecs-agents', 'argocd', 'gitops-secrets', 'pipeline-design', 'argo-rollouts'],
+    readOrder: ['README', 'github-actions', 'jenkins', 'jenkins/ecs-agents', 'argocd', 'gitops-secrets', 'pipeline-design', 'argo-rollouts', 'tekton'],
     sectionPrereqs: [
       { title: 'Docker',     slug: 'docker' },
       { title: 'Kubernetes', slug: 'kubernetes' },
@@ -71,7 +71,7 @@ const SECTIONS = [
   },
   {
     slug: 'monitoring', title: 'Monitoring', order: 9,
-    readOrder: ['README', 'prometheus', 'alertmanager', 'grafana', 'opentelemetry', 'loki', 'performance-debugging', 'monitoring-scenarios', 'slo-sli', 'alerting-philosophy', 'thanos-mimir', 'distributed-tracing-backend', 'continuous-profiling'],
+    readOrder: ['README', 'prometheus', 'alertmanager', 'grafana', 'opentelemetry', 'loki', 'performance-debugging', 'monitoring-scenarios', 'slo-sli', 'alerting-philosophy', 'thanos-mimir', 'distributed-tracing-backend', 'continuous-profiling', 'loki-ruler'],
     sectionPrereqs: [
       { title: 'Linux',      slug: 'linux' },
       { title: 'Kubernetes', slug: 'kubernetes' },
@@ -103,7 +103,7 @@ const SECTIONS = [
   },
   {
     slug: 'ai-infra', title: 'AI Infrastructure', order: 12,
-    readOrder: ['README', 'gpu-scheduling', 'kuberay', 'model-serving', 'llmops', 'networking'],
+    readOrder: ['README', 'gpu-scheduling', 'kuberay', 'model-serving', 'llmops', 'networking', 'distributed-training'],
     sectionPrereqs: [
       { title: 'Kubernetes', slug: 'kubernetes' },
     ],
@@ -126,7 +126,7 @@ const SECTIONS = [
   },
   {
     slug: 'on-prem-k8s', title: 'Databases on Kubernetes', order: 15,
-    readOrder: ['README', 'postgres', 'mysql', 'mongodb', 'redis-cluster', 'kafka', 'clickhouse'],
+    readOrder: ['README', 'postgres', 'mysql', 'mongodb', 'redis-cluster', 'kafka', 'clickhouse', 'elasticsearch', 'statefulset-patterns'],
     sectionPrereqs: [
       { title: 'Kubernetes',         slug: 'kubernetes' },
       { title: 'Database Internals', slug: 'databases' },
@@ -197,7 +197,7 @@ const SECTIONS = [
   },
   {
     slug: 'platform-engineering', title: 'Platform Engineering', order: 20,
-    readOrder: ['README', 'idp-concepts', 'backstage', 'crossplane', 'developer-self-service', 'multi-tenancy', 'platform-observability', 'cost-attribution', 'workflow-automation', 'ai-sre-agents'],
+    readOrder: ['README', 'idp-concepts', 'backstage', 'crossplane', 'developer-self-service', 'multi-tenancy', 'platform-observability', 'cost-attribution', 'workflow-automation', 'ai-sre-agents', 'feature-flags'],
     sectionPrereqs: [
       { title: 'Kubernetes', slug: 'kubernetes' },
       { title: 'CI/CD',      slug: 'cicd' },

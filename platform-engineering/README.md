@@ -143,8 +143,9 @@ graph LR
     H["cost-attribution<br/>Kubecost, OpenCost, FinOps"]
     I["workflow-automation<br/>n8n, Temporal"]
     J["ai-sre-agents<br/>k8sgpt, Robusta, OpenSRE"]
+    K["feature-flags<br/>OpenFeature, LaunchDarkly, Unleash"]
 
-    A --> B --> C --> D --> E --> F --> G --> H --> I --> J
+    A --> B --> C --> D --> E --> F --> G --> H --> I --> J --> K
 ```
 
 **Prerequisites**: Kubernetes (workloads, RBAC, networking, custom resources), CI/CD (ArgoCD, GitOps model), IaC (Terraform at minimum).

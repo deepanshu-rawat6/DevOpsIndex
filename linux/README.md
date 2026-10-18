@@ -26,6 +26,7 @@ Everything — containers, Kubernetes, networking, storage — is built on Linux
 | [kernel-memory-internals.md](./kernel-memory-internals.md) | Buddy allocator, SLUB slab cache, page cache writeback, TLB + HugeTLB vs THP, PSI memory pressure |
 | [io-schedulers-and-storage.md](./io-schedulers-and-storage.md) | Block I/O call path, none/mq-deadline/bfq scheduler guide, blkio cgroup v2, blktrace, fio, iostat |
 | [perf-and-flamegraphs.md](./perf-and-flamegraphs.md) | perf record at 99Hz, flamegraph pipeline, differential flamegraphs, off-CPU profiling, perf probe, perf mem |
+| [auditd.md](./auditd.md) | Linux audit subsystem, auditctl rules, audit.rules format, ausearch/aureport, SIEM integration, PCI-DSS/SOC2 audit requirements |
 
 Sections below carry a **❓ knowledge check** — try to answer before revealing:
 

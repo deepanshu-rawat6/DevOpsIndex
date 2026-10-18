@@ -25,6 +25,7 @@ Core networking concepts for backend engineers and platform engineers — from p
 | [service-mesh.md](./service-mesh.md) | Istio istiod + xDS API, Envoy sidecar injection, SPIFFE mTLS, VirtualService/DestinationRule canary, retries/circuit breaking/fault injection, Linkerd comparison |
 | [quic-http3.md](./quic-http3.md) | QUIC vs TCP HoL blocking, connection IDs, 1-RTT/0-RTT, QUIC streams, QPACK, nginx QUIC config, qvis debugging |
 | [websocket-internals.md](./websocket-internals.md) | Upgrade handshake, frame format, ping/pong keepalives, backpressure, LB sticky sessions, horizontal scaling with Redis Pub/Sub |
+| [network-performance-tuning.md](./network-performance-tuning.md) | TCP buffer sizing (rmem/wmem), BBR vs CUBIC, ethtool ring tuning, RSS/RPS/RFS, IRQ affinity, jumbo frames, iperf3 benchmarking |
 
 ## Read Order
 

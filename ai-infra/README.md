@@ -71,6 +71,7 @@ graph TD
 | [model-serving.md](./model-serving.md) | KServe InferenceService, vLLM continuous batching, KV cache, canary rollouts, autoscaling with Knative |
 | [llmops.md](./llmops.md) | RAG architecture, vector DBs (pgvector, Milvus, Pinecone), LangSmith tracing, guardrails, cost optimization |
 | [networking.md](./networking.md) | NVLink, InfiniBand, RoCE, AWS EFA, NCCL AllReduce, Cilium for inference, fat-tree topology |
+| [distributed-training.md](./distributed-training.md) | DDP, FSDP, tensor/pipeline parallelism, Ring-AllReduce, NCCL backends, PyTorchJob on Kubeflow, KubeRay |
 
 ---
 

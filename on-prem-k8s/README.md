@@ -38,6 +38,8 @@ Running databases on Kubernetes is operationally harder than managed services (C
 | [redis-cluster.md](./redis-cluster.md) | Redis Cluster | Sharding, slot distribution, sentinel vs cluster, persistence (RDB/AOF), failover |
 | [kafka.md](./kafka.md) | Apache Kafka | Strimzi operator, partition replication, ISR, leader election, consumer groups |
 | [clickhouse.md](./clickhouse.md) | ClickHouse | ClickHouse Operator, sharding, replication via ZooKeeper/ClickHouse Keeper, backups |
+| [elasticsearch.md](./elasticsearch.md) | Elasticsearch | ECK operator, node role separation (master/data/ingest), PVC sizing, ILM on K8s, snapshot to S3, rolling upgrades |
+| [statefulset-patterns.md](./statefulset-patterns.md) | All DBs | Headless services, PVC retention policy, init containers, PodDisruptionBudgets, graceful shutdown, anti-affinity |
 
 ## Common Patterns Across All DBs
 
