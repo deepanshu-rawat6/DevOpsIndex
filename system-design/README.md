@@ -20,8 +20,10 @@ Core patterns for designing scalable, reliable distributed systems. Covers the b
 | [distributed-id-generation.md](./distributed-id-generation.md) | UUID v4 vs ULID/UUIDv7, Twitter Snowflake bit layout, clock-drift handling, ticket servers, range/segment allocation | SDE-2 |
 | [geospatial-services.md](./geospatial-services.md) | Geohashing, quadtrees, S2 geometry, Redis GEO commands, ride-hailing matching, KNN vs radius search | SDE-2 |
 | [probabilistic-data-structures.md](./probabilistic-data-structures.md) | Bloom filter recap, HyperLogLog cardinality estimation (live simulator), Count-Min Sketch frequency estimation | SDE-2 |
+| [search-system.md](./search-system.md) | Inverted index, BM25 scoring, ES cluster design for 1B docs, ILM, zero-downtime reindex, autocomplete strategies, relevance tuning, k-NN vector search | SDE-2/Staff |
+| [notification-system.md](./notification-system.md) | FCM/APNs integration, fan-out strategies, device token registry, delivery receipts, batching/throttling, DND hours | SDE-2 |
 
-**Read order:** scaling → cap-pacelc → rate-limiting → async-patterns → api-design → distributed-transactions → file-transfer-storage → realtime-chat → end-to-end-encryption → distributed-id-generation → geospatial-services → probabilistic-data-structures
+**Read order:** scaling → cap-pacelc → rate-limiting → async-patterns → api-design → distributed-transactions → file-transfer-storage → realtime-chat → end-to-end-encryption → distributed-id-generation → geospatial-services → probabilistic-data-structures → search-system → notification-system
 
 ---
 

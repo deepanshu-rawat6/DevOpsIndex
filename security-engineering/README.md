@@ -80,6 +80,9 @@ graph LR
     SC --> SM["secrets-management"]
     SM --> SD["sast-dast"]
     SD --> KS["k8s-security"]
+    KS --> TM["threat-modeling"]
+    TM --> ZT["zero-trust"]
+    ZT --> CA["compliance-automation"]
 ```
 
 | File | What it covers |
@@ -89,3 +92,6 @@ graph LR
 | `secrets-management` | Vault, External Secrets Operator, Sealed Secrets, SOPS |
 | `sast-dast` | Semgrep, Checkov, OWASP ZAP, false-positive triage |
 | `k8s-security` | Pod Security Standards, Gatekeeper, Kyverno, audit logging |
+| `threat-modeling` | STRIDE framework, data flow diagrams, attack trees, DREAD scoring |
+| `zero-trust` | SPIFFE/SPIRE, Istio mTLS, workload identity (GKE/EKS), JWT validation |
+| `compliance-automation` | kube-bench, OPA/conftest CI gates, SBOM generation, SOC2/PCI-DSS mappings |

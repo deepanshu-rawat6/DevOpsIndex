@@ -23,6 +23,8 @@
 | [scheduler-internals.md](./scheduler-internals.md) | Filter + Score plugins, FailedScheduling events, full pod scheduling sequence |
 | [policy-security.md](./policy-security.md) | OPA/Gatekeeper, Kyverno, multi-tenancy, ResourceQuota, NetworkPolicy isolation, PSA, seccomp, AppArmor |
 | [node-shutdown.md](./node-shutdown.md) | Graceful shutdown (systemd inhibitor), pod eviction ordering, node drain, non-graceful shutdown, lifecycle taints |
+| [cluster-upgrades.md](./cluster-upgrades.md) | Version skew policy, kubeadm upgrade sequence, EKS/GKE managed upgrades, blue-green node group strategy, deprecated API handling |
+| [gateway-api.md](./gateway-api.md) | GatewayClass/Gateway/HTTPRoute resource model, Ingress migration, canary routing, Envoy Gateway, Cilium eBPF implementation |
 
 Most major sections below end with a quick knowledge check — track how many you've cleared as you go:
 

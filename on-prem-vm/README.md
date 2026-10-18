@@ -32,6 +32,9 @@ Running databases directly on VMs skips the Kubernetes storage and operator laye
 | [etcd.md](./etcd.md) | etcd | 3-node cluster on VMs, TLS certs, systemd config, member ops, snapshot backup, disaster recovery |
 | [postgres.md](./postgres.md) | PostgreSQL | Primary/standby streaming replication, WAL archiving, pgBackRest, PITR restore runbook, manual failover, Prometheus monitoring |
 | [redis.md](./redis.md) | Redis | Primary + 2 replicas + Sentinel HA, RDB/AOF config, BGSAVE-on-replica backup, restore from RDB, redis_exporter monitoring |
+| [kafka.md](./kafka.md) | Apache Kafka | 3-broker cluster, ZooKeeper setup, KRaft mode, producer/consumer tuning, JVM tuning, JMX Prometheus monitoring, MirrorMaker2 DR |
+| [elasticsearch.md](./elasticsearch.md) | Elasticsearch | 3-node cluster, node roles, heap sizing, ILM hot/warm/cold, S3 snapshots, shard strategy, monitoring |
+| [clickhouse.md](./clickhouse.md) | ClickHouse | 2-shard×2-replica cluster, ClickHouse Keeper vs ZooKeeper, Distributed tables, tiered storage, native backup |
 
 ## Common Patterns
 
