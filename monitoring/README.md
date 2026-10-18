@@ -16,6 +16,8 @@ Metrics, logs, traces, and alerting — from Prometheus fundamentals to long-ter
 | [slo-sli.md](./slo-sli.md) | SLI/SLO/Error Budget math, multi-window multi-burn-rate alerts, recording rules, decision framework |
 | [thanos-mimir.md](./thanos-mimir.md) | Thanos components, Mimir distributed TSDB, long-term S3 storage, deduplication, downsampling |
 | [monitoring-scenarios.md](./monitoring-scenarios.md) | 12 debugging scenarios with Prevention: target DOWN, missing metrics, Prometheus OOM, alert storms |
+| [distributed-tracing-backend.md](./distributed-tracing-backend.md) | Grafana Tempo architecture, TraceQL, trace-to-log correlation, service graph, Jaeger comparison |
+| [continuous-profiling.md](./continuous-profiling.md) | Parca eBPF DaemonSet, Pyroscope, flame graph reading, trace-to-profile correlation, GCP Cloud Profiler |
 
 > Database-specific monitoring (PostgreSQL, MySQL, Redis, MongoDB) lives in [../sre/db-monitoring.md](../sre/db-monitoring.md).
 
@@ -32,4 +34,6 @@ graph LR
     G --> H["slo-sli<br/>error budgets, burn-rate alerts"]
     H --> I["thanos-mimir<br/>long-term/global metric storage"]
     I --> J["monitoring-scenarios<br/>applied debugging runbooks"]
+    J --> K["distributed-tracing-backend<br/>Tempo, TraceQL, Jaeger"]
+    K --> L["continuous-profiling<br/>Parca, Pyroscope, flame graphs"]
 ```

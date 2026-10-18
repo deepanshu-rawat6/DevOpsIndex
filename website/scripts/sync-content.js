@@ -14,7 +14,7 @@ const SECTIONS = [
   },
   {
     slug: 'networking', title: 'Networking', order: 2,
-    readOrder: ['README', 'osi-model', 'tcp-udp', 'tls-encryption', 'acme-certificate-automation', 'http-versions', 'grpc-graphql', 'grpc-deep-dive', 'linux-networking', 'bgp-routing', 'load-balancers', 'cdn', 'nslookup-vs-curl', 'zero-trust', 'dns-internals', 'overlay-networks', 'ipvs-and-cni', 'service-mesh', 'quic-http3'],
+    readOrder: ['README', 'osi-model', 'tcp-udp', 'tls-encryption', 'acme-certificate-automation', 'http-versions', 'grpc-graphql', 'grpc-deep-dive', 'linux-networking', 'bgp-routing', 'load-balancers', 'cdn', 'nslookup-vs-curl', 'zero-trust', 'dns-internals', 'overlay-networks', 'ipvs-and-cni', 'service-mesh', 'quic-http3', 'websocket-internals'],
   },
   {
     slug: 'docker', title: 'Docker', order: 3,
@@ -26,7 +26,7 @@ const SECTIONS = [
   },
   {
     slug: 'kubernetes', title: 'Kubernetes', order: 4,
-    readOrder: ['kubectl-cheatsheet', 'README', 'workloads', 'resource-limits', 'networking', 'coredns', 'storage', 'rbac', 'autoscaling', 'helm', 'eks-architecture', 'pod-lifecycle', 'controller-pattern', 'custom-resources-operators', 'kubeadm-bootstrap', 'kube-proxy-modes', 'cross-node-networking', 'hpa-vpa-internals', 'scheduler-internals', 'policy-security', 'node-shutdown', 'cluster-upgrades', 'gateway-api'],
+    readOrder: ['kubectl-cheatsheet', 'README', 'workloads', 'resource-limits', 'networking', 'coredns', 'storage', 'rbac', 'autoscaling', 'helm', 'eks-architecture', 'pod-lifecycle', 'controller-pattern', 'custom-resources-operators', 'kubeadm-bootstrap', 'kube-proxy-modes', 'cross-node-networking', 'hpa-vpa-internals', 'scheduler-internals', 'policy-security', 'node-shutdown', 'cluster-upgrades', 'gateway-api', 'cost-optimization'],
     sectionPrereqs: [
       { title: 'Docker',     slug: 'docker' },
       { title: 'Linux',      slug: 'linux' },
@@ -52,7 +52,7 @@ const SECTIONS = [
   },
   {
     slug: 'aws', title: 'AWS', order: 7,
-    readOrder: ['README', 'services-overview', 'ecs-fargate', 'request-flow-alb-to-pod', 'storage-databases', 'databases-deep-dive', 'messaging-serverless-observability', 'eks', 'iam-deep-dive'],
+    readOrder: ['README', 'services-overview', 'ecs-fargate', 'request-flow-alb-to-pod', 'storage-databases', 'databases-deep-dive', 'messaging-serverless-observability', 'eks', 'iam-deep-dive', 'lambda-internals', 'cost-optimization'],
     sectionPrereqs: [
       { title: 'Linux',      slug: 'linux' },
       { title: 'Networking', slug: 'networking' },
@@ -61,7 +61,7 @@ const SECTIONS = [
   },
   {
     slug: 'gcp', title: 'GCP', order: 8,
-    readOrder: ['README', 'from-aws', 'services-overview', 'security-compliance', 'compute', 'gke', 'request-flow-glb-to-pod', 'storage', 'databases', 'bigquery', 'bigtable', 'data-pipelines', 'serverless', 'messaging', 'reliability-dr', 'cost-optimization', 'migration-methodology', 'observability', 'cicd', 'gcp-vs-aws', 'scenarios'],
+    readOrder: ['README', 'from-aws', 'services-overview', 'security-compliance', 'compute', 'gke', 'networking', 'request-flow-glb-to-pod', 'storage', 'databases', 'bigquery', 'bigtable', 'data-pipelines', 'serverless', 'messaging', 'reliability-dr', 'cost-optimization', 'migration-methodology', 'observability', 'cicd', 'gcp-vs-aws', 'scenarios'],
     sectionPrereqs: [
       { title: 'Linux',      slug: 'linux' },
       { title: 'Networking', slug: 'networking' },
@@ -71,7 +71,7 @@ const SECTIONS = [
   },
   {
     slug: 'monitoring', title: 'Monitoring', order: 9,
-    readOrder: ['README', 'prometheus', 'alertmanager', 'grafana', 'opentelemetry', 'loki', 'performance-debugging', 'monitoring-scenarios', 'slo-sli', 'alerting-philosophy', 'thanos-mimir'],
+    readOrder: ['README', 'prometheus', 'alertmanager', 'grafana', 'opentelemetry', 'loki', 'performance-debugging', 'monitoring-scenarios', 'slo-sli', 'alerting-philosophy', 'thanos-mimir', 'distributed-tracing-backend', 'continuous-profiling'],
     sectionPrereqs: [
       { title: 'Linux',      slug: 'linux' },
       { title: 'Kubernetes', slug: 'kubernetes' },
@@ -142,7 +142,7 @@ const SECTIONS = [
   },
   {
     slug: 'system-design', title: 'System Design', order: 17,
-    readOrder: ['README', 'scaling', 'cap-pacelc', 'rate-limiting', 'async-patterns', 'api-design', 'distributed-transactions', 'file-transfer-storage', 'realtime-chat', 'end-to-end-encryption', 'distributed-id-generation', 'geospatial-services', 'probabilistic-data-structures', 'search-system', 'notification-system'],
+    readOrder: ['README', 'scaling', 'cap-pacelc', 'rate-limiting', 'async-patterns', 'api-design', 'distributed-transactions', 'file-transfer-storage', 'realtime-chat', 'end-to-end-encryption', 'distributed-id-generation', 'geospatial-services', 'probabilistic-data-structures', 'search-system', 'notification-system', 'observability-system'],
     prerequisites: {
       'scaling':                       [{ title: 'Linux',             slug: 'linux' },
                                         { title: 'Networking',        slug: 'networking' },
@@ -232,7 +232,7 @@ const SECTIONS = [
   },
   {
     slug: 'security-engineering', title: 'Security Engineering', order: 21,
-    readOrder: ['README', 'container-security', 'supply-chain', 'secrets-management', 'sast-dast', 'k8s-security', 'threat-modeling', 'zero-trust', 'compliance-automation'],
+    readOrder: ['README', 'container-security', 'supply-chain', 'secrets-management', 'sast-dast', 'k8s-security', 'threat-modeling', 'zero-trust', 'compliance-automation', 'falco-sidekick'],
     sectionPrereqs: [
       { title: 'Docker',      slug: 'docker' },
       { title: 'Kubernetes',  slug: 'kubernetes' },

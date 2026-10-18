@@ -752,6 +752,7 @@ VPC, subnets, firewall rules, Cloud NAT, VPC Peering, Shared VPC, Private Google
 |------|--------|
 | [compute.md](./compute.md) | GCE vs EC2, machine families, custom machine types, disk types, Preemptible/Spot VMs, Managed vs Unmanaged Instance Groups (MIG/UIG), auto-healing, auto-scaling, rolling updates, serial ports 1–4, live migration, IAP SSH |
 | [gke.md](./gke.md) | GKE Standard vs Autopilot, Workload Identity, VPC-native networking, container-native LB (NEG), GPU node pools, upgrade strategy |
+| [networking.md](./networking.md) | Global VPC, VPC Peering (non-transitive), Shared VPC, Private Service Connect, Cloud Interconnect vs HA VPN, Cloud NAT, DNS peering, GKE VPC-native networking |
 
 ### Storage
 | File | Topics |

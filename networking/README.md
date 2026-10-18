@@ -24,6 +24,7 @@ Core networking concepts for backend engineers and platform engineers — from p
 | [ipvs-and-cni.md](./ipvs-and-cni.md) | IPVS O(1) vs iptables O(n), kube-proxy modes, CNI spec ADD/DEL/CHECK, Calico Felix+BIRD, Cilium eBPF identity model, NetworkPolicy walkthrough |
 | [service-mesh.md](./service-mesh.md) | Istio istiod + xDS API, Envoy sidecar injection, SPIFFE mTLS, VirtualService/DestinationRule canary, retries/circuit breaking/fault injection, Linkerd comparison |
 | [quic-http3.md](./quic-http3.md) | QUIC vs TCP HoL blocking, connection IDs, 1-RTT/0-RTT, QUIC streams, QPACK, nginx QUIC config, qvis debugging |
+| [websocket-internals.md](./websocket-internals.md) | Upgrade handshake, frame format, ping/pong keepalives, backpressure, LB sticky sessions, horizontal scaling with Redis Pub/Sub |
 
 ## Read Order
 
@@ -46,4 +47,5 @@ overlay-networks.md             → VXLAN, GENEVE, WireGuard, CNI overlays, MTU
 ipvs-and-cni.md                 → IPVS vs iptables at scale, CNI spec, Calico, Cilium
 service-mesh.md                 → Istio, Envoy xDS, SPIFFE mTLS, traffic management, Linkerd
 quic-http3.md                   → QUIC protocol internals, HTTP/3, 0-RTT, deployment
+websocket-internals.md          → WebSocket frame format, keepalives, LB affinity, Redis fan-out
 ```

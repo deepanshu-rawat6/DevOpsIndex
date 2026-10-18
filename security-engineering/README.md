@@ -83,6 +83,7 @@ graph LR
     KS --> TM["threat-modeling"]
     TM --> ZT["zero-trust"]
     ZT --> CA["compliance-automation"]
+    CA --> FS["falco-sidekick"]
 ```
 
 | File | What it covers |
@@ -95,3 +96,4 @@ graph LR
 | `threat-modeling` | STRIDE framework, data flow diagrams, attack trees, DREAD scoring |
 | `zero-trust` | SPIFFE/SPIRE, Istio mTLS, workload identity (GKE/EKS), JWT validation |
 | `compliance-automation` | kube-bench, OPA/conftest CI gates, SBOM generation, SOC2/PCI-DSS mappings |
+| `falco-sidekick` | Custom Falco rules, K8s audit log rules, Sidekick fan-out to Slack/PagerDuty, Falco vs Tetragon |
