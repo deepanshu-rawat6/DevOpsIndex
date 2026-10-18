@@ -1,6 +1,6 @@
-# Apache Cassandra Internals
+# Cassandra Internals
 
-Ring topology, tunable consistency, and the operational playbook for running Cassandra for real — how writes and reads flow through the ring, compaction strategies, anti-entropy repair, and the nodetool commands that matter during an incident.
+Cassandra is a masterless distributed database built for write-heavy, always-available workloads. Every node is equal — no primary, no single point of failure. Understanding the ring, consistency levels, and compaction is what separates operators who can tune it from those who fight it.
 
 <div class="quiz-progress" data-quiz-progress>
   <span class="quiz-progress-label">0/0 checks</span>
@@ -9,250 +9,148 @@ Ring topology, tunable consistency, and the operational playbook for running Cas
 
 ---
 
-## Ring Topology & Vnodes
+## Ring Topology and Token Assignment
 
-Cassandra uses **consistent hashing** to distribute data. Every node owns a range of the hash token space (by default 0 to 2^63 - 1). A partition key is hashed to a token, and the node responsible for that token range handles it as the **primary replica**.
+Cassandra uses **consistent hashing** to distribute data across nodes. Every row's partition key is hashed to a 64-bit token in the range `-2^63` to `2^63 - 1`. That token determines which node stores the row.
 
 ```mermaid
-graph TD
-    subgraph "Ring — 3 nodes, RF=3"
-        N1["Node A<br>tokens: 0–33%"]
-        N2["Node B<br>tokens: 33–66%"]
-        N3["Node C<br>tokens: 66–100%"]
-        N1 --> N2 --> N3 --> N1
+graph LR
+    subgraph Ring["Token Ring (3 nodes)"]
+        A["Node A\n tokens: -9223... to -3074..."]
+        B["Node B\n tokens: -3074... to 3074..."]
+        C["Node C\n tokens: 3074... to 9223..."]
+        A -->|"clockwise"| B
+        B -->|"clockwise"| C
+        C -->|"clockwise"| A
     end
 
-    K["partition key 'user:42'<br>hashes to token in 33–66%"]
-    K --> N2
-    N2 -->|replica 1| N2
-    N2 -->|replica 2| N3
-    N2 -->|replica 3| N1
+    subgraph Data["Data placement (RF=3)"]
+        ROW["partition_key hash → token -1000"]
+        ROW -->|"primary replica"| B
+        ROW -->|"replica 2"| C
+        ROW -->|"replica 3"| A
+    end
 ```
 
-**Replication Factor (RF):** With RF=3, each row is stored on 3 nodes — the primary and the next two nodes clockwise on the ring. Losing one node means data is still available on 2 replicas.
+**Virtual nodes (vnodes)** are the key to operational flexibility. Instead of each physical node owning one large continuous token range, each physical node owns **256 small token ranges** (configurable via `num_tokens: 256` in `cassandra.yaml`). When a node joins or leaves the cluster:
 
-**Vnodes (virtual nodes):** Instead of one token range per node, each node owns 256 virtual token ranges by default (`num_tokens=256` in `cassandra.yaml`). Advantages:
-- Adding a new node takes a proportional slice of load from every existing node — no manual token calculation.
-- Node removal distributes departed load across many nodes instead of one neighbor.
-- Vnodes trade slightly higher streaming overhead during bootstrap for much better load balance.
+- With vnodes: its 256 ranges are spread across many different neighbors — data streams from/to many nodes in parallel, minimizing load on any single node.
+- Without vnodes (legacy): the new node owns one range, and must stream from exactly one neighbor — that neighbor gets hammered during the operation.
 
-<div class="quiz-card">
-  <p class="quiz-q">A 3-node Cassandra ring with RF=3 loses one node. Is the cluster still available for reads and writes? Under what conditions?</p>
-  <button class="quiz-reveal">Reveal answer</button>
-  <div class="quiz-a" hidden>
-    With RF=3 and only 3 nodes, every row exists on all 3 nodes. Losing one node means 2 replicas remain. The cluster stays available as long as the consistency level (CL) doesn't require responses from the dead node. CL=ONE and CL=QUORUM (which requires 2 out of 3) both succeed — QUORUM reads and writes keep working. CL=ALL fails immediately because the third replica is unavailable. The practical rule: RF=3 + CL=QUORUM tolerates exactly one node failure.
-  </div>
-</div>
+```bash
+# View the token ring and which node owns each range
+nodetool ring
+
+# Check node status during bootstrap
+# UJ = Up/Joining, UN = Up/Normal, DN = Down/Normal
+nodetool status
+
+# Do NOT change num_tokens on a running cluster
+# Changing it requires a full decommission + re-add of each node
+```
+
+**Adding a node:** `nodetool bootstrap` runs automatically when a new node starts and joins the cluster. The node transitions through `UJ` (Up/Joining) while streaming token ranges from neighbors. `nodetool status` shows streaming progress; `nodetool netstats` shows bytes transferred.
 
 ---
 
-## Write Path
+## Replication
 
-Every write in Cassandra hits two structures atomically: the **commit log** (durability) and the **memtable** (in-memory structure for fast reads).
+**Replication factor (RF)** controls how many copies of each partition exist in the cluster. RF=3 means every partition is stored on 3 different nodes. Higher RF = more fault tolerance, more storage cost.
 
-```mermaid
-sequenceDiagram
-    participant Client
-    participant Coordinator as Coordinator Node
-    participant R1 as Replica 1 (primary)
-    participant R2 as Replica 2
-    participant R3 as Replica 3
+**Replication strategies:**
 
-    Client->>Coordinator: INSERT INTO ... (CL=QUORUM)
-    Note over Coordinator: Hashes partition key<br>to find token owner
-    Coordinator->>R1: Write (async)
-    Coordinator->>R2: Write (async)
-    Coordinator->>R3: Write (async)
-    R1->>R1: 1. Append to commit log (fsync)
-    R1->>R1: 2. Write to memtable
-    R1-->>Coordinator: ACK
-    R2->>R2: 1. Append to commit log
-    R2->>R2: 2. Write to memtable
-    R2-->>Coordinator: ACK
-    Note over Coordinator: QUORUM satisfied (2/3 ACKed)
-    Coordinator-->>Client: Success
-    Note over R3: Continues in background<br>R3 eventually ACKs too
+- **SimpleStrategy:** places RF copies on the next N nodes clockwise on the ring. No rack or datacenter awareness. Only suitable for single-datacenter development clusters.
+- **NetworkTopologyStrategy:** specify RF per datacenter. Respects rack awareness within each DC — replicas go on different racks to survive rack-level failures. Always use in production.
+
+```sql
+-- Production: always NetworkTopologyStrategy
+CREATE KEYSPACE my_app WITH REPLICATION = {
+    'class': 'NetworkTopologyStrategy',
+    'dc1': 3,
+    'dc2': 2
+};
+
+-- Development only
+CREATE KEYSPACE dev WITH REPLICATION = {
+    'class': 'SimpleStrategy',
+    'replication_factor': 1
+};
 ```
 
-**Commit log:** Sequential write to disk for crash recovery. On restart, Cassandra replays commit log entries to reconstruct memtables. Flushed memtable segments are removed from the commit log.
+**Rack awareness:** Configure `endpoint_snitch: GossipingPropertyFileSnitch` in `cassandra.yaml` and set the `dc` and `rack` labels in `cassandra-rackdc.properties` on each node. Cassandra will then place replicas on different racks. With RF=3 and 3 racks, each rack gets exactly one replica — the cluster survives a full rack failure.
 
-**Memtable:** Sorted in-memory structure (one per table). When the memtable reaches `memtable_heap_space_in_mb` or `memtable_flush_period_in_ms`, it's flushed to disk as a new **SSTable**. Multiple SSTables accumulate until compaction merges them.
+```bash
+# cassandra-rackdc.properties (on each node)
+dc=dc1
+rack=rack2
 
-**Hinted handoff:** If a replica is down when a write arrives, the coordinator stores a **hint** — a short record of the missed write. When the replica comes back, hints are replayed. Hints expire after `max_hint_window_in_ms` (default 3 hours).
-
----
-
-## Read Path
-
-Reads involve more work than writes because data for a row can be spread across multiple SSTables.
-
-```mermaid
-graph TD
-    subgraph "Read on a single replica"
-        Q["Read query: SELECT * WHERE pk = 'user:42'"]
-        RC["Row Cache<br>(if enabled, exact row hit)"]
-        BF["Bloom Filter<br>(probabilistic: is this pk in this SSTable?)"]
-        PI["Partition Index<br>(binary search for partition offset)"]
-        SS1["SSTable 1"]
-        SS2["SSTable 2"]
-        SS3["SSTable 3 (latest)"]
-        MEM["Memtable<br>(most recent writes)"]
-        MERGE["Merge results<br>(latest timestamp wins per column)"]
-        RESP["Return to coordinator"]
-    end
-
-    Q --> RC
-    RC -- "cache miss" --> MEM
-    MEM --> BF
-    BF --> PI
-    PI --> SS1 & SS2 & SS3
-    SS1 & SS2 & SS3 --> MERGE
-    MEM --> MERGE
-    MERGE --> RESP
+# Verify Cassandra sees rack topology correctly
+nodetool status
+# Output shows DC and rack for each node
 ```
-
-**Key Cassandra read optimizations:**
-
-| Mechanism | Purpose |
-|-----------|---------|
-| Bloom filter | Probabilistic check — tells you an SSTable definitely does NOT have a partition (false negatives impossible). Avoids disk I/O for most misses. |
-| Partition index | Sparse index of partition keys to file offsets. Binary search to find the right offset in the SSTable. |
-| Row cache | Full row stored in off-heap memory. Useful for hot rows; bypasses all SSTable reads on hit. |
-| Key cache | Stores partition index entries — skips the index file read but still reads the SSTable data. Default on. |
-
-**Read repair:** The coordinator compares responses from multiple replicas (digest read). If digests differ, the coordinator reads full data from all replicas and writes the most recent version back to stale replicas. Background read repair runs asynchronously even on CL=ONE.
-
-<div class="quiz-card">
-  <p class="quiz-q">A partition has been updated 100 times, spread across 5 SSTables and the current memtable. How does a read reconstruct the current row state?</p>
-  <button class="quiz-reveal">Reveal answer</button>
-  <div class="quiz-a" hidden>
-    Cassandra reads the relevant partition from every SSTable that the Bloom filter says might contain it, plus the current memtable, then merges all the results. Each column value carries a timestamp; the highest timestamp wins per column. This is why Cassandra is a multi-version store — you can update individual columns independently, and the read path merges the latest version of each. This also means reads get slower as SSTables accumulate, which is why compaction is critical: it merges SSTables so a read only needs to touch one (in LCS) instead of many (in STCS with lots of levels).
-  </div>
-</div>
 
 ---
 
 ## Tunable Consistency
 
-Consistency in Cassandra is per-operation, not per-table. The key insight: **strong consistency requires W + R > RF**.
+Cassandra trades consistency for availability. The consistency level per-operation controls how many replicas must agree before a read or write returns to the client. **The application chooses at query time — there is no global setting.**
 
-| Consistency Level | Writes required | Reads required | Tradeoff |
-|-------------------|----------------|----------------|----------|
-| ONE | 1 replica | 1 replica | Fastest; may return stale data |
-| TWO | 2 replicas | 2 replicas | Slightly stronger |
-| QUORUM | RF/2+1 | RF/2+1 | Balanced — tolerates one failure with RF=3 |
-| LOCAL_QUORUM | Majority in local DC | Majority in local DC | Multi-DC safe; no cross-DC latency |
-| EACH_QUORUM | Majority in each DC | — | Write only; ensures full multi-DC consistency |
-| ALL | All replicas | All replicas | Slowest; any replica down = failure |
-| ANY | 1 (hint counts) | — | Write only; highest availability, stalest reads |
+| Level | Writes require | Reads require | Notes |
+|---|---|---|---|
+| ONE | 1 replica ACK | 1 replica response | Fastest; stale reads possible |
+| QUORUM | majority of RF ACK | majority respond | Default production choice |
+| ALL | all replicas ACK | all respond | Slowest; any replica down = failure |
+| LOCAL_ONE | 1 replica in local DC | 1 in local DC | Avoids cross-DC for non-critical reads |
+| LOCAL_QUORUM | majority in local DC | majority in local DC | Multi-DC production standard |
+| EACH_QUORUM | majority in each DC | N/A | Write-side only; ensures global durability |
 
-**Strong consistency rule:** With RF=3 and CL=QUORUM for both reads and writes: W=2, R=2, W+R=4 > RF=3 ✓. Any value returned by a QUORUM read was written by at least one replica that also participated in the last QUORUM write.
+**Quorum math:** `QUORUM = floor(RF / 2) + 1`
+- RF=3 → QUORUM=2 (majority of 3 = 2)
+- RF=5 → QUORUM=3 (majority of 5 = 3)
+- RF=7 → QUORUM=4
 
-**Multi-datacenter deployments:** Use `LOCAL_QUORUM` for standard applications. It provides consistency within the local DC without the latency penalty of waiting for cross-DC replicas. `EACH_QUORUM` is for writes that must be durable in every DC before acking.
+**Strong consistency guarantee:** `WRITE at QUORUM + READ at QUORUM` guarantees that at least one node in the read set saw the write. With RF=3, a QUORUM write hits 2 nodes and a QUORUM read asks 2 nodes — they overlap by at least 1.
 
-<div class="quiz-card">
-  <p class="quiz-q">You write with CL=ONE and read with CL=ONE in a 3-node ring with RF=3. Why might you read stale data even though the write succeeded?</p>
-  <button class="quiz-reveal">Reveal answer</button>
-  <div class="quiz-a" hidden>
-    CL=ONE means only one replica needs to acknowledge. The write may have been acknowledged by replica A, but your subsequent read might route to replica B or C, which haven't received the write yet (replication is asynchronous). Since W + R = 2, which is not greater than RF=3, there's no guaranteed overlap between the replica that acknowledged the write and the replica that serves the read. You can get strong consistency only when W + R > RF — with ONE + ONE that's 2 > 3, which is false.
-  </div>
-</div>
+**Lightweight Transactions (LWT):** Cassandra's compare-and-set operations use Paxos consensus.
 
----
+```sql
+-- Only insert if user doesn't exist (IF NOT EXISTS uses Paxos)
+INSERT INTO users (user_id, email) VALUES (uuid(), 'user@example.com')
+IF NOT EXISTS;
 
-## Compaction Strategies
+-- Conditional update
+UPDATE accounts SET balance = 500
+WHERE account_id = 123
+IF balance = 600;
+```
 
-As SSTables accumulate, reads become slower (more files to check) and disk space grows (old versions of rows retained). Compaction merges SSTables and discards tombstones (deleted data markers).
-
-<div class="tab-group">
-  <div class="tab-buttons">
-    <button data-tab="stcs" class="active">STCS</button>
-    <button data-tab="lcs">LCS</button>
-    <button data-tab="twcs">TWCS</button>
-  </div>
-  <div class="tab-panels">
-    <div class="tab-panel active" data-tab-panel="stcs">
-      <strong>SizeTieredCompactionStrategy (STCS)</strong> — the default.
-      <p>Merges SSTables of similar size. When 4+ SSTables reach the same size tier, they're compacted into one larger SSTable. Multiple size tiers accumulate, so reads may touch many SSTables simultaneously.</p>
-      <ul>
-        <li><strong>Best for:</strong> Write-heavy workloads where read performance is secondary (time-series ingestion, event logs)</li>
-        <li><strong>Weakness:</strong> Space amplification — during compaction, both input and output SSTables exist simultaneously (up to 2× peak disk use)</li>
-        <li><strong>Read amplification:</strong> High — a partition may span many SSTables at different tiers</li>
-      </ul>
-      <pre><code>ALTER TABLE events WITH compaction = {
-  'class': 'SizeTieredCompactionStrategy',
-  'min_threshold': 4,
-  'max_threshold': 32
-};</code></pre>
-    </div>
-    <div class="tab-panel" data-tab-panel="lcs">
-      <strong>LeveledCompactionStrategy (LCS)</strong>
-      <p>Maintains multiple levels (L0, L1, L2...) of size-bounded SSTables. L1 SSTables are 10MB each; each level is 10× the size of the previous. Non-overlapping key ranges within each level guarantee a partition exists in at most one SSTable per level.</p>
-      <ul>
-        <li><strong>Best for:</strong> Read-heavy workloads needing predictable latency (user profile lookups, catalogs)</li>
-        <li><strong>Weakness:</strong> Higher write amplification — data gets rewritten many times as it moves through levels</li>
-        <li><strong>Read amplification:</strong> Low — at most one SSTable per level to check (typically 1–2 I/Os total)</li>
-      </ul>
-      <pre><code>ALTER TABLE user_profiles WITH compaction = {
-  'class': 'LeveledCompactionStrategy',
-  'sstable_size_in_mb': 160
-};</code></pre>
-    </div>
-    <div class="tab-panel" data-tab-panel="twcs">
-      <strong>TimeWindowCompactionStrategy (TWCS)</strong>
-      <p>Groups SSTables by time window (e.g., 1 hour). Only compacts SSTables within the current window; sealed past windows are never recompacted. When all data in a window has TTL-expired, the entire SSTable is dropped without reading it.</p>
-      <ul>
-        <li><strong>Best for:</strong> Time-series data with TTL (metrics, logs, IoT sensor data)</li>
-        <li><strong>Weakness:</strong> Terrible for non-time-ordered writes — historical backfill causes massive cross-window compaction</li>
-        <li><strong>Key requirement:</strong> Partition keys must be time-based or time-correlated for TWCS to work correctly</li>
-      </ul>
-      <pre><code>ALTER TABLE metrics WITH compaction = {
-  'class': 'TimeWindowCompactionStrategy',
-  'compaction_window_unit': 'HOURS',
-  'compaction_window_size': 1
-} AND default_time_to_live = 86400;</code></pre>
-    </div>
-  </div>
-</div>
-
-**Tombstones:** Deletes in Cassandra write a tombstone marker (not a deletion). Tombstones are kept until `gc_grace_seconds` (default 10 days) expires, after which compaction can remove them. A table with many deletes accumulates tombstones that slow reads — `nodetool cfstats` shows the tombstone count per read.
+LWT uses `SERIAL` consistency level. It requires 4 round trips (prepare → promise → propose → commit) and is 3–5× slower than a regular write. Only use for operations that truly require atomicity, like user registration uniqueness or inventory decrement.
 
 ---
 
-## nodetool Reference
-
-`nodetool` is the primary operational interface for a running Cassandra node. It talks to the JMX interface on the local node.
-
-| Command | What it shows | When to use |
-|---------|--------------|-------------|
-| `nodetool status` | Ring membership, load per node, state (Up/Down/Leaving) | First thing to run — is the ring healthy? |
-| `nodetool info` | Node uptime, heap usage, key cache hit rate, exception count | Node-level health check |
-| `nodetool tpstats` | Thread pool queue depths and dropped messages | Diagnose overload — are stages backed up? |
-| `nodetool compactionstats` | In-progress compactions, bytes remaining | High compaction = read slowness |
-| `nodetool cfstats [keyspace.table]` | SSTable count, read/write latency, tombstone stats | Table-level perf deep-dive |
-| `nodetool repair -pr` | Anti-entropy repair on primary ranges | Run on all nodes in sequence for consistency |
-| `nodetool flush [keyspace]` | Force memtable flush to SSTable | Before planned shutdown or snapshot |
-| `nodetool decommission` | Safely removes node, streams data to neighbors | Clean node removal |
-| `nodetool removenode HOST_ID` | Removes a dead node that can't decommission itself | Emergency removal only |
-| `nodetool describering KEYSPACE` | Shows token ranges per node | Debug uneven load |
-| `nodetool getcompactionthreshold KEYSPACE TABLE` | Min/max SSTable count before compaction triggers | Tune compaction aggressiveness |
+## Write Path
 
 <div class="stepper">
   <div class="stepper-panels">
     <div class="stepper-panel active">
-      <strong>Step 1: Check ring health.</strong> <code>nodetool status</code> shows each node's state (UN=Up Normal, DN=Down, UL=Up Leaving, etc.) and data load. All nodes should show UN. A DN node with high load means the others are holding hints for it.
+      <strong>Step 1. Client → coordinator node.</strong>
+      <p>The client sends the write to any Cassandra node — it doesn't matter which. That node becomes the <strong>coordinator</strong> for this request. The coordinator is not a master; it's simply the node that happens to handle this write. It uses the token ring to determine which replica nodes should receive the write, then forwards it to them.</p>
     </div>
     <div class="stepper-panel">
-      <strong>Step 2: Identify the bottleneck with tpstats.</strong> <code>nodetool tpstats</code> lists thread pools — ReadStage, MutationStage, CompactionExecutor, etc. High "Pending" or "Blocked" in ReadStage means reads are queuing. Dropped messages in ReadStage are the worst signal — those requests timed out in the queue and the client received an error.
+      <strong>Step 2. Commit log write (durable).</strong>
+      <p>Each replica node that receives the write first appends it to the <strong>commit log</strong> — a sequential, append-only file on disk. This is the durability guarantee: if the node crashes after writing to the commit log but before flushing to an SSTable, the write can be replayed from the commit log on restart. The commit log is written synchronously before the memtable.</p>
     </div>
     <div class="stepper-panel">
-      <strong>Step 3: Check compaction backlog.</strong> <code>nodetool compactionstats</code> shows active compactions. Heavy compaction saturates disk I/O, which starves reads. If compaction is consuming all I/O, consider throttling with <code>nodetool setcompactionthroughput 16</code> (MB/s). The default is 0 (unlimited).
+      <strong>Step 3. Memtable write (in-memory).</strong>
+      <p>After the commit log, the write goes into the <strong>memtable</strong> — an in-memory sorted structure (one per table). The coordinator returns success to the client once the required number of replicas (per consistency level) have ACKed the memtable write. At this point the write is considered complete, even though it's not yet on disk as an SSTable.</p>
     </div>
     <div class="stepper-panel">
-      <strong>Step 4: Drill into a specific table.</strong> <code>nodetool cfstats keyspace.table</code> shows SSTable count (high = compaction behind), tombstone count per read (above 1000 = serious problem), Bloom filter false positive ratio, and per-operation latency. This is where you find the table causing the incident.
+      <strong>Step 4. Hinted handoff (for down replicas).</strong>
+      <p>If a replica node is down at write time, the coordinator stores a <strong>hint</strong> — a small entry containing the write — locally. When the replica comes back up, the coordinator replays its hints to bring it up to date. Hints expire after <code>max_hint_window_in_ms</code> (default 3 hours). If a node is down longer than the hint window, it must be repaired with <code>nodetool repair</code> after rejoining.</p>
     </div>
     <div class="stepper-panel">
-      <strong>Step 5: Decide on repair or compaction.</strong> If tombstone count is high: trigger compaction with <code>nodetool compact keyspace table</code>. If SSTable count is high but tombstones are low: compaction is just lagging, increase throughput limit. If data is inconsistent across replicas: run <code>nodetool repair -pr keyspace</code> on each node in sequence.
+      <strong>Step 5. SSTable flush (async).</strong>
+      <p>When the memtable exceeds the flush threshold (or <code>memtable_cleanup_threshold</code> is hit, or <code>nodetool flush</code> is called), the memtable is written to an immutable <strong>SSTable</strong> (Sorted String Table) on disk. Once flushed, the corresponding commit log segment can be discarded. SSTables are immutable — updates and deletes don't modify existing SSTables; they create new entries with newer timestamps.</p>
     </div>
   </div>
   <div class="stepper-controls">
@@ -265,83 +163,279 @@ As SSTables accumulate, reads become slower (more files to check) and disk space
 
 ---
 
-## Anti-Entropy & Repair
+## Read Path
 
-Cassandra is eventually consistent — replicas can drift apart due to hinted handoff expiration, missed writes during downtime, or bitrot. **Repair** reconciles replicas using Merkle trees.
+Reading in Cassandra is more complex than writing because data for a single partition may be spread across multiple SSTables from different flush cycles.
 
-```mermaid
-graph TD
-    subgraph "Repair Protocol"
-        COORD["Repair coordinator<br>(nodetool repair initiating node)"]
-        MT1["Replica 1<br>builds Merkle tree<br>for token range"]
-        MT2["Replica 2<br>builds Merkle tree<br>for token range"]
-        MT3["Replica 3<br>builds Merkle tree<br>for token range"]
-        COORD --> MT1 & MT2 & MT3
-        MT1 & MT2 & MT3 --> COMPARE["Coordinator compares trees<br>(O(n) comparison of tree roots)"]
-        COMPARE --> MISMATCH["Mismatched subtrees<br>identified"]
-        MISMATCH --> STREAM["Streaming: replicas exchange<br>missing/differing rows"]
-    end
+**Bloom filter first:** Every SSTable has an associated bloom filter. Before doing any disk I/O, Cassandra checks the bloom filter for each SSTable — it can say "definitely not in this SSTable" (skip it) or "maybe in this SSTable" (read it). False positives cause unnecessary disk reads; false negatives don't happen. The bloom filter is always in memory.
+
+**Partition index lookup:** If the bloom filter says "maybe", Cassandra does a binary search on the partition index to find the exact byte offset in the SSTable data file. This avoids a full scan.
+
+**Multi-SSTable merge:** A single partition's data may exist in many SSTables (one per flush). Cassandra reads all relevant SSTables and merges their results, with the **newest timestamp winning** for any conflicting column values. This is how updates work — not in-place modification, but newer cells shadow older ones.
+
+**Read repair:** When reading at QUORUM, the coordinator compares responses from multiple replicas. If they differ (one replica is stale), it sends a background repair to update the stale replica with the most recent values. Read repair is asynchronous — it doesn't block the read response.
+
+**Speculative execution:** If a replica is slow, the coordinator may send the same read to a second replica and use whichever responds first. Configure with `speculative_retry: 99percentile` (only speculate when a replica is in the slowest 1% of responses for that table).
+
+```bash
+# Force a memtable flush to disk (useful before maintenance)
+nodetool flush <keyspace> <table>
+
+# Check SSTable count and bloom filter stats
+nodetool tablestats <keyspace>.<table>
+# Look for: SSTable count, bloom filter false ratio, read/write latency
 ```
-
-**How Merkle tree repair works:**
-1. Each replica computes a Merkle tree (hash tree) over the rows in the repaired token range.
-2. The coordinator collects tree roots and does a top-down comparison. Subtrees with identical hashes are skipped.
-3. Only the differing leaf ranges are streamed between replicas.
-4. Streaming replaces stale data with the most recent version (highest timestamp).
-
-**Repair modes:**
-
-| Mode | Command | When to use |
-|------|---------|-------------|
-| Full repair | `nodetool repair` | After hardware failure or for infrequent deep sync |
-| Primary range repair | `nodetool repair -pr` | Regular scheduled repair — run on each node, each node repairs its primary range |
-| Incremental repair | `nodetool repair -ir` | Marks repaired SSTables, skips them next time; reduces repair time but more complex |
-| Sub-range repair | `nodetool repair -st TOKEN -et TOKEN` | Repair a specific token range during rebalancing |
-
-**The gc_grace_seconds constraint:** Tombstones are kept for `gc_grace_seconds` (default 10 days). Repair must complete within this window. If a node is down for more than `gc_grace_seconds` and then comes back, deleted data may re-appear — because the tombstone was already purged on the repaired nodes, but the dead node never got the delete. Always repair before `gc_grace_seconds` expires.
-
-<div class="quiz-card">
-  <p class="quiz-q">A Cassandra node was offline for 12 days. gc_grace_seconds is 864000 (10 days). The node is brought back. Why might data that was deleted during the outage reappear?</p>
-  <button class="quiz-reveal">Reveal answer</button>
-  <div class="quiz-a" hidden>
-    The delete was written as a tombstone on the other replicas while the node was down. Hinted handoff only retains hints for max_hint_window_in_ms (default 3 hours), so the delete hint was discarded long before the node came back. After 10 days, gc_grace_seconds passed on the live replicas — their next compaction removed the tombstone entirely. When the recovered node rejoins, it still has the old un-deleted row, and since there's no tombstone left to override it, a read may return that row. The fix: run nodetool repair immediately after the node rejoins, before gc_grace_seconds expires, so the tombstone is propagated while it's still alive on the other replicas.
-  </div>
-</div>
 
 ---
 
-## Common Failure Patterns
+## Compaction Strategies
 
-| Symptom | Likely cause | Confirm with | Fix |
-|---------|-------------|-------------|-----|
-| Read timeouts, client errors | Tombstone storm or high SSTable count | `nodetool cfstats` (tombstone count, SSTable count) | Run compaction; reduce TTL; add read_repair_chance |
-| Write timeouts under normal load | Commitlog disk I/O saturation | `nodetool tpstats` (MutationStage pending) | Move commitlog to separate disk; reduce fsync interval |
-| Node DN in `nodetool status` | Node crashed or network partition | `journalctl -u cassandra -n 200` on the node | Fix hardware/network; run `nodetool repair -pr` after rejoin |
-| Uneven load (one node has 5× data) | Hot partition key or vnode misconfiguration | `nodetool status` (Load column), `nodetool describering` | Fix partition key design; redistribute vnodes |
-| Repair takes days | Huge data volume or full repair instead of primary-range | `nodetool compactionstats` during repair | Use `-pr` (primary range only); run repair per table |
-| OOM on Cassandra JVM | Heap too small or Bloom filters consuming off-heap | `nodetool info` (heap usage), GC logs | Increase `-Xmx`; tune bloom_filter_fp_chance |
-| Slow reads on a specific table | Missing secondary index or too many SSTables | `nodetool cfstats keyspace.table` | Add index or run compaction on that table specifically |
+SSTables accumulate over time — every memtable flush creates a new one. Without compaction, reads must check more and more SSTables, tombstones pile up, and disk usage grows with redundant data. Compaction merges SSTables, discards old cell versions, and purges expired tombstones.
 
-**Key thresholds to monitor:**
+| Strategy | Mechanism | Best for | Avoid when |
+|---|---|---|---|
+| **STCS** (SizeTieredCompactionStrategy) | Merges SSTables of similar size into one larger SSTable | Write-heavy; time-series; append-only | Read-heavy (high read amplification — many SSTables per read) |
+| **LCS** (LeveledCompactionStrategy) | Maintains levels; each level ~10× larger than the previous; SSTables within a level don't overlap | Read-heavy; random reads; bounded SSTable count (≤10 per level) | Very write-heavy (higher write amplification) |
+| **TWCS** (TimeWindowCompactionStrategy) | Compacts data within configurable time windows (e.g., 1 hour); old closed windows are compacted once | Time-series with TTL; IoT; logs | Random writes that span time windows |
 
-```bash
-# SSTable count per table — alert if > 20 (STCS) or > 5 per level (LCS)
-nodetool cfstats keyspace.table | grep 'SSTable count'
+```sql
+-- Check current strategy
+SELECT compaction FROM system_schema.tables
+WHERE keyspace_name = 'my_app' AND table_name = 'events';
 
-# Tombstones per read — alert if p99 > 1000
-nodetool cfstats keyspace.table | grep 'Tombstone'
+-- Switch to TWCS for time-series with 1-hour windows
+ALTER TABLE events WITH compaction = {
+    'class': 'TimeWindowCompactionStrategy',
+    'compaction_window_unit': 'HOURS',
+    'compaction_window_size': '1'
+};
 
-# Pending compactions
-nodetool compactionstats | grep 'pending tasks'
-
-# Thread pool drops (non-zero is a problem)
-nodetool tpstats | grep -E 'ReadStage|MutationStage|Dropped'
+-- Switch to LCS for read-heavy tables
+ALTER TABLE user_profiles WITH compaction = {
+    'class': 'LeveledCompactionStrategy',
+    'sstable_size_in_mb': '160'
+};
 ```
 
+```bash
+# Monitor active compactions
+nodetool compactionstats
+
+# Force major compaction (merges all SSTables into one - use carefully on large tables)
+nodetool compact <keyspace> <table>
+```
+
+---
+
+## Tombstones
+
+Cassandra cannot delete data in-place because SSTables are immutable. Instead, **deletes write a tombstone** — a special marker with a deletion timestamp. The actual data is physically removed during compaction, but only after `gc_grace_seconds` has elapsed.
+
+**Why gc_grace_seconds exists:** Consider this scenario:
+1. You delete a row on Node A and Node B. Node C is down.
+2. The tombstone is written on A and B.
+3. You compact immediately, purging the tombstone from A and B.
+4. Node C comes back up. It has the original data but no tombstone.
+5. Read repair sees Node C's data is "newer" than the compacted A/B (which have nothing) — the deleted data reappears.
+
+`gc_grace_seconds` (default `864000` = 10 days) gives a window for all replicas to receive the tombstone before it can be purged. Run `nodetool repair` before `gc_grace_seconds` expires if a node was down during a delete.
+
+**Tombstone accumulation:** Tombstones must be skipped during reads. A partition with millions of tombstones causes slow queries and can trigger warnings or errors:
+
+```yaml
+# cassandra.yaml thresholds
+tombstone_warn_threshold: 1000       # WARN in logs
+tombstone_failure_threshold: 100000  # Throw TombstoneOverwhelmingException
+```
+
+**Mitigation for tombstone-heavy workloads:**
+
+```sql
+-- Use TTL instead of explicit DELETE for time-series data
+-- Cassandra auto-expires cells without generating a tombstone object
+INSERT INTO sensor_readings (device_id, ts, value)
+VALUES ('sensor-1', toTimestamp(now()), 42.5)
+USING TTL 86400;  -- expires in 24 hours
+
+-- Set TTL at table level (default for all inserts)
+ALTER TABLE sensor_readings WITH default_time_to_live = 86400;
+```
+
+---
+
+## nodetool Operations
+
+| Command | Purpose |
+|---|---|
+| `nodetool status` | Ring health — UN=Up/Normal, DN=Down/Normal, UJ=Up/Joining |
+| `nodetool repair -pr` | Anti-entropy repair for primary token ranges; run weekly per node |
+| `nodetool snapshot <keyspace>` | Create point-in-time hard-linked snapshot for backup |
+| `nodetool flush <keyspace>` | Flush memtables to disk before maintenance or shutdown |
+| `nodetool compactionstats` | Active compaction progress — pending tasks and bytes remaining |
+| `nodetool tpstats` | Thread pool stats — dropped messages, pending tasks per stage |
+| `nodetool tablestats <keyspace>.<table>` | SSTable count, read/write latency, bloom filter false ratio |
+| `nodetool decommission` | Safely remove a node — streams its token ranges first, then leaves |
+| `nodetool removenode <host-id>` | Remove a dead node that cannot decommission itself |
+| `nodetool ring` | Show token ring and which node owns each token range |
+| `nodetool netstats` | Active streaming operations — bytes sent/received during bootstrap or repair |
+| `nodetool cfhistograms <ks> <table>` | Read/write latency histograms, row sizes, column counts |
+
+**When to run repair:** Run `nodetool repair` (with `-pr` flag to repair only primary ranges, avoiding double-work in a cluster):
+- Weekly as scheduled maintenance on each node in rotation
+- Before reducing RF on a keyspace
+- Before `gc_grace_seconds` expires if a node was down during a bulk delete
+- After a node was down longer than `max_hint_window_in_ms` (3 hours)
+
+```bash
+# Repair primary token ranges for all keyspaces (run on each node)
+nodetool repair -pr
+
+# Repair a specific keyspace
+nodetool repair -pr my_app
+
+# Check if repair is running
+nodetool compactionstats | grep "Validation"
+```
+
+---
+
+## Backup and Restore
+
+Cassandra backup is snapshot-based. There is **no WAL-equivalent for point-in-time recovery** — you can only restore to a snapshot point.
+
+**Creating a snapshot:**
+
+```bash
+# Snapshot a keyspace (creates hard-linked SSTable copies)
+nodetool snapshot my_app
+
+# Snapshots are stored per-table under:
+# /var/lib/cassandra/data/<keyspace>/<table>/snapshots/<snapshot-name>/
+
+# List snapshots
+nodetool listsnapshots
+
+# Clear old snapshots (they pin disk space via hard links)
+nodetool clearsnapshot my_app
+```
+
+**Backing up to object storage (run on every node — each owns different data):**
+
+```bash
+# Snapshot all nodes first, then copy from each node
+nodetool snapshot my_app -t backup-$(date +%Y%m%d)
+
+# Sync to S3 (repeat for each table)
+aws s3 sync \
+  /var/lib/cassandra/data/my_app/users/snapshots/backup-20241018/ \
+  s3://my-backups/cassandra/dc1/node1/my_app/users/backup-20241018/
+```
+
+**Restore with sstableloader (cross-cluster or topology change):**
+
+`sstableloader` streams SSTables to the correct nodes based on the current token ownership — it handles topology changes between backup and restore.
+
+```bash
+# Load SSTables into a running cluster (from a different node or cluster)
+sstableloader -d <seed-node-ip> \
+  /path/to/snapshots/my_app/users/
+
+# sstableloader reads the cluster's token ring and routes data correctly
+# Works even if the cluster has different nodes or vnodes than the backup source
+```
+
+**No PITR:** Unlike PostgreSQL (WAL replay) or MySQL (binlog), Cassandra cannot replay individual operations between snapshots. For workloads requiring PITR, consider streaming writes to a separate log (Kafka → replay) or using a supplementary RDBMS for transactional data.
+
+---
+
+## Data Modeling Rules
+
+Cassandra's query model is the inverse of a relational database: **design the table for the query, not the query for the table.**
+
+**Primary key components:**
+
+```sql
+CREATE TABLE sensor_readings (
+    device_id  UUID,          -- partition key: which node stores this
+    ts         TIMESTAMP,     -- clustering key: sort order within partition
+    value      DOUBLE,
+    PRIMARY KEY (device_id, ts)  -- (partition_key, clustering_key...)
+) WITH CLUSTERING ORDER BY (ts DESC);  -- newest first
+```
+
+- **Partition key** → determines which node(s) store the data via token hash
+- **Clustering key** → sorts rows within a partition on disk; enables range queries within a partition
+
+**Rules for good data modeling:**
+
+| Rule | Reason |
+|---|---|
+| **Design queries first** | No joins, no subqueries — each table serves one access pattern |
+| **One table per query pattern** | Denormalize: duplicate data rather than join at read time |
+| **Avoid `ALLOW FILTERING`** | Full cluster scan — reads from every node; never in production |
+| **Partition size < ~100MB** | Very large partitions degrade GC and compaction performance |
+| **Row count < ~100K per partition** | Wide partitions (many clustering rows) are fine up to this limit |
+| **Avoid high-cardinality secondary indexes** | Cassandra secondary indexes are per-node local indexes; querying them on a high-cardinality column (like `user_id`) hits every node |
+
+**Anti-patterns:**
+
+```sql
+-- BAD: ALLOW FILTERING = full cluster scan
+SELECT * FROM orders WHERE status = 'pending' ALLOW FILTERING;
+
+-- GOOD: separate table for this query pattern
+CREATE TABLE orders_by_status (
+    status    TEXT,
+    order_id  UUID,
+    created   TIMESTAMP,
+    PRIMARY KEY (status, created, order_id)
+) WITH CLUSTERING ORDER BY (created DESC, order_id ASC);
+
+-- BAD: high-cardinality secondary index
+CREATE INDEX ON orders (user_id);  -- one lookup = N node hits
+
+-- GOOD: denormalized lookup table
+CREATE TABLE orders_by_user (
+    user_id   UUID,
+    order_id  UUID,
+    created   TIMESTAMP,
+    PRIMARY KEY (user_id, created, order_id)
+) WITH CLUSTERING ORDER BY (created DESC, order_id ASC);
+```
+
+**Materialized views:** Cassandra can auto-maintain a denormalized view from a base table. They work but have known limitations in multi-node scenarios — inconsistencies under heavy load. For production, prefer application-side dual writes to maintain lookup tables explicitly.
+
+---
+
 <div class="quiz-card">
-  <p class="quiz-q">nodetool tpstats shows ReadStage with 500 pending and 200 dropped messages. What does "dropped" mean in this context, and why is it worse than "pending"?</p>
+  <p class="quiz-q">Your Cassandra read latency is spiking. <code>nodetool tablestats</code> shows one table has 50+ SSTables per read. What is happening and how do you fix it?</p>
   <button class="quiz-reveal">Reveal answer</button>
   <div class="quiz-a" hidden>
-    Pending means requests are queued waiting for a thread — they'll eventually be served, just with added latency. Dropped means requests waited longer than the read_request_timeout_in_ms (default 5 seconds) and were silently discarded from the queue. The client that sent a dropped request already received a timeout error — Cassandra never responded. Dropped messages are client-visible failures, not just slowness. They indicate the node is overloaded beyond what the queue can absorb. The fix is to reduce compaction I/O load, add nodes to distribute the read load, or reduce concurrency at the application layer.
+    <strong>50+ SSTables per read is compaction lag.</strong> SSTables are accumulating faster than STCS (SizeTieredCompactionStrategy) is compacting them. STCS only compacts SSTables of similar size — if write sizes vary a lot, no size tier fills and compaction never triggers. Each SSTable needs a bloom filter check and potentially a disk seek per read, so 50+ SSTables means 50+ bloom filter checks and potentially many disk seeks per partition read.<br><br>
+    <strong>Immediate fix:</strong> <code>nodetool compact &lt;keyspace&gt; &lt;table&gt;</code> — forces a major compaction that merges all SSTables into one. This is expensive on a large table (heavy I/O, may cause GC pressure) — schedule during low traffic.<br><br>
+    <strong>Long-term fix:</strong> switch to LeveledCompactionStrategy, which maintains ≤10 SSTables per level by design. Also check <code>nodetool compactionstats</code> for a huge pending queue that indicates the compactor is behind.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">A Cassandra node was down for 4 hours and just rejoined. A user ran <code>DELETE FROM orders WHERE user_id = 42</code> during the outage. After the node rejoins, that user's orders reappear. Why?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    <strong>Hint expiry caused the delete to be lost.</strong> When the node was down, the coordinator stored a hint for the delete operation. But hints expire after <code>max_hint_window_in_ms</code> — the default is 3 hours (10,800,000 ms). The node was down 4 hours, so the hint expired and was discarded.<br><br>
+    When the node rejoined, it had the original order data (from before the delete) but no tombstone. Read repair then compared the rejoined node's data against the other replicas. The other replicas had the tombstone but it may have already been compacted away (if <code>gc_grace_seconds</code> passed), or read repair promoted the rejoined node's "live" data over the tombstone via the wrong timestamp comparison.<br><br>
+    <strong>Fix:</strong> Always run <code>nodetool repair</code> immediately after a node rejoins that was down longer than the hint window. This syncs tombstones to the stale node before <code>gc_grace_seconds</code> allows them to be compacted away. This is why the repair schedule matters: a node down longer than gc_grace_seconds without repair is a data consistency hazard.
+  </div>
+</div>
+
+<div class="quiz-card">
+  <p class="quiz-q">Why does Cassandra need <code>gc_grace_seconds</code> (default 10 days) before purging tombstones? Can't it purge tombstones immediately after compaction?</p>
+  <button class="quiz-reveal">Reveal answer</button>
+  <div class="quiz-a" hidden>
+    <strong>Purging tombstones immediately creates a resurrection window.</strong> Here's the failure mode:<br><br>
+    1. You delete a row — tombstone written to Node A and Node B. Node C is down.<br>
+    2. Compaction runs immediately on A and B, purging the tombstone (data is gone).<br>
+    3. Node C comes back up. It has the original data row but no tombstone.<br>
+    4. Read repair runs: Node C has data, A and B have nothing. Read repair sees C's data as present and A/B as "missing" — it promotes C's version and writes the deleted data back to A and B.<br><br>
+    <code>gc_grace_seconds</code> (default 864,000 = 10 days) is the window during which Cassandra guarantees: "any node that was down during this delete should be repaired before this deadline." If you run <code>nodetool repair</code> within gc_grace_seconds, the tombstone propagates before it's purged. The tradeoff: tombstones consume disk space during this window. For workloads with heavy deletes, reduce gc_grace_seconds only if you have strict repair SLAs (e.g., repair every node within 1 day → gc_grace can be 86,400 seconds).
   </div>
 </div>
