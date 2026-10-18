@@ -25,6 +25,7 @@ Deep dives into each database: storage engine internals, WAL, replication, index
 | [replication.md](./replication.md) | All DBs | Sync/async/semi-sync, WAL shipping, logical vs physical, per-DB deep dives, Raft/Paxos, cross-region, lag measurement |
 | [caching.md](./caching.md) | Redis / Memcached | Cache tiers, eviction policies, cache-aside/write-through/write-behind, stampede (XFetch), warming, invalidation |
 | [backup-strategies.md](./backup-strategies.md) | All DBs | Hot vs cold, physical vs logical, WAL/oplog PITR mechanics, incremental backups, backup verification, RTO/RPO, tool matrix |
+| [cassandra-internals.md](./cassandra-internals.md) | Apache Cassandra | Ring topology, vnodes, write/read path, tunable consistency, compaction strategies (STCS/LCS/TWCS), nodetool reference, anti-entropy repair |
 
 ## Common Concepts Across All Databases
 

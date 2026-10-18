@@ -239,3 +239,140 @@ kill $BPFTRACE_PID
 If bpftrace adds > 2% CPU overhead, narrow the probe: add a `comm == "postgres"` filter, or switch from a kprobe on every `vfs_read` to a tracepoint on a specific syscall, or add a sampling condition (`if (rand % 100 < 10) { ... }` to trace 10% of events).
 
 **The production rule:** tracepoints on rare events + rate-limited output = always safe. kprobes on hot paths + unbounded output = test overhead before using.
+
+---
+
+## 6. Off-CPU Analysis (Advanced)
+
+CPU profiling shows what's running; off-CPU analysis shows what's WAITING — blocked on I/O, a lock, or sleep. A process with 10% CPU utilization and 200ms p99 latency is almost certainly spending its time off-CPU.
+
+**On-CPU sampling** (baseline):
+```bash
+# Sample call stacks at 99 Hz across all CPUs for 30 seconds
+bpftrace -e 'profile:hz:99 { @[ustack, comm] = count(); } interval:s:30 { exit(); }'
+# Pipe to stackcollapse-bpftrace.pl | flamegraph.pl for SVG
+```
+
+**Off-CPU tracing** — hook `sched_switch` to measure blocked time:
+```bash
+tracepoint:sched:sched_switch {
+  if (args->prev_pid == $1) { @start[args->prev_pid] = nsecs; }
+  if (args->next_pid == $1 && @start[args->next_pid]) {
+    @offcpu_ns = hist(nsecs - @start[args->next_pid]);
+    delete(@start[args->next_pid]);
+  }
+}
+```
+
+`offcputime.bt` in bpftrace's `tools/` directory captures off-CPU stacks for any PID automatically.
+
+**Flame graph colors (Brendan Gregg convention):**
+- Green = on-CPU (running). A wide green tower = CPU hot path.
+- Blue/red = off-CPU (waiting). A tall blue tower = blocking on I/O or a mutex — the real culprit behind latency with low CPU usage.
+
+**Reading blocked stacks:**
+- `io_schedule` at bottom → blocked on disk I/O
+- `mutex_lock` / `down_read` → kernel lock contention
+- `futex_wait` → user-space mutex (often DB connection pool exhaustion)
+- `epoll_wait` → idle event-loop process (expected — not a problem)
+
+---
+
+## 7. Memory Allocation Tracing
+
+Trace `malloc` size distribution to find which allocation sizes dominate:
+```bash
+uprobe:/lib/x86_64-linux-gnu/libc.so.6:malloc { @bytes = hist(arg0); }
+```
+
+Track allocations by call stack to pinpoint allocation-heavy code paths:
+```bash
+uprobe:/lib/x86_64-linux-gnu/libc.so.6:malloc { @alloc[ustack] = sum(arg0); }
+interval:s:10 { print(@alloc); clear(@alloc); exit(); }
+```
+
+Monitor total allocated memory over time:
+```bash
+uprobe:/lib/x86_64-linux-gnu/libc.so.6:malloc { @total += arg0; }
+uprobe:/lib/x86_64-linux-gnu/libc.so.6:free   { @total -= arg0; }
+interval:s:5 { printf("net allocated: %lld bytes\n", @total); }
+```
+
+> **Finding libc path:** `ldd /proc/$PID/exe | grep libc` — the path varies by distro and architecture.
+
+---
+
+## 8. @map Aggregations Reference
+
+All bpftrace built-in aggregation functions:
+
+| Function | Description | Example |
+|---|---|---|
+| `count()` | count events | `@[comm] = count()` |
+| `sum(n)` | sum values | `@bytes = sum(args->count)` |
+| `avg(n)` | running average | `@lat = avg(elapsed)` |
+| `min(n)` | minimum observed | `@min_lat = min(elapsed)` |
+| `max(n)` | maximum observed | `@max_lat = max(elapsed)` |
+| `hist(n)` | log2 histogram | `@lat = hist(elapsed)` |
+| `lhist(n,min,max,step)` | linear histogram | `@lat = lhist(elapsed, 0, 10000, 100)` |
+
+**Clearing and printing at intervals:**
+```bash
+interval:s:1 {
+  print(@bytes);   // print current state
+  clear(@bytes);   // reset for next window
+}
+END { clear(@bytes); }  // always clean up on Ctrl-C
+```
+
+**Watchdog pattern — alert on threshold:**
+```bash
+interval:s:1 {
+  if (@errors > 100) { printf("ERROR RATE SPIKE: %d/sec\n", @errors); }
+  clear(@errors);
+}
+```
+
+---
+
+## 9. Probe Type Reference
+
+| Probe type | What it hooks | Stable ABI? | Notes |
+|---|---|---|---|
+| `kprobe:func` | kernel function entry | No | may be renamed/inlined between kernels |
+| `kretprobe:func` | kernel function return | No | `retval` holds return value |
+| `tracepoint:subsys:name` | kernel tracepoints | **Yes** | prefer over kprobes |
+| `uprobe:path:func` | userspace function entry | No | requires debug symbols or USDT |
+| `uretprobe:path:func` | userspace function return | No | |
+| `usdt:path:provider:name` | USDT probe point | **Yes** (if defined) | low overhead, stable |
+| `software:name:N` | software perf event | Yes | e.g., `software:cpu-clock:1e7` |
+| `hardware:name:N` | hardware PMU counter | HW-dependent | e.g., `hardware:cache-misses:1e6` |
+| `interval:s:N` | timer | N/A | fires every N seconds |
+| `BEGIN` / `END` | program lifecycle | N/A | setup and teardown |
+
+**Key rule:** When a tracepoint exists for what you need, use it over a kprobe — `bpftrace -l 'tracepoint:syscalls:*'` lists all available. USDT probes (Node.js, Python, PostgreSQL, MySQL all ship them) are the most stable option for userspace.
+
+---
+
+## 10. Production One-Liners Reference
+
+| Use case | One-liner |
+|---|---|
+| TCP retransmit rate by source | `bpftrace -e 'tracepoint:tcp:tcp_retransmit_skb { @[args->saddr] = count(); }'` |
+| ext4 read latency histogram | `bpftrace -e 'kprobe:ext4_file_read_iter { @s[tid]=nsecs; } kretprobe:ext4_file_read_iter { @us=hist((nsecs-@s[tid])/1e3); }'` |
+| Syscall count by process | `bpftrace -e 'tracepoint:raw_syscalls:sys_enter { @[comm, args->id] = count(); }'` |
+| OOM kill events | `bpftrace -e 'tracepoint:oom:oom_score_adj_update { printf("OOM kill: %s (pid %d)\n", comm, pid); }'` |
+| Page fault rate by process | `bpftrace -e 'software:page-faults:1 { @[comm] = count(); } interval:s:1 { print(@); clear(@); }'` |
+| File descriptor leak detection | `bpftrace -e 'tracepoint:syscalls:sys_enter_openat { @opens[comm]++; } tracepoint:syscalls:sys_enter_close { @closes[comm]++; }'` |
+| Lock contention by stack | `bpftrace -e 'kprobe:mutex_lock_slowpath { @[ustack] = count(); }'` |
+| New process in container | `bpftrace -e 'tracepoint:sched:sched_process_exec { printf("%s → %s\n", comm, str(args->filename)); }'` |
+| malloc size distribution | `bpftrace -e 'uprobe:/lib/x86_64-linux-gnu/libc.so.6:malloc { @bytes = hist(arg0); }'` |
+| runqueue latency | `bpftrace -e 'tracepoint:sched:sched_wakeup { @s[args->pid]=nsecs; } tracepoint:sched:sched_switch { @rq_us=hist((nsecs-@s[args->next_pid])/1e3); }'` |
+
+---
+
+<div class="quiz-card"><p class="quiz-q">What is the difference between `profile:hz:99` and `tracepoint:sched:sched_switch` for understanding where time is spent?</p><button class="quiz-reveal">Reveal answer</button><div class="quiz-a" hidden>`profile:hz:99` is sampling — it interrupts every CPU at ~99 Hz and records what's running. It captures on-CPU time but misses any time a process spends blocked. `tracepoint:sched:sched_switch` is event-driven — it fires on every context switch, letting you measure exactly how long a process was off-CPU (blocked on I/O, a mutex, or sleep). Together they give the full picture: sampling for CPU hot paths, sched tracing for blocking latency analysis.</div></div>
+
+<div class="quiz-card"><p class="quiz-q">Why should you prefer `tracepoint:syscalls:sys_enter_openat` over `kprobe:do_sys_openat2` for tracing file opens?</p><button class="quiz-reveal">Reveal answer</button><div class="quiz-a" hidden>Tracepoints have a stable, versioned ABI — the same bpftrace one-liner works across kernel 5.4, 5.15, and 6.1 without modification. kprobes hook kernel function names, which can be renamed, inlined, or removed by compiler optimizations between kernel versions. If you write `kprobe:do_sys_openat2` and the kernel is updated, the probe silently stops firing. When a tracepoint exists for what you need, always prefer it.</div></div>
+
+<div class="quiz-card"><p class="quiz-q">You run `uprobe:/usr/bin/python3:PyEval_EvalFrameEx { @[ustack] = count(); }` and get no output. Why?</p><button class="quiz-reveal">Reveal answer</button><div class="quiz-a" hidden>Python binaries are typically stripped of C debug symbols, so `PyEval_EvalFrameEx` does not resolve. Python 3.6+ ships with USDT probes instead: `bpftrace -e 'usdt:/usr/bin/python3:python:function__entry { @[str(arg0)] = count(); }'` gives Python-level function tracing without needing C symbols. For older or stripped binaries, `bpftrace -l 'usdt:/usr/bin/python3:*'` lists all available USDT probes.</div></div>

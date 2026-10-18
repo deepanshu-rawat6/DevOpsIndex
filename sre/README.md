@@ -12,6 +12,7 @@ Runbooks, debugging scenarios, and SRE concepts for Kubernetes, Linux, and AWS.
 | [k8s-scenarios.md](./k8s-scenarios.md) | CrashLoopBackOff, Pending, all-replicas-on-one-node outage, ImagePullBackOff, Terminating, NotReady, High Latency, PVC, Quota, DNS, NetworkPolicy, HPA, rollout stuck, webhooks, disk pressure, etcd slow, RBAC 403 |
 | [linux-debugging.md](./linux-debugging.md) | High CPU, I/O wait, zombies, FD exhaustion, TIME_WAIT, disk I/O, inodes, NFS, OOM killer, kernel panic |
 | [aws-scenarios.md](./aws-scenarios.md) | EC2 SSH timeout, Lambda timeout, ALB 502, S3 denied, RDS refused, ECS restart, CF stuck, API GW 429, EKS nodes not joining, high bill |
+| [gcp-scenarios.md](./gcp-scenarios.md) | GKE Node NotReady, Cloud SQL Connection Refused, Pub/Sub backlog, Cloud Run 503, Artifact Registry auth failure, GKE Ingress 502, Spanner high latency |
 | [cicd-scenarios.md](./cicd-scenarios.md) | GHA OIDC auth, job hangs, ArgoCD out-of-sync, ArgoCD ImagePull, Jenkins Docker, wrong env deploy, staging crash, flaky tests |
 | [iac-scenarios.md](./iac-scenarios.md) | terraform resource exists, unexpected destroy, state lock, drift, module conflict, sensitive values, Helm timeout, CF ROLLBACK_COMPLETE |
 | [sre-concepts.md](./sre-concepts.md) | SLOs, SLAs, error budgets, MTTD/MTTR, incident management lifecycle, blameless postmortem template, on-call best practices |

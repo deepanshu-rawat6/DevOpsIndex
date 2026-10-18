@@ -110,7 +110,7 @@ const SECTIONS = [
   },
   {
     slug: 'mlops', title: 'MLOps', order: 13,
-    readOrder: ['README', 'experiment-tracking', 'training-pipelines', 'data-drift', 'feature-stores'],
+    readOrder: ['README', 'experiment-tracking', 'training-pipelines', 'data-drift', 'feature-stores', 'model-cicd', 'data-versioning'],
     sectionPrereqs: [
       { title: 'AI Infrastructure', slug: 'ai-infra' },
       { title: 'Database Internals', slug: 'databases' },
@@ -118,7 +118,7 @@ const SECTIONS = [
   },
   {
     slug: 'databases', title: 'Database Internals', order: 14,
-    readOrder: ['README', 'postgres-internals', 'mysql-internals', 'mongodb-internals', 'redis-internals', 'etcd', 'lsm-trees', 'kafka-internals', 'clickhouse-internals', 'elasticsearch-internals', 'replication', 'caching', 'backup-strategies'],
+    readOrder: ['README', 'postgres-internals', 'mysql-internals', 'mongodb-internals', 'redis-internals', 'etcd', 'lsm-trees', 'kafka-internals', 'clickhouse-internals', 'elasticsearch-internals', 'replication', 'caching', 'backup-strategies', 'cassandra-internals'],
     sectionPrereqs: [
       { title: 'Linux',      slug: 'linux' },
       { title: 'Networking', slug: 'networking' },
@@ -175,7 +175,7 @@ const SECTIONS = [
   },
   {
     slug: 'sre', title: 'SRE & Debugging', order: 18,
-    readOrder: ['README', 'k8s-debugging', 'k8s-scenarios', 'linux-debugging', 'aws-scenarios', 'cicd-scenarios', 'iac-scenarios', 'sre-concepts', 'self-healing-aiops', 'db-monitoring'],
+    readOrder: ['README', 'k8s-debugging', 'k8s-scenarios', 'linux-debugging', 'aws-scenarios', 'gcp-scenarios', 'cicd-scenarios', 'iac-scenarios', 'sre-concepts', 'self-healing-aiops', 'db-monitoring'],
     sectionPrereqs: [
       { title: 'Linux',      slug: 'linux' },
       { title: 'Kubernetes', slug: 'kubernetes' },
@@ -220,7 +220,7 @@ const SECTIONS = [
   },
   {
     slug: 'go', title: 'Go', order: 23,
-    readOrder: ['README', 'concurrency', 'context', 'sync-primitives', 'runtime-scheduler'],
+    readOrder: ['README', 'concurrency', 'context', 'sync-primitives', 'runtime-scheduler', 'error-handling', 'http-patterns'],
     sectionPrereqs: [
       { title: 'Linux',      slug: 'linux' },
       { title: 'Networking', slug: 'networking' },
@@ -247,7 +247,7 @@ const SECTIONS = [
   },
   {
     slug: 'ebpf', title: 'eBPF', order: 22,
-    readOrder: ['README', 'bpf-fundamentals', 'cilium', 'tetragon', 'bpftrace'],
+    readOrder: ['README', 'bpf-fundamentals', 'cilium', 'tetragon', 'bpftrace', 'xdp'],
     sectionPrereqs: [
       { title: 'Linux',       slug: 'linux' },
       { title: 'Kubernetes',  slug: 'kubernetes' },

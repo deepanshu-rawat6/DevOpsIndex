@@ -327,8 +327,10 @@ func (e *ConfigError) Unwrap() error { return e.Err }
 | [go/context.md](./context.md) | Cancellation propagation, errgroup, context in HTTP servers, common mistakes | SDE-1/2 |
 | go/sync-primitives.md | Mutex/RWMutex, sync.WaitGroup, sync.Once, atomic, sync.Pool, sync.Map | SDE-2 |
 | [go/runtime-scheduler.md](./runtime-scheduler.md) | GMP scheduler internals, work stealing, async preemption, netpoller, GOMAXPROCS | SDE-2/3 |
+| [go/error-handling.md](./error-handling.md) | error interface, sentinel errors, %w wrapping, errors.Is/As, log/slog, panic vs error | SDE-1/2 |
+| [go/http-patterns.md](./http-patterns.md) | net/http server, middleware chaining, graceful shutdown, HTTP client pool, httptest | SDE-2 |
 
-**Read order:** README → concurrency → context → sync-primitives → runtime-scheduler
+**Read order:** README → concurrency → context → sync-primitives → runtime-scheduler → error-handling → http-patterns
 
 ---
 

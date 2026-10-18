@@ -60,7 +60,8 @@ The verifier rejects programs that: access uninitialized memory, dereference nul
 
 | File | What it covers |
 |------|---------------|
-| `bpf-fundamentals` | Program types, BPF maps, CO-RE, libbpf, bpftool |
-| `cilium` | eBPF-based CNI, Hubble observability, identity-based network policies |
+| `bpf-fundamentals` | Program types, BPF maps, CO-RE, BTF, verifier errors, libbpf skeleton, BCC tools |
+| `cilium` | eBPF-based CNI, Hubble observability, CiliumNetworkPolicy, BGP, Gateway API, kube-proxy replacement |
 | `tetragon` | Runtime security enforcement, TracingPolicy CRD, SIEM integration |
-| `bpftrace` | One-liners for production debugging, off-CPU analysis, flame graphs |
+| `bpftrace` | One-liners for production debugging, off-CPU analysis, memory allocation tracing, flame graphs |
+| `xdp` | XDP action model, hook placement, BPF maps in XDP, AF_XDP sockets, DDoS mitigation, xdp-tools |

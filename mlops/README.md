@@ -68,6 +68,8 @@ graph LR
 | [training-pipelines.md](./training-pipelines.md) | Kubeflow Pipelines components/DAGs, Airflow operators, retraining triggers, K8s Jobs |
 | [data-drift.md](./data-drift.md) | Evidently reports, feature drift detection, retraining triggers, shadow scoring, A/B testing |
 | [feature-stores.md](./feature-stores.md) | Feast architecture, online vs offline store, point-in-time joins, training/serving skew |
+| [model-cicd.md](./model-cicd.md) | ML deployment pipeline, GitHub Actions integration, MLflow Model Registry, evaluation gates, KServe canary, rollback |
+| [data-versioning.md](./data-versioning.md) | DVC pointer files and pipelines, Delta Lake ACID + time travel, OpenLineage, feature store versioning |
 
 ---
 
@@ -113,6 +115,12 @@ graph LR
     </div>
     <div class="stepper-panel">
       <strong>4. feature-stores.md</strong> &mdash; advanced: shared feature layer for training/serving consistency.
+    </div>
+    <div class="stepper-panel">
+      <strong>5. model-cicd.md</strong> &mdash; deploy models to production: GitHub Actions, MLflow registry, KServe canary, rollback.
+    </div>
+    <div class="stepper-panel">
+      <strong>6. data-versioning.md</strong> &mdash; version datasets and pipelines: DVC, Delta Lake, OpenLineage, feature store versioning.
     </div>
   </div>
   <div class="stepper-controls">
